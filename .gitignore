@@ -1,2 +1,16 @@
+__pycache__/
+
 .references/
 .codex
+.env
+.env.*
+!.env*.example
+.venv/
+.venv-test/
+target/
+tools/local/
+ui/node_modules/
+ui/playwright-report/
+ui/test-results/
+
+data/

@@ -1,0 +1,1 @@
+"""FauniSearch sidecar package."""
