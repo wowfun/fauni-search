@@ -7,6 +7,7 @@
 - 请求封套（Request Envelope）
 - 响应封套（Response Envelope）
 - 错误载荷（Error Payload）
+- 资源引用对象（Resource Reference）
 - 游标令牌（Cursor Token）
 - 搜索请求载荷（Search Request Payload）
 - 搜索响应载荷（Search Response Payload）
@@ -55,6 +56,7 @@
   - `validation_failed`
   - `not_supported`
   - `not_enabled`
+  - `not_ready`
   - `not_found`
   - `conflict`
   - `runtime_unavailable`
@@ -77,20 +79,37 @@
   - 有序 `results`
   - 可选 `next_cursor`
   - 可选 `debug`
-- 每个搜索结果项的稳定字段至少包括：`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选的 `neighbor_context`
+- 每个搜索结果项的稳定字段至少包括：`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`
+- `preview` 必须编码为结构化资源引用对象；该对象至少包含一个可直接取用、对客户端保持不透明的 `url`，并可按需附带 `handle`
+- `neighbor_context` 不在搜索结果列表中默认内联返回；对象详情与展开接口负责承接该信息
 - 公共搜索响应不承诺统一 `score` 字段；各索引线原始分数只应出现在 `debug` 载荷中
-- 搜索请求若同时携带多种查询输入，或显式请求未启用索引线，应通过统一错误载荷返回失败
+- 搜索请求若同时携带多种查询输入、显式请求未启用索引线，或命中已启用但未就绪的目标索引线，应通过统一错误载荷返回失败
+- `not_ready` 错误的 `details` 至少应支持按索引线返回结构化条目；每个条目至少可表达 `index_line`，并可附带相关 `job` / `phase` 摘要
 - 搜索结果字段的含义、过滤 / 排序规则、邻近上下文语义与显式拒绝规则由 [004-search](../004-search/spec.md) 定义
 
 ## 非搜索控制面接口契约
 
 - 非搜索控制面接口族由 [008-ui-ux](../008-ui-ux/spec.md) 定义其存在与职责；本专题固定这些接口族的公开编码
+- 若通过 HTTP 暴露，库创建接口的稳定入口应包括 `POST /libraries`
+- `POST /libraries` 的请求载荷至少包含：`name` 与 `config`
+- `config` 作为稳定扩展对象，承接例如 `enabled_index_lines` 一类库级配置；本专题不固定其完整字段集
 - 库管理、来源根与规则管理、配置与绑定管理、收藏管理、搜索历史管理等资源型接口，应采用统一的资源快照载荷与列表 / 详情 / 变更响应形状
+- 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
+- 若通过 HTTP 暴露，视觉对象预览资源的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}/preview`
+- 视觉对象详情响应至少应返回目标对象的稳定详情快照、稳定 `preview` 资源引用对象，并可附带 `neighbor_context`
 - 导入、刷新、重扫、重建、清理、维护，以及任务取消 / 重试 / 恢复等动作型接口，应采用显式动作载荷，而不是通过隐式读写触发后台执行
+- 若通过 HTTP 暴露，当前正式导入动作入口应包括 `POST /libraries/{library_id}/imports`
+- `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
 - 动作型成功响应应在 `data` 中返回至少以下信息：
   - `accepted`
+  - `rejected`
   - `job_handle`
   - 初始任务快照或等价任务引用
+- 导入动作的 `accepted` / `rejected` 逐项回执至少应包含：
+  - 原始路径
+  - 规范化路径（若可得）
+  - `reason_code`
+  - `message`
 - 任务快照载荷至少应包含：`job_id`、`kind`、`status`、`phase`、`progress`、`cancelable`、`current_attempt`
 - 运行时健康快照载荷至少应包含：`runtime_kind`、`status`、`last_probe_at`、`diagnostics`
 - 管理列表型响应与搜索分页一样复用 `next_cursor` 语义，但不要求与搜索结果使用相同的列表字段名称
@@ -104,6 +123,10 @@
   - 能力 / 可用性探测
   - 推理 / 编码请求
   - 失败、超时与不可用返回
+- 当前阶段 sidecar 的稳定入口至少包括：
+  - `GET /health`
+  - `GET /capabilities`
+  - `POST /embed`
 - 健康探测响应必须返回健康快照载荷，至少表达：可用 / 降级 / 不可用状态、最近一次探测结果与诊断摘要
 - 能力 / 可用性探测响应必须能表达：声明能力、当前可用能力裁剪结果，以及是否可服务目标操作
 - 推理 / 编码请求至少应显式携带：
@@ -112,6 +135,11 @@
   - 已解析提供方选择摘要或等价执行上下文
   - 与目标索引线或目标输出相关的最小上下文
   - 可选 `debug`
+- 当前阶段 `POST /embed` 至少应支持以下 `operation_kind`：
+  - `query_embedding`，用于承接文本查询编码；其输入至少应能表达一个或多个查询文本，以及与目标索引线相关的最小上下文
+  - `document_embedding`，用于承接当前阶段 PDF 页图或图片对象的编码；其输入至少应能表达一个或多个本地文件引用，以及与目标索引线相关的最小上下文
+- `document_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达 PDF 的目标页
+- `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了视觉单元级 `locator`，响应应能返回与该输入对应的定位摘要
 - 推理 / 编码成功响应必须返回与 `operation_kind` 对应的结构化 `data`，例如向量输出、派生结果描述或媒体处理摘要；不得依赖未文档化的 sidecar 私有字段
 - sidecar 的超时、不可达、能力不满足与内部失败，必须复用稳定错误载荷与错误码族表达，而不是只依赖传输层异常
 - sidecar 协议只承接公开输入 / 输出 / 诊断契约；模型加载、驻留、容量逐出与运行时托管语义由 [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义

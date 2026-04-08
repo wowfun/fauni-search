@@ -59,6 +59,7 @@
 - 默认情况下，搜索会并行查询该库全部已启用索引线，并以融合后的排序结果返回
 - 请求可以通过 `target_index_lines` 显式限制本次查询的索引线子集，但只能引用该库已启用的索引线
 - 若请求命中未启用索引线，应返回明确不可用状态
+- 若请求显式命中，或默认会作用到任一已启用但尚未持有 active index 的索引线，应返回明确未就绪状态，而不是静默忽略该索引线、自动降级到其他索引线或返回空结果
 - 搜索期提供方的能力、绑定与已解析提供方选择（Resolved Provider Selection）语义，由 [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义
 - 公共控制项固定包括：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_index_lines`
 - 正式公共过滤器固定包括：`visual_unit.kind`、`path_prefix`、`source_type`、`time_range`
@@ -70,9 +71,11 @@
 - `document_page`、`image` 与 `video_segment` 允许在同一结果集中默认混排，并可按 `visual_unit.kind` 过滤
 - 公共结果不返回统一 `score` 字段；结果顺序本身承载稳定排序语义
 - 公共结果卡片的稳定字段包括：`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`
+- `preview` 承载可消费的预览引用语义，而不是要求直接暴露原始本地路径
 - 同一源内容下的多个命中默认全部返回
 - 按源内容聚合只作为可选视图语义存在，不取代默认的视觉单元返回粒度
-- 结果展开后的邻近上下文固定为源内容级语义：
+- 默认公开结果列表只返回最小结果卡片，不默认内联 `neighbor_context`
+- 通过对象详情或展开路径返回的邻近上下文固定为源内容级语义：
   - 文档页返回前后页
   - 视频片段返回前后片段
   - 图片返回同源基础信息
@@ -82,6 +85,7 @@
 - `debug=true` 时，稳定返回的调试信息至少包括：命中的 `index_line`、各索引线原始分数，以及 `provider`、`backend`、`repr_kind` 等技术元信息
 - 调试原始分数只用于诊断，不承诺跨索引线或跨查询请求可直接比较
 - 显式请求未启用索引线时，应返回明确不可用状态
+- 请求命中已启用但未就绪的索引线时，应返回明确未就绪状态，而不是静默返回空结果
 - 公开请求若携带多种查询输入，应返回明确“不支持”
 - 视频查询超出允许的大小或时长上限时，应返回明确拒绝，而不是静默截断或自动降级
 
