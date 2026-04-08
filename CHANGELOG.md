@@ -3,6 +3,7 @@
 ## 2026-04-08
 ### Added
 - Added `specs/010-local-operations-and-automation/spec.md` plus `scripts/local/status.sh` and `scripts/local/check.sh` as the first dedicated local-operations and automation slice.
+- Added the first Playwright UI smoke for the current `100-text-search` happy path, including `--dev` runtime reuse/self-start behavior and stable UI test selectors.
 
 ### Changed
 - Added `.env` / `.env.dev` profile separation, `--dev`, `run.sh --detach`, JSON status/smoke output, pid-aware stopping, and automatic Qdrant startup to make local service orchestration reproducible and automation-friendly.

@@ -125,6 +125,18 @@ bash scripts/local/check.sh
 
 该命令默认执行 Rust 测试、sidecar 窄测试和 UI 构建。隔离开发配置可以使用 `bash scripts/local/check.sh --dev`。
 
+当前最小 UI happy-path smoke 入口：
+
+```bash
+pnpm --dir ui test:e2e
+```
+
+这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。运行前仍需要先完成一次：
+
+```bash
+bash scripts/local/bootstrap-linux.sh --dev
+```
+
 ## 当前访问入口
 
 以下默认值来自当前 `.env.example`；如果你修改了根 `.env`，请以 `.env` 为准。`--dev` 使用 `.env.dev`，默认模板来自 `.env.dev.example`。
@@ -191,6 +203,7 @@ UI 当前包含：
 - `stop.sh` 会停止指定本地服务，支持 `--all` 停止 app、sidecar、UI 和 Qdrant，并会优先使用 pid 文件再回退到端口 / 命令发现。
 - `smoke-text-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 文本搜索 smoke；加 `--json` 时输出机器可读摘要。
 - `check.sh` 是无 GPU 快速检查入口，不启动长驻服务。
+- `pnpm --dir ui test:e2e` 是当前阶段最小 Playwright UI smoke，固定使用 `--dev` 配置；若 `--dev` 服务未运行则会自行启动并在结束后自清理。
 - `download-model.sh` 会读取本次运行选中的 env 文件中的 `TEXT_SEARCH_MODEL_ID` / `TEXT_SEARCH_MODEL_REVISION`，并继承 `HF_ENDPOINT` / `HF_HUB_ENABLE_HF_TRANSFER` 来控制 Hugging Face 下载行为。
 - 当 `HF_HUB_ENABLE_HF_TRANSFER=1` 时，下载会更激进，但重启后不会续传未完成的大文件；如果你更看重稳定续传，可以把它改成 `0`。
 
@@ -202,6 +215,7 @@ UI 当前包含：
 - `status`：查看本地服务状态，入口是 `status.sh`
 - `stop`：停止本地服务，入口是 `stop.sh`
 - `test`：无 GPU 快速检查，入口是 `check.sh`
+- `ui-smoke`：最小浏览器闭环验证，入口是 `pnpm --dir ui test:e2e`
 - `smoke`：真实链路验证，入口是 `smoke-text-search.sh`
 
 更多排障信息见 [排障](./troubleshooting.md)。

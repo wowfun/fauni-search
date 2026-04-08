@@ -236,6 +236,32 @@ tail -n 80 data/runtime/logs/qdrant.log
 - 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/logs/sidecar.log`
 - 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/logs/qdrant.log`
 
+## `pnpm --dir ui test:e2e` 失败
+
+症状：
+- Playwright 启动前直接报 `.env.dev is missing`
+- Playwright 报 `--dev runtime is partially running`
+- Playwright 在浏览器启动阶段报类似 `error while loading shared libraries: libatk-1.0.so.0`
+- UI smoke 跑到一半没有结果，或任务长期停在非终态
+
+检查：
+
+```bash
+ls -l .env.dev .env.dev.example
+bash scripts/local/status.sh --dev --json
+tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/sidecar.log
+tail -n 80 data/runtime/dev/logs/ui.log
+tail -n 80 data/runtime/dev/logs/qdrant.log
+```
+
+处理：
+- 先确认你至少执行过一次 `bash scripts/local/bootstrap-linux.sh --dev`
+- 如果 `status.sh --dev --json` 显示 app、sidecar、UI 只有部分在跑，先执行 `bash scripts/local/stop.sh --dev --all` 清干净，再重新运行 `pnpm --dir ui test:e2e`
+- 如果错误发生在 Chromium 启动前，而且日志里出现 `libatk-1.0.so.0`、`libgtk-3.so.0` 之类缺库信息，问题在宿主机的 Playwright 浏览器运行库，不在仓库测试代码；先按宿主机方式补齐这些系统库，再重跑
+- 这条 Playwright 命令固定只操作 `--dev` 配置；它不会复用默认 `.env` profile，也不应该去停止默认 profile 的服务
+- 如果失败发生在导入或搜索阶段，优先按 `smoke-text-search.sh` 的排障路径继续看 app / sidecar / Qdrant 日志
+
 ## 模型下载失败
 
 症状：

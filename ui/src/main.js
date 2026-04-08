@@ -209,7 +209,7 @@ function renderImportReceipt() {
 function renderVisualPreview() {
   if (!state.selectedVisualUnit) {
     return `
-      <div class="preview-placeholder">
+      <div class="preview-placeholder" data-testid="visual-preview">
         <p>选择一个结果或导入项后，这里会显示图片或 PDF 页预览。</p>
       </div>
     `;
@@ -223,6 +223,7 @@ function renderVisualPreview() {
     return `
       <img
         class="preview-image"
+        data-testid="visual-preview"
         src="${escapeHtml(preview.url)}"
         alt="${escapeHtml(title)}"
         loading="lazy"
@@ -233,6 +234,7 @@ function renderVisualPreview() {
   return `
     <iframe
       class="preview-frame"
+      data-testid="visual-preview"
       src="${escapeHtml(preview.url)}"
       title="${escapeHtml(title)}"
       loading="lazy"
@@ -249,7 +251,7 @@ function renderVisualUnitDetail() {
   const preview = state.selectedVisualUnit.preview;
   const page = pageLabel(visualUnit.locator);
   return `
-    <div class="detail-card">
+    <div class="detail-card" data-testid="visual-unit-detail">
       <div class="detail-preview">
         ${renderVisualPreview()}
       </div>
@@ -273,7 +275,7 @@ function renderVisualUnitDetail() {
         <div class="detail-block">
           <h5>Preview</h5>
           <div class="inline-actions">
-            <a href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">打开预览</a>
+            <a data-testid="preview-link" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">打开预览</a>
           </div>
         </div>
       </div>
@@ -295,11 +297,11 @@ function renderJobs() {
   }
 
   return `
-    <ul class="job-list">
+    <ul class="job-list" data-testid="job-list">
       ${state.jobs
         .map(
           (job) => `
-            <li class="job-card">
+            <li class="job-card" data-testid="job-card" data-job-id="${escapeHtml(job.job_id)}" data-job-status="${escapeHtml(job.status)}">
               <div class="job-meta">
                 <span class="pill ${jobPillClass(job.status)}">${escapeHtml(job.status)}</span>
                 <span>${escapeHtml(job.job_id)}</span>
@@ -363,13 +365,18 @@ function renderSearchOutcome() {
       </div>
       <p class="helper">点击结果卡片后，右侧会更新预览和详情。</p>
     </div>
-    <ul class="result-list">
+    <ul class="result-list" data-testid="result-list">
       ${state.searchOutcome.results
         .map(
           (item) => {
             const scoreLabel = formatScore(item.score);
             return `
-            <li class="result-card ${item.visual_unit_id === selectedVisualUnitId() ? "active" : ""}">
+            <li
+              class="result-card ${item.visual_unit_id === selectedVisualUnitId() ? "active" : ""}"
+              data-testid="result-card"
+              data-kind="${escapeHtml(item.kind)}"
+              data-visual-unit-id="${escapeHtml(item.visual_unit_id)}"
+            >
               <button
                 type="button"
                 class="result-select"
@@ -378,7 +385,7 @@ function renderSearchOutcome() {
                 <div class="result-topline">
                   <span class="pill ${item.kind === "image" ? "ready" : "pending"}">${escapeHtml(item.kind)}</span>
                   ${pageLabel(item.locator) ? `<span class="pill muted">${escapeHtml(pageLabel(item.locator))}</span>` : ""}
-                  ${scoreLabel ? `<span class="pill score-pill">score ${escapeHtml(scoreLabel)}</span>` : ""}
+                  ${scoreLabel ? `<span class="pill score-pill" data-testid="result-score">score ${escapeHtml(scoreLabel)}</span>` : ""}
                 </div>
                 <strong>${escapeHtml(sourceName(item.source_path))}</strong>
                 <span class="helper">${escapeHtml(item.source_path)}</span>
@@ -401,7 +408,7 @@ function renderWorkspace() {
   const library = selectedLibrary();
 
   root.innerHTML = `
-    <main class="shell">
+    <main class="shell" data-testid="workspace-shell">
       <section class="hero">
         <p class="eyebrow">FauniSearch</p>
         <h1>100-text-search workspace</h1>
@@ -427,16 +434,23 @@ function renderWorkspace() {
                 <h2>库上下文</h2>
               </div>
             </div>
-            <form id="create-library-form" class="stack-form">
+            <form id="create-library-form" class="stack-form" data-testid="create-library-form">
               <label>
                 <span>新库名称</span>
-                <input id="library-name" name="libraryName" type="text" placeholder="例如：demo-library" required />
+                <input
+                  id="library-name"
+                  data-testid="library-name-input"
+                  name="libraryName"
+                  type="text"
+                  placeholder="例如：demo-library"
+                  required
+                />
               </label>
-              <button type="submit">创建 multivector 库</button>
+              <button type="submit" data-testid="create-library-button">创建 multivector 库</button>
             </form>
             <label class="stack-form">
               <span>当前库</span>
-              <select id="library-select" ${state.libraries.length ? "" : "disabled"}>
+              <select id="library-select" data-testid="library-select" ${state.libraries.length ? "" : "disabled"}>
                 ${
                   state.libraries.length
                     ? state.libraries
@@ -452,12 +466,12 @@ function renderWorkspace() {
                 }
               </select>
             </label>
-            <div class="context-card">
+            <div class="context-card" data-testid="current-library-card">
               ${
                 library
                   ? `
                     <p class="eyebrow">Current</p>
-                    <h3>${escapeHtml(library.name)}</h3>
+                    <h3 data-testid="current-library-name">${escapeHtml(library.name)}</h3>
                     <p class="helper">${escapeHtml(library.id)}</p>
                     <div class="pill-row">${formatIndexLines(library.index_lines)}</div>
                     <dl class="stats">
@@ -478,21 +492,27 @@ function renderWorkspace() {
                 <h2>路径导入</h2>
               </div>
             </div>
-            <form id="import-form" class="stack-form">
+            <form id="import-form" class="stack-form" data-testid="import-form">
               <label>
                 <span>本地路径</span>
-                <textarea id="import-paths" rows="6" placeholder="/path/to/file.pdf&#10;/path/to/image.png" ${library ? "" : "disabled"}>${escapeHtml(state.importPathsDraft)}</textarea>
+                <textarea
+                  id="import-paths"
+                  data-testid="import-paths-input"
+                  rows="6"
+                  placeholder="/path/to/file.pdf&#10;/path/to/image.png"
+                  ${library ? "" : "disabled"}
+                >${escapeHtml(state.importPathsDraft)}</textarea>
               </label>
-              <button type="submit" ${library ? "" : "disabled"}>提交导入</button>
+              <button type="submit" data-testid="import-submit-button" ${library ? "" : "disabled"}>提交导入</button>
             </form>
-            <div class="quick-card">
+            <div class="quick-card" data-testid="demo-card">
               <p class="eyebrow">Quick demo</p>
               <h3>真实索引和检索</h3>
               <p class="helper">使用仓库内置的 TATDQA 图片 fixture，可直接触发真实 document/image embedding、Qdrant 写入和文本搜索。浏览器文件选择不会暴露服务器可读的绝对路径，所以当前仍以路径输入为主。</p>
               <code>${escapeHtml(demoFixture.path)}</code>
               <div class="inline-actions">
-                <button id="fill-demo-button" type="button" class="secondary-button" ${library ? "" : "disabled"}>填入 demo 路径和查询</button>
-                <button id="run-demo-button" type="button" ${library ? "" : "disabled"}>导入并搜索 demo</button>
+                <button id="fill-demo-button" data-testid="fill-demo-button" type="button" class="secondary-button" ${library ? "" : "disabled"}>填入 demo 路径和查询</button>
+                <button id="run-demo-button" data-testid="run-demo-button" type="button" ${library ? "" : "disabled"}>导入并搜索 demo</button>
               </div>
             </div>
             ${renderImportReceipt()}
@@ -517,19 +537,26 @@ function renderWorkspace() {
                 <h2>文本搜索</h2>
               </div>
             </div>
-            <form id="search-form" class="stack-form search-form">
+            <form id="search-form" class="stack-form search-form" data-testid="search-form">
               <label>
                 <span>查询文本</span>
-                <input id="search-text" type="text" value="${escapeHtml(state.searchTextDraft)}" placeholder="尝试输入财报页面中的问题或关键词" ${library ? "" : "disabled"} />
+                <input
+                  id="search-text"
+                  data-testid="search-text-input"
+                  type="text"
+                  value="${escapeHtml(state.searchTextDraft)}"
+                  placeholder="尝试输入财报页面中的问题或关键词"
+                  ${library ? "" : "disabled"}
+                />
               </label>
-              <button type="submit" ${library ? "" : "disabled"}>搜索</button>
+              <button type="submit" data-testid="search-submit-button" ${library ? "" : "disabled"}>搜索</button>
             </form>
             ${renderSearchOutcome()}
           </section>
         </section>
 
         <aside class="workspace-column workspace-right">
-          <section class="panel detail-panel">
+          <section class="panel detail-panel" data-testid="detail-panel">
             <div class="panel-head">
               <div>
                 <p class="eyebrow">Detail</p>

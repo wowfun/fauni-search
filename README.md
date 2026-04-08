@@ -100,6 +100,9 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
 
 快速无 GPU 检查入口：
 - `scripts/local/check.sh`
+- `pnpm --dir ui test:e2e`
+
+`pnpm --dir ui test:e2e` 是当前最小 UI smoke。它固定使用 `--dev` 配置：若 `--dev` 服务已在运行则直接复用；若未运行则自行启动并在结束后只清理由自身启动的 `--dev` 服务。运行前仍需要先完成一次 `scripts/local/bootstrap-linux.sh --dev`。
 
 ### 仓库内环境资产
 
@@ -152,6 +155,9 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
   - 支持 `--json` 输出机器可读验证摘要
 - `scripts/local/check.sh`
   - 运行无 GPU 快速检查，不启动长驻服务
+- `pnpm --dir ui test:e2e`
+  - 运行当前阶段最小 Playwright UI smoke，固定使用 `--dev` 隔离配置
+  - 优先复用现有 `--dev` 服务，否则自行启动并在结束后自清理
 - `tools/python/`
   - 放置本地脚本复用的 Python 工具源码
   - 当前承接 HTTP / 端口 / CUDA 探针、模型下载和文本搜索 smoke 的 Python 逻辑
@@ -182,6 +188,7 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
 - `status`：运行 `scripts/local/status.sh`，查看本地服务状态；自动化可加 `--json`
 - `stop`：运行 `scripts/local/stop.sh`
 - `test`：运行 `scripts/local/check.sh` 或更窄的 Rust / sidecar / UI 测试入口
+- `ui-smoke`：运行 `pnpm --dir ui test:e2e`，验证当前阶段最小浏览器闭环
 - `smoke`：运行 `scripts/local/smoke-text-search.sh`，验证真实模型与 Qdrant 链路
 
 ### Python 环境策略
