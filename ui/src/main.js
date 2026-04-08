@@ -97,6 +97,13 @@ function pageLabel(locator) {
   return locator?.page_label ?? (locator?.page ? `P${locator.page}` : null);
 }
 
+function formatScore(score) {
+  if (typeof score !== "number" || Number.isNaN(score)) {
+    return null;
+  }
+  return score.toFixed(4);
+}
+
 function renderStatusNotices() {
   const blocks = [];
 
@@ -359,7 +366,9 @@ function renderSearchOutcome() {
     <ul class="result-list">
       ${state.searchOutcome.results
         .map(
-          (item) => `
+          (item) => {
+            const scoreLabel = formatScore(item.score);
+            return `
             <li class="result-card ${item.visual_unit_id === selectedVisualUnitId() ? "active" : ""}">
               <button
                 type="button"
@@ -369,6 +378,7 @@ function renderSearchOutcome() {
                 <div class="result-topline">
                   <span class="pill ${item.kind === "image" ? "ready" : "pending"}">${escapeHtml(item.kind)}</span>
                   ${pageLabel(item.locator) ? `<span class="pill muted">${escapeHtml(pageLabel(item.locator))}</span>` : ""}
+                  ${scoreLabel ? `<span class="pill score-pill">score ${escapeHtml(scoreLabel)}</span>` : ""}
                 </div>
                 <strong>${escapeHtml(sourceName(item.source_path))}</strong>
                 <span class="helper">${escapeHtml(item.source_path)}</span>
@@ -379,7 +389,8 @@ function renderSearchOutcome() {
                 <a href="${escapeHtml(item.preview.url)}" target="_blank" rel="noreferrer">Preview</a>
               </div>
             </li>
-          `
+          `;
+          }
         )
         .join("")}
     </ul>

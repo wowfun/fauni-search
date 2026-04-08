@@ -857,6 +857,8 @@ pub struct SearchResultItem {
     pub kind: String,
     pub locator: Value,
     pub cursor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1792,8 +1794,8 @@ fn build_search_response(
     let top_score = candidates.first().map(|point| point.score);
     let results = candidates
         .into_iter()
-        .filter_map(|point| point.payload)
-        .filter(|payload| {
+        .filter_map(|point| point.payload.map(|payload| (point.score, payload)))
+        .filter(|(_, payload)| {
             plan.kind_filter
                 .as_ref()
                 .map(|expected| expected.contains(&payload.kind))
@@ -1805,7 +1807,7 @@ fn build_search_response(
                     .unwrap_or(true)
         })
         .take(plan.top_k)
-        .map(|payload| {
+        .map(|(score, payload)| {
             let preview = visual_unit_preview_reference(
                 &plan.library_id,
                 &payload.visual_unit_id,
@@ -1820,6 +1822,7 @@ fn build_search_response(
                 kind: payload.kind,
                 locator: payload.locator,
                 cursor: format!("cursor:{}", payload.visual_unit_id),
+                score: Some(score),
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
@@ -2254,6 +2257,8 @@ mod tests {
             .iter()
             .any(|item| item.kind == "document_page"));
         assert!(response.results.iter().any(|item| item.kind == "image"));
+        assert_eq!(response.results[0].score, Some(0.9));
+        assert_eq!(response.results[1].score, Some(0.8));
         assert!(response.results.iter().all(|item| item.preview.url.starts_with("http://127.0.0.1:53210/libraries/")));
         assert_eq!(response.debug.as_ref().unwrap()["repr_kind"], "multivector");
 

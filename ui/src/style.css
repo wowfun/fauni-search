@@ -267,6 +267,11 @@ textarea {
   color: rgba(18, 32, 51, 0.72);
 }
 
+.pill.score-pill {
+  background: rgba(0, 71, 204, 0.1);
+  color: #0047cc;
+}
+
 .stats {
   display: grid;
   gap: 0.7rem;
