@@ -134,12 +134,12 @@ function renderStatusNotices() {
 
 function renderImportReceipt() {
   if (!state.importReceipt) {
-    return '<p class="empty">还没有导入回执。提交路径后会在这里显示接受和拒绝结果。</p>';
+    return '<p class="empty" data-testid="import-receipt-empty">还没有导入回执。提交路径后会在这里显示接受和拒绝结果。</p>';
   }
 
   const accepted = state.importReceipt.accepted.length
     ? `
-        <div class="receipt-group">
+        <div class="receipt-group" data-testid="import-accepted-group">
           <h4>Accepted</h4>
           <ul class="data-list">
             ${state.importReceipt.accepted
@@ -181,14 +181,14 @@ function renderImportReceipt() {
 
   const rejected = state.importReceipt.rejected.length
     ? `
-        <div class="receipt-group">
+        <div class="receipt-group" data-testid="import-rejected-group">
           <h4>Rejected</h4>
           <ul class="data-list">
             ${state.importReceipt.rejected
               .map(
                 (item) => `
-                  <li>
-                    <strong>${escapeHtml(item.reason_code)}</strong>
+                  <li data-testid="import-rejected-item" data-reason-code="${escapeHtml(item.reason_code)}">
+                    <strong data-testid="import-rejected-reason">${escapeHtml(item.reason_code)}</strong>
                     <span>${escapeHtml(item.original_path)} · ${escapeHtml(item.message)}</span>
                   </li>
                 `
@@ -200,10 +200,10 @@ function renderImportReceipt() {
     : "";
 
   const jobSummary = state.importReceipt.job
-    ? `<p class="helper">任务 ${escapeHtml(state.importReceipt.job.job_id)} 当前处于 ${escapeHtml(state.importReceipt.job.phase)}。</p>`
-    : `<p class="helper">这次提交没有创建后台任务。</p>`;
+    ? `<p class="helper" data-testid="import-job-summary">任务 ${escapeHtml(state.importReceipt.job.job_id)} 当前处于 ${escapeHtml(state.importReceipt.job.phase)}。</p>`
+    : `<p class="helper" data-testid="import-no-job">这次提交没有创建后台任务。</p>`;
 
-  return `${accepted}${rejected}${jobSummary}`;
+  return `<div data-testid="import-receipt">${accepted}${rejected}${jobSummary}</div>`;
 }
 
 function renderVisualPreview() {
@@ -325,12 +325,12 @@ function renderSearchOutcome() {
   if (state.searchOutcome.error) {
     const details = state.searchOutcome.error.details?.index_lines ?? [];
     return `
-      <div class="notice error">
-        <h4>${escapeHtml(state.searchOutcome.error.code)}</h4>
-        <p>${escapeHtml(state.searchOutcome.error.message)}</p>
+      <div class="notice error" data-testid="search-error-notice">
+        <h4 data-testid="search-error-code">${escapeHtml(state.searchOutcome.error.code)}</h4>
+        <p data-testid="search-error-message">${escapeHtml(state.searchOutcome.error.message)}</p>
         ${
           details.length
-            ? `<ul class="data-list">
+            ? `<ul class="data-list" data-testid="search-error-details">
                 ${details
                   .map(
                     (item) => `

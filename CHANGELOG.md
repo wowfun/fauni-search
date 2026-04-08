@@ -9,6 +9,7 @@
 - Added `.env` / `.env.dev` profile separation, `--dev`, `run.sh --detach`, JSON status/smoke output, pid-aware stopping, and automatic Qdrant startup to make local service orchestration reproducible and automation-friendly.
 - Hardened the text-search execution path with async imports, chunked Qdrant writes, longer first-load timeouts, and real multi-page PDF `document_page` indexing via locator-aware `document_embedding`.
 - Upgraded the workspace from a basic flow to a three-column UI with app-served previews, persistent smoke PDF previews, and per-result score display as a same-response ranking hint.
+- Expanded the Playwright UI validation slice to cover explicit `not_ready` feedback and invalid-import rejection feedback while continuing to reuse or self-start only the isolated `--dev` runtime.
 
 ## 2026-04-06
 ### Added

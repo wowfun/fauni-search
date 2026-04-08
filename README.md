@@ -102,7 +102,7 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
 - `scripts/local/check.sh`
 - `pnpm --dir ui test:e2e`
 
-`pnpm --dir ui test:e2e` 是当前最小 UI smoke。它固定使用 `--dev` 配置：若 `--dev` 服务已在运行则直接复用；若未运行则自行启动并在结束后只清理由自身启动的 `--dev` 服务。运行前仍需要先完成一次 `scripts/local/bootstrap-linux.sh --dev`。
+`pnpm --dir ui test:e2e` 是当前最小 UI smoke。它固定使用 `--dev` 配置：若 `--dev` 服务已在运行则直接复用；若未运行则自行启动并在结束后只清理由自身启动的 `--dev` 服务。当前覆盖 happy path、`not_ready` 和无效导入路径的拒绝反馈。运行前仍需要先完成一次 `scripts/local/bootstrap-linux.sh --dev`。
 
 ### 仓库内环境资产
 

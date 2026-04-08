@@ -131,7 +131,7 @@ bash scripts/local/check.sh
 pnpm --dir ui test:e2e
 ```
 
-这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。运行前仍需要先完成一次：
+这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。当前覆盖最小 happy path、建库后直接搜索的 `not_ready`，以及无效导入路径的拒绝反馈。运行前仍需要先完成一次：
 
 ```bash
 bash scripts/local/bootstrap-linux.sh --dev
