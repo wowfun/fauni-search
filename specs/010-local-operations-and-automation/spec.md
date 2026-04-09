@@ -54,6 +54,7 @@
 - `status.sh` 承接服务状态查询；必须支持 `--json` 输出机器可读状态快照
 - `check.sh` 承接无 GPU 快速检查
 - `smoke-text-search.sh` 承接真实 ColQwen + Qdrant 文本搜索 smoke；必须支持 `--json` 输出机器可读验证摘要
+- 各能力专题可以提供自己的主题 smoke 脚本；若存在，例如 `smoke-image-search.sh`，则也必须支持 `--json` 输出机器可读验证摘要
 
 ## 日志、pid 与状态
 
@@ -68,6 +69,7 @@
 - `check.sh` 默认执行 Rust 主服务窄测试、sidecar 窄测试与 UI 构建检查
 - `check.sh` 不应默认执行 GPU smoke，也不应要求 app、sidecar、UI 或 Qdrant 已经启动
 - `smoke-text-search.sh` 用于真实模型与真实 Qdrant 链路验证，应在 app、sidecar 与 Qdrant 已可访问后运行
+- `smoke-image-search.sh` 若存在，用于真实图片查询链路验证，并应复用与 `smoke-text-search.sh` 相同的本地配置选择、服务前置与 JSON 输出约定
 - smoke 的机器可读摘要至少包含：`status`、`library_id`、`job_id`、`result_kinds`、`backend`、`repr_kind`
 - Playwright UI smoke 默认使用 `--dev` 隔离配置，优先复用现有 `--dev` 服务；仅在 `--dev` 服务未运行时才自行启动，并且只清理由自身启动的服务
 - Playwright UI smoke 不应依赖默认 `.env` profile，也不应在结束时误停默认 profile 的服务

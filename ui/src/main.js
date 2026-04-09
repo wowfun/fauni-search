@@ -28,13 +28,20 @@ const state = {
   jobs: [],
   selectedLibraryId: "",
   importPathsDraft: "",
+  searchMode: "text",
   searchTextDraft: "",
+  queryImageFile: null,
+  queryImageObjectUrl: null,
+  queryImageAsset: null,
+  queryImageLibraryObject: null,
   importReceipt: null,
   selectedVisualUnit: null,
   searchOutcome: null,
   globalError: null,
   statusMessage: null,
 };
+
+const EDITABLE_TARGET_SELECTOR = 'input, textarea, [contenteditable="true"], [contenteditable=""], select';
 
 const root = document.querySelector("#app");
 
@@ -102,6 +109,99 @@ function formatScore(score) {
     return null;
   }
   return score.toFixed(4);
+}
+
+function clearQueryImageState() {
+  if (state.queryImageObjectUrl) {
+    URL.revokeObjectURL(state.queryImageObjectUrl);
+  }
+  state.queryImageFile = null;
+  state.queryImageObjectUrl = null;
+  state.queryImageAsset = null;
+  state.queryImageLibraryObject = null;
+}
+
+function normalizeQueryImageFile(file, fallbackName = "pasted-image.png") {
+  if (file.name && file.name.trim()) {
+    return file;
+  }
+
+  return new File([file], fallbackName, {
+    type: file.type || "image/png",
+    lastModified: Date.now(),
+  });
+}
+
+function setPendingQueryImageFile(file) {
+  clearQueryImageState();
+  state.queryImageFile = normalizeQueryImageFile(file);
+  state.queryImageObjectUrl = URL.createObjectURL(state.queryImageFile);
+}
+
+function firstClipboardImageFile(clipboardData) {
+  if (!clipboardData) {
+    return null;
+  }
+
+  const fileList = Array.from(clipboardData.files ?? []);
+  const directFile = fileList.find((file) => file?.type?.startsWith("image/"));
+  if (directFile) {
+    return directFile;
+  }
+
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (item.kind === "file" && item.type?.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) {
+        return file;
+      }
+    }
+  }
+
+  return null;
+}
+
+function queryImagePreviewUrl() {
+  return (
+    state.queryImageObjectUrl ??
+    state.queryImageAsset?.preview?.url ??
+    state.queryImageLibraryObject?.preview?.url ??
+    null
+  );
+}
+
+function queryImageStatusLabel() {
+  if (state.queryImageLibraryObject) {
+    return `库内对象 · ${state.queryImageLibraryObject.visual_unit_id}`;
+  }
+  if (state.queryImageAsset) {
+    return `已上传 · ${state.queryImageAsset.temp_asset_id}`;
+  }
+  if (state.queryImageFile) {
+    return "待上传";
+  }
+  return "未选择";
+}
+
+function queryImageDisplayName() {
+  if (state.queryImageFile) {
+    return state.queryImageFile.name;
+  }
+  if (state.queryImageAsset?.original_filename) {
+    return state.queryImageAsset.original_filename;
+  }
+  if (state.queryImageLibraryObject?.source_path) {
+    return sourceName(state.queryImageLibraryObject.source_path);
+  }
+  return null;
+}
+
+function activeQueryImagePreview() {
+  return state.queryImageAsset?.preview ?? state.queryImageLibraryObject?.preview ?? null;
+}
+
+function isDocumentPageQueryImage() {
+  return state.queryImageLibraryObject?.kind === "document_page";
 }
 
 function renderStatusNotices() {
@@ -276,6 +376,11 @@ function renderVisualUnitDetail() {
           <h5>Preview</h5>
           <div class="inline-actions">
             <a data-testid="preview-link" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">打开预览</a>
+            ${
+              visualUnit.kind === "image" || visualUnit.kind === "document_page"
+                ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询图片</button>`
+                : ""
+            }
           </div>
         </div>
       </div>
@@ -393,6 +498,11 @@ function renderSearchOutcome() {
               </button>
               <div class="inline-actions">
                 <button type="button" class="secondary-button" data-visual-unit-id="${escapeHtml(item.visual_unit_id)}">查看详情</button>
+                ${
+                  item.kind === "image" || item.kind === "document_page"
+                    ? `<button type="button" class="secondary-button" data-testid="use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询图片</button>`
+                    : ""
+                }
                 <a href="${escapeHtml(item.preview.url)}" target="_blank" rel="noreferrer">Preview</a>
               </div>
             </li>
@@ -404,6 +514,99 @@ function renderSearchOutcome() {
   `;
 }
 
+function renderSearchControls(library) {
+  const queryPreview = queryImagePreviewUrl();
+  return `
+    <div class="search-mode-switch" data-testid="search-mode-switch">
+      <button
+        type="button"
+        class="${state.searchMode === "text" ? "" : "secondary-button"}"
+        data-testid="search-mode-text"
+        data-search-mode="text"
+      >
+        Text
+      </button>
+      <button
+        type="button"
+        class="${state.searchMode === "image" ? "" : "secondary-button"}"
+        data-testid="search-mode-image"
+        data-search-mode="image"
+      >
+        Image
+      </button>
+    </div>
+    <form id="search-form" class="stack-form search-form" data-testid="search-form">
+      ${
+        state.searchMode === "text"
+          ? `
+            <label>
+              <span>查询文本</span>
+              <input
+                id="search-text"
+                data-testid="search-text-input"
+                type="text"
+                value="${escapeHtml(state.searchTextDraft)}"
+                placeholder="尝试输入财报页面中的问题或关键词"
+                ${library ? "" : "disabled"}
+              />
+            </label>
+          `
+          : `
+            <div class="query-image-panel" data-testid="query-image-panel">
+              <label>
+                <span>查询图片</span>
+                <input
+                  id="query-image-input"
+                  data-testid="query-image-input"
+                  type="file"
+                  accept="image/*"
+                  ${library ? "" : "disabled"}
+                />
+              </label>
+              <div class="query-image-card" data-testid="query-image-card">
+                <div class="job-meta">
+                  <span class="pill ${state.queryImageAsset || state.queryImageLibraryObject ? "ready" : "muted"}">${escapeHtml(queryImageStatusLabel())}</span>
+                  ${
+                    queryImageDisplayName()
+                      ? `<span class="helper">${escapeHtml(queryImageDisplayName())}</span>`
+                      : ""
+                  }
+                </div>
+                ${
+                  queryPreview
+                    ? isDocumentPageQueryImage()
+                      ? `<iframe class="query-image-preview-frame" data-testid="query-image-preview" src="${escapeHtml(queryPreview)}" title="Query image preview" loading="lazy"></iframe>`
+                      : `<img class="query-image-preview" data-testid="query-image-preview" src="${escapeHtml(queryPreview)}" alt="Query image preview" />`
+                    : `<p class="empty" data-testid="query-image-empty">选择一张本地图片后，这里会显示查询图片预览。</p>`
+                }
+                <div class="inline-actions">
+                  <button type="button" id="clear-query-image-button" data-testid="clear-query-image-button" class="secondary-button" ${state.queryImageFile || state.queryImageAsset || state.queryImageLibraryObject ? "" : "disabled"}>清除</button>
+                  ${
+                    activeQueryImagePreview()
+                      ? `<a data-testid="query-image-preview-link" href="${escapeHtml(activeQueryImagePreview().url)}" target="_blank" rel="noreferrer">打开查询图片预览</a>`
+                      : ""
+                  }
+                </div>
+                <button
+                  type="button"
+                  class="paste-target"
+                  id="query-image-paste-target"
+                  data-testid="query-image-paste-target"
+                  ${library ? "" : "disabled"}
+                >
+                  点击这里后按 Ctrl/Cmd+V 粘贴图片
+                </button>
+              </div>
+            </div>
+          `
+      }
+      <button type="submit" data-testid="search-submit-button" ${library ? "" : "disabled"}>
+        ${state.searchMode === "text" ? "搜索" : "以图片搜索"}
+      </button>
+    </form>
+  `;
+}
+
 function renderWorkspace() {
   const library = selectedLibrary();
 
@@ -411,9 +614,9 @@ function renderWorkspace() {
     <main class="shell" data-testid="workspace-shell">
       <section class="hero">
         <p class="eyebrow">FauniSearch</p>
-        <h1>100-text-search workspace</h1>
+        <h1>Search workspace</h1>
         <p class="summary">
-          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入和文本搜索链路。左侧管理库和导入，中间执行搜索并浏览结果，右侧查看预览和对象详情。
+          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路。左侧管理库和导入，中间在统一工作区中执行 Text / Image 搜索并浏览结果，右侧查看预览和对象详情。
         </p>
         <div class="service-strip">
           <a href="${endpoints.uiRoot}" target="_blank" rel="noreferrer">UI</a>
@@ -534,23 +737,10 @@ function renderWorkspace() {
             <div class="panel-head">
               <div>
                 <p class="eyebrow">Search</p>
-                <h2>文本搜索</h2>
+                <h2>统一搜索入口</h2>
               </div>
             </div>
-            <form id="search-form" class="stack-form search-form" data-testid="search-form">
-              <label>
-                <span>查询文本</span>
-                <input
-                  id="search-text"
-                  data-testid="search-text-input"
-                  type="text"
-                  value="${escapeHtml(state.searchTextDraft)}"
-                  placeholder="尝试输入财报页面中的问题或关键词"
-                  ${library ? "" : "disabled"}
-                />
-              </label>
-              <button type="submit" data-testid="search-submit-button" ${library ? "" : "disabled"}>搜索</button>
-            </form>
+            ${renderSearchControls(library)}
             ${renderSearchOutcome()}
           </section>
         </section>
@@ -574,22 +764,34 @@ function renderWorkspace() {
   document.querySelector("#library-select")?.addEventListener("change", onSelectLibrary);
   document.querySelector("#import-form")?.addEventListener("submit", onImportPaths);
   document.querySelector("#import-paths")?.addEventListener("input", onImportPathsInput);
-  document.querySelector("#search-form")?.addEventListener("submit", onSearchText);
+  document.querySelector("#search-form")?.addEventListener("submit", onSearchSubmit);
   document.querySelector("#search-text")?.addEventListener("input", onSearchTextInput);
+  document.querySelector("#query-image-input")?.addEventListener("change", onQueryImageInput);
+  document.querySelector("#clear-query-image-button")?.addEventListener("click", onClearQueryImage);
+  document.querySelector("#query-image-paste-target")?.addEventListener("paste", onQueryImagePaste);
   document.querySelector("#fill-demo-button")?.addEventListener("click", onFillDemo);
   document.querySelector("#run-demo-button")?.addEventListener("click", onRunDemo);
+  document.querySelectorAll("[data-search-mode]").forEach((button) => {
+    button.addEventListener("click", onSelectSearchMode);
+  });
   document.querySelectorAll("[data-visual-unit-id]").forEach((button) => {
     button.addEventListener("click", onSelectVisualUnit);
+  });
+  document.querySelectorAll("[data-use-query-visual-unit-id]").forEach((button) => {
+    button.addEventListener("click", onUseAsQueryImage);
   });
 }
 
 async function apiRequest(path, options = {}) {
+  const headers = { ...(options.headers ?? {}) };
+  const isFormDataBody = options.body instanceof FormData;
+  if (!isFormDataBody && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
   const response = await fetch(`/api${path}`, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
-    },
+    headers,
   });
 
   let payload = null;
@@ -658,6 +860,7 @@ async function onCreateLibrary(event) {
     state.selectedLibraryId = library.id;
     state.importPathsDraft = "";
     state.searchTextDraft = "";
+    clearQueryImageState();
     state.importReceipt = null;
     state.selectedVisualUnit = null;
     state.searchOutcome = null;
@@ -672,6 +875,7 @@ async function onCreateLibrary(event) {
 
 async function onSelectLibrary(event) {
   state.selectedLibraryId = event.target.value;
+  clearQueryImageState();
   state.importReceipt = null;
   state.selectedVisualUnit = null;
   state.searchOutcome = null;
@@ -788,12 +992,30 @@ async function waitForJobTerminal(jobId) {
   };
 }
 
-async function onSearchText(event) {
+async function onSearchSubmit(event) {
   event.preventDefault();
   if (!state.selectedLibraryId) {
     return;
   }
 
+  try {
+    state.globalError = null;
+    renderWorkspace();
+    if (state.searchMode === "image") {
+      await runImageSearch();
+    } else {
+      await runTextSearch();
+    }
+    state.statusMessage = null;
+    renderWorkspace();
+  } catch (error) {
+    state.searchOutcome = { error };
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function runTextSearch() {
   const input = document.querySelector("#search-text");
   state.searchTextDraft = input?.value ?? "";
   const text = state.searchTextDraft.trim();
@@ -808,17 +1030,44 @@ async function onSearchText(event) {
     return;
   }
 
-  try {
-    state.globalError = null;
-    state.statusMessage = "正在执行真实 multivector 文本搜索...";
+  state.statusMessage = "正在执行真实 multivector 文本搜索...";
+  renderWorkspace();
+  await searchText(text);
+}
+
+async function runImageSearch() {
+  if (!state.queryImageFile && !state.queryImageAsset && !state.queryImageLibraryObject) {
+    state.searchOutcome = {
+      error: {
+        code: "validation_failed",
+        message: "请先选择一张查询图片。",
+      },
+    };
     renderWorkspace();
-    await searchText(text);
-    state.statusMessage = null;
+    return;
+  }
+
+  if (state.queryImageFile) {
+    state.statusMessage = "正在上传查询图片...";
     renderWorkspace();
-  } catch (error) {
-    state.searchOutcome = { error };
-    state.statusMessage = null;
-    renderWorkspace();
+    await uploadQueryImage(state.queryImageFile);
+  }
+
+  state.statusMessage = "正在执行真实 multivector 图片搜索...";
+  renderWorkspace();
+  if (state.queryImageAsset) {
+    await searchImage({
+      kind: "temp_asset",
+      temp_asset_id: state.queryImageAsset.temp_asset_id,
+    });
+    return;
+  }
+
+  if (state.queryImageLibraryObject) {
+    await searchImage({
+      kind: "library_object",
+      visual_unit_id: state.queryImageLibraryObject.visual_unit_id,
+    });
   }
 }
 
@@ -840,8 +1089,44 @@ async function searchText(text) {
   return data;
 }
 
+async function uploadQueryImage(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const data = await apiRequest(`/libraries/${state.selectedLibraryId}/query-assets/images`, {
+    method: "POST",
+    body: formData,
+  });
+  if (state.queryImageObjectUrl) {
+    URL.revokeObjectURL(state.queryImageObjectUrl);
+  }
+  state.queryImageFile = null;
+  state.queryImageObjectUrl = null;
+  state.queryImageAsset = data;
+  renderWorkspace();
+  return data;
+}
+
+async function searchImage(imageInput) {
+  const data = await apiRequest("/search/image", {
+    method: "POST",
+    body: JSON.stringify({
+      library_id: state.selectedLibraryId,
+      image_input: imageInput,
+      top_k: 5,
+      debug: true,
+    }),
+  });
+  state.searchOutcome = data;
+  renderWorkspace();
+  if (data.results[0]?.visual_unit_id) {
+    await loadVisualUnit(data.results[0].visual_unit_id);
+  }
+  return data;
+}
+
 function onFillDemo() {
   setDemoDrafts();
+  state.searchMode = "text";
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
@@ -868,6 +1153,113 @@ async function onRunDemo() {
     state.statusMessage = null;
     renderWorkspace();
   }
+}
+
+function onSelectSearchMode(event) {
+  state.searchMode = event.currentTarget.dataset.searchMode;
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onQueryImageInput(event) {
+  const [file] = event.target.files ?? [];
+  if (file) {
+    setPendingQueryImageFile(file);
+  }
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onQueryImagePaste(event) {
+  if (state.searchMode !== "image" || !state.selectedLibraryId) {
+    return;
+  }
+
+  const clipboardImage = firstClipboardImageFile(event.clipboardData);
+  if (!clipboardImage) {
+    const target = event.target;
+    if (target instanceof Element && target.matches(EDITABLE_TARGET_SELECTOR)) {
+      return;
+    }
+    state.globalError = {
+      code: "validation_failed",
+      message: "剪贴板中没有可用的图片。",
+    };
+    state.statusMessage = null;
+    renderWorkspace();
+    return;
+  }
+
+  event.preventDefault();
+  setPendingQueryImageFile(clipboardImage);
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onClearQueryImage() {
+  clearQueryImageState();
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function resolveLibraryObjectQueryImage(visualUnitId) {
+  const resultItem =
+    state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
+  if (resultItem?.kind === "image") {
+    return {
+      visual_unit_id: resultItem.visual_unit_id,
+      kind: resultItem.kind,
+      source_path: resultItem.source_path,
+      preview: resultItem.preview,
+    };
+  }
+  if (resultItem?.kind === "document_page") {
+    return {
+      visual_unit_id: resultItem.visual_unit_id,
+      kind: resultItem.kind,
+      source_path: resultItem.source_path,
+      preview: resultItem.preview,
+    };
+  }
+
+  const detailVisualUnit = state.selectedVisualUnit?.visual_unit;
+  if (
+    detailVisualUnit?.visual_unit_id === visualUnitId &&
+    (detailVisualUnit.kind === "image" || detailVisualUnit.kind === "document_page")
+  ) {
+    return {
+      visual_unit_id: detailVisualUnit.visual_unit_id,
+      kind: detailVisualUnit.kind,
+      source_path: detailVisualUnit.source_path,
+      preview: state.selectedVisualUnit.preview,
+    };
+  }
+
+  return null;
+}
+
+function onUseAsQueryImage(event) {
+  const visualUnitId = event.currentTarget.dataset.useQueryVisualUnitId;
+  const libraryObject = resolveLibraryObjectQueryImage(visualUnitId);
+  if (!libraryObject) {
+    state.globalError = {
+      code: "not_supported",
+      message: "当前只能把库内 image 或 document_page 对象作为查询图片。",
+    };
+    renderWorkspace();
+    return;
+  }
+
+  clearQueryImageState();
+  state.queryImageLibraryObject = libraryObject;
+  state.searchMode = "image";
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
 }
 
 async function loadVisualUnit(visualUnitId) {

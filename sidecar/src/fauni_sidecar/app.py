@@ -21,6 +21,7 @@ class SidecarApiError(Exception):
 
 class EmbedInputs(BaseModel):
     queries: list[str] | None = None
+    images: list["EmbedImageInput"] | None = None
     documents: list["EmbedDocumentInput"] | None = None
 
     @field_validator("queries")
@@ -47,8 +48,21 @@ class EmbedDocumentInput(BaseModel):
         return normalized
 
 
+class EmbedImageInput(BaseModel):
+    path: str
+    locator: dict[str, Any] | None = None
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("path must not be empty")
+        return normalized
+
+
 class EmbedRequest(BaseModel):
-    operation_kind: Literal["query_embedding", "document_embedding"]
+    operation_kind: Literal["query_embedding", "image_query_embedding", "document_embedding"]
     inputs: EmbedInputs
     provider_context: dict[str, Any] | None = None
     target: dict[str, Any] | None = None
@@ -105,6 +119,18 @@ def create_app(runtime: EmbeddingRuntime | None = None) -> FastAPI:
                         details={"field": "inputs.queries"},
                     )
                 data = runtime.embed_queries(request.inputs.queries, debug=request.debug)
+            elif request.operation_kind == "image_query_embedding":
+                if not request.inputs.images:
+                    raise SidecarApiError(
+                        status_code=422,
+                        code="validation_failed",
+                        message="image_query_embedding requires inputs.images.",
+                        details={"field": "inputs.images"},
+                    )
+                data = runtime.embed_image_queries(
+                    [item.model_dump() for item in request.inputs.images],
+                    debug=request.debug,
+                )
             else:
                 if not request.inputs.documents:
                     raise SidecarApiError(

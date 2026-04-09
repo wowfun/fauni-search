@@ -90,19 +90,21 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
 
 ### 安装完成后的验证命令
 
-这组命令用于服务启动后验证当前文本搜索主链；它们不是安装命令，也不是启动命令：
+这组命令用于服务启动后验证当前真实检索主链；它们不是安装命令，也不是启动命令：
 
 1. 确认 `scripts/local/run.sh` 已经在运行
 2. 运行 `scripts/local/smoke-text-search.sh`
+3. 如需验证图片查询，再运行 `scripts/local/smoke-image-search.sh`
 
 如果服务使用 `--dev` 启动，验证命令也使用 `scripts/local/smoke-text-search.sh --dev`。
 自动化场景可使用 `scripts/local/smoke-text-search.sh --dev --json` 获取机器可读摘要。
+图片查询对应命令是 `scripts/local/smoke-image-search.sh --dev --json`。
 
 快速无 GPU 检查入口：
 - `scripts/local/check.sh`
 - `pnpm --dir ui test:e2e`
 
-`pnpm --dir ui test:e2e` 是当前最小 UI smoke。它固定使用 `--dev` 配置：若 `--dev` 服务已在运行则直接复用；若未运行则自行启动并在结束后只清理由自身启动的 `--dev` 服务。当前覆盖 happy path、`not_ready` 和无效导入路径的拒绝反馈。运行前仍需要先完成一次 `scripts/local/bootstrap-linux.sh --dev`。
+`pnpm --dir ui test:e2e` 是当前最小 UI smoke。它固定使用 `--dev` 配置：若 `--dev` 服务已在运行则直接复用；若未运行则自行启动并在结束后只清理由自身启动的 `--dev` 服务。当前覆盖文本与图片 happy path、粘贴图片查询、`not_ready`、无效导入拒绝，以及库内 `image` / `document_page` 对象直接作为 query image 的路径。运行前仍需要先完成一次 `scripts/local/bootstrap-linux.sh --dev`。
 
 ### 仓库内环境资产
 
@@ -152,6 +154,10 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
 - `scripts/local/smoke-text-search.sh`
   - 在 app、sidecar 和 Qdrant 已启动后运行真实 GPU smoke
   - 验证图片和多页 PDF 页图能够进入 Qdrant-backed multivector 文本搜索链
+  - 支持 `--json` 输出机器可读验证摘要
+- `scripts/local/smoke-image-search.sh`
+  - 在 app、sidecar 和 Qdrant 已启动后运行真实 GPU smoke
+  - 验证临时查询图片上传、库内 `image` / `document_page` 对象引用复用、`/search/image` 与 Qdrant-backed multivector 图片搜索链
   - 支持 `--json` 输出机器可读验证摘要
 - `scripts/local/check.sh`
   - 运行无 GPU 快速检查，不启动长驻服务
@@ -210,7 +216,9 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
   - Python sidecar，当前已提供 `/health`、`/capabilities` 与 `/embed`
   - 当前已接通 `query_embedding` 与 `document_embedding`
 - `ui/`
-  - 最小 Vite 工作台，当前已接通三栏工作流：左侧建库/导入/任务，中间搜索与结果，右侧预览与详情
+  - 最小 Vite 工作台，当前已接通三栏工作流：左侧建库/导入/任务，中间统一 Text / Image 搜索与结果，右侧预览与详情
+  - `Image` 模式当前既支持文件选择 / 粘贴图片进入临时查询资产链路，也支持把库内 `image` / `document_page` 结果对象直接作为 query image
+  - 临时上传查询图片会在运行期按过期窗口自动回收，过期后需重新上传
   - 搜索结果与对象详情都使用 app 提供的稳定 preview 资源引用，而不是直接暴露本地文件路径
 
 ## 项目结构

@@ -1,4 +1,4 @@
-use fauni_search::{build_app, new_state};
+use fauni_search::{build_app, new_state, spawn_runtime_maintenance};
 use std::{env, error::Error, io};
 use tracing::info;
 
@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let port = required_env("APP_PORT")?;
     let bind = format!("{host}:{port}");
     let state = new_state();
+    spawn_runtime_maintenance(state.clone());
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;

@@ -205,6 +205,49 @@ tail -n 50 data/runtime/logs/app.log
 - 如果 app 已重启过但浏览器页面是旧的，直接刷新 UI，或重新执行一次 `bash scripts/local/run.sh` / `bash scripts/local/run.sh --dev`
 - 如果问题只出现在 PDF 预览，优先检查导入对象的 detail 接口是否还能正常返回 `preview.url`
 
+## 查询图片过一段时间后失效
+
+症状：
+- `Image` 模式里先前上传的查询图片还能显示文件名，但重新搜索时报 `not_found`
+- 查询图片预览接口返回 404
+
+检查：
+
+```bash
+bash scripts/local/status.sh --json
+tail -n 80 data/runtime/logs/app.log
+```
+
+如果使用 `--dev`：
+
+```bash
+bash scripts/local/status.sh --dev --json
+tail -n 80 data/runtime/dev/logs/app.log
+```
+
+处理：
+- 这是当前阶段的预期行为：临时上传查询图片有过期窗口，Rust 主服务会主动回收过期资产及其预览文件
+- 如果你还需要继续用这张图片查询，直接重新上传
+- 若问题出现在刚上传后立刻失效，再优先检查 `app.log` 中是否出现了临时资产目录不可写、文件丢失或清理异常
+
+## 粘贴图片没有进入查询图片卡片
+
+症状：
+- `Image` 模式下按 `Ctrl/Cmd+V` 没有出现查询图片预览
+- 工作台提示“剪贴板中没有可用的图片”
+
+检查：
+
+```bash
+pnpm --dir ui test:e2e
+tail -n 80 data/runtime/logs/ui.log
+```
+
+处理：
+- 当前实现要求先切到 `Image` 模式，再把焦点放在查询图片卡片里的粘贴按钮区域后执行 `Ctrl/Cmd+V`
+- 如果剪贴板里是文本或文件路径而不是实际图片数据，工作台会拒绝并提示没有可用图片
+- 如果你只是想快速验证链路，仍然可以直接使用文件选择入口
+
 ## `smoke-text-search.sh` 失败
 
 症状：
@@ -261,6 +304,31 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 - 如果错误发生在 Chromium 启动前，而且日志里出现 `libatk-1.0.so.0`、`libgtk-3.so.0` 之类缺库信息，问题在宿主机的 Playwright 浏览器运行库，不在仓库测试代码；先按宿主机方式补齐这些系统库，再重跑
 - 这条 Playwright 命令固定只操作 `--dev` 配置；它不会复用默认 `.env` profile，也不应该去停止默认 profile 的服务
 - 如果失败发生在导入或搜索阶段，优先按 `smoke-text-search.sh` 的排障路径继续看 app / sidecar / Qdrant 日志
+
+## `smoke-image-search.sh` 失败
+
+症状：
+- `smoke-image-search.sh` 报查询图片上传失败
+- `smoke-image-search.sh` 报 `/search/image` 返回错误
+- `smoke-image-search.sh` 报结果中缺少 `image` 或 `document_page`
+
+检查：
+
+```bash
+bash scripts/local/status.sh --dev --json
+tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/sidecar.log
+tail -n 80 data/runtime/dev/logs/qdrant.log
+```
+
+处理：
+- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、sidecar、Qdrant 都是 ready
+- 如果失败发生在查询图片上传阶段，优先检查 app 日志里的 `validation_failed` 或 `not_found`
+- 如果失败发生在 `library_object` 路径，优先检查返回结果里是否真的包含 `kind=image` 或 `kind=document_page` 的 visual unit；当前阶段仍不支持其他对象类型直接作为 query image
+- 如果失败发生在临时查询图片预览或再次查询阶段，也要考虑该查询图片是否已经过期并被后台清理
+- 如果失败发生在 `/search/image` 阶段，优先检查 sidecar 是否已经声明 `image_query_embedding` 能力
+- 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/dev/logs/sidecar.log`
+- 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
 
 ## 模型下载失败
 

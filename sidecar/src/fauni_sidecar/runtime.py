@@ -20,6 +20,9 @@ class EmbeddingRuntime(Protocol):
     def embed_queries(self, queries: list[str], debug: bool = False) -> dict[str, Any]:
         ...
 
+    def embed_image_queries(self, images: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+        ...
+
     def embed_documents(self, documents: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
         ...
 
@@ -115,6 +118,13 @@ class ColQwenRuntime:
                     "model": self._model_metadata(),
                 },
                 {
+                    "operation_kind": "image_query_embedding",
+                    "supported": can_service,
+                    "target_index_lines": ["multivector"],
+                    "input_kind": "local_file",
+                    "model": self._model_metadata(),
+                },
+                {
                     "operation_kind": "document_embedding",
                     "supported": can_service,
                     "target_index_lines": ["multivector"],
@@ -155,6 +165,56 @@ class ColQwenRuntime:
 
         payload: dict[str, Any] = {
             "operation_kind": "query_embedding",
+            "model": self._model_metadata(loaded=True),
+            "embeddings": items,
+        }
+
+        if debug:
+            payload["debug"] = {
+                "elapsed_ms": elapsed_ms,
+                "loaded_at": self._load_state.loaded_at,
+                "last_load_ms": self._load_state.last_load_ms,
+            }
+
+        return payload
+
+    def embed_image_queries(self, images: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+        model, processor = self._ensure_loaded()
+
+        import torch
+
+        started_at = time.perf_counter()
+        items = []
+
+        for index, image_input in enumerate(images):
+            path = image_input["path"]
+            image, source_type, kind, locator = load_query_input_image(image_input)
+            batch = processor.process_images([image]).to(model.device)
+
+            with torch.inference_mode():
+                model.rope_deltas = None
+                embeddings = model(**batch)
+
+            vectors = embeddings[0].to(torch.float32).cpu()
+            pooled_vector = vectors.mean(dim=0) if vectors.ndim == 2 and vectors.shape[0] > 0 else None
+
+            items.append(
+                {
+                    "index": index,
+                    "path": path,
+                    "source_type": source_type,
+                    "kind": kind,
+                    "locator": locator,
+                    "vector_count": int(vectors.shape[0]),
+                    "dim": int(vectors.shape[1]) if vectors.ndim == 2 else 0,
+                    "vectors": vectors.tolist(),
+                    "pooled_vector": pooled_vector.tolist() if pooled_vector is not None else [],
+                }
+            )
+
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        payload: dict[str, Any] = {
+            "operation_kind": "image_query_embedding",
             "model": self._model_metadata(loaded=True),
             "embeddings": items,
         }
@@ -373,6 +433,13 @@ def load_document_image(document: dict[str, Any]) -> tuple[Any, str, str, dict[s
             raise RuntimeError(f"Failed to load image {normalized}: {exc}") from exc
 
     raise RuntimeError(f"Unsupported document input type for embedding: {normalized}")
+
+
+def load_query_input_image(image_input: dict[str, Any]) -> tuple[Any, str, str, dict[str, Any]]:
+    try:
+        return load_document_image(image_input)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Failed to load query image input {image_input['path']}: {exc}") from exc
 
 
 def resolve_pdf_page_number(

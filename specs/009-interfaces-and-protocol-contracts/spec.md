@@ -74,7 +74,12 @@
 - `/search/text` 的请求载荷必须携带 `text`
 - `/search/image` 的请求载荷必须携带 `image_input`
 - `/search/video` 的请求载荷必须携带 `video_input`
-- `image_input` 与 `video_input` 都必须支持两类稳定编码形式：临时查询资产引用、库内对象引用
+- `image_input` 与 `video_input` 都必须编码为显式区分输入来源的结构化对象
+- 图片与视频查询长期上允许两类稳定编码形式：临时查询资产引用、库内对象引用
+- 图片查询的稳定输入对象至少应支持以下两种显式编码：
+  - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "..." }`
+  - 库内对象引用：`{ "kind": "library_object", "visual_unit_id": "..." }`
+- 各能力专题可以在当前阶段先只启用其中一个正式输入变体；未启用变体应通过统一错误载荷返回 `not_supported`
 - 搜索响应载荷通过响应封套中的 `data` 返回，至少包含：
   - 有序 `results`
   - 可选 `next_cursor`
@@ -101,6 +106,9 @@
 - 导入、刷新、重扫、重建、清理、维护，以及任务取消 / 重试 / 恢复等动作型接口，应采用显式动作载荷，而不是通过隐式读写触发后台执行
 - 若通过 HTTP 暴露，当前正式导入动作入口应包括 `POST /libraries/{library_id}/imports`
 - `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
+- 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/images`
+- `POST /libraries/{library_id}/query-assets/images` 的首个稳定输入变体是单图片上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
+- 临时查询图片上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
 - 动作型成功响应应在 `data` 中返回至少以下信息：
   - `accepted`
   - `rejected`
@@ -138,7 +146,9 @@
   - 可选 `debug`
 - 当前阶段 `POST /embed` 至少应支持以下 `operation_kind`：
   - `query_embedding`，用于承接文本查询编码；其输入至少应能表达一个或多个查询文本，以及与目标索引线相关的最小上下文
+  - `image_query_embedding`，用于承接图片查询编码；其输入至少应能表达一个或多个本地图片引用，且在需要时能够携带视觉单元级 `locator`
   - `document_embedding`，用于承接当前阶段 PDF 页图或图片对象的编码；其输入至少应能表达一个或多个本地文件引用，以及与目标索引线相关的最小上下文
+- `image_query_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达库内 `document_page` 作为查询图片的路径
 - `document_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达 PDF 的目标页
 - `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了视觉单元级 `locator`，响应应能返回与该输入对应的定位摘要
 - 推理 / 编码成功响应必须返回与 `operation_kind` 对应的结构化 `data`，例如向量输出、派生结果描述或媒体处理摘要；不得依赖未文档化的 sidecar 私有字段

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -22,6 +22,8 @@ const MULTIVECTOR_INDEX_LINE: &str = "multivector";
 const QDRANT_MAX_UPSERT_BODY_BYTES: usize = 8 * 1024 * 1024;
 const QDRANT_UPSERT_BODY_OVERHEAD_BYTES: usize = br#"{"points":[]}"#.len();
 const SIDECAR_REQUEST_TIMEOUT_SECS: u64 = 600;
+const TEMP_QUERY_ASSET_TTL_MS: u128 = 60 * 60 * 1000;
+const TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS: u64 = 60;
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
@@ -37,6 +39,14 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/libraries/:library_id", get(get_library))
         .route("/libraries/:library_id/imports", post(import_paths))
         .route(
+            "/libraries/:library_id/query-assets/images",
+            post(upload_query_image),
+        )
+        .route(
+            "/libraries/:library_id/query-assets/images/:temp_asset_id/preview",
+            get(get_query_image_preview),
+        )
+        .route(
             "/libraries/:library_id/visual-units/:visual_unit_id",
             get(get_visual_unit),
         )
@@ -47,7 +57,33 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/jobs", get(list_jobs))
         .route("/jobs/:job_id", get(get_job))
         .route("/search/text", post(search_text))
+        .route("/search/image", post(search_image))
         .with_state(state)
+}
+
+pub fn spawn_runtime_maintenance(state: SharedState) {
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            let summary = {
+                let mut state = state.write().await;
+                state.prune_temp_query_assets()
+            };
+
+            if summary.removed_count() > 0 {
+                tracing::info!(
+                    expired_removed = summary.expired_removed,
+                    missing_removed = summary.missing_removed,
+                    "Pruned expired query image assets."
+                );
+            }
+        }
+    });
 }
 
 pub struct AppState {
@@ -55,10 +91,12 @@ pub struct AppState {
     next_library_seq: u64,
     next_job_seq: u64,
     next_visual_unit_seq: u64,
+    next_temp_asset_seq: u64,
     libraries: BTreeMap<String, LibraryRecord>,
     library_order: Vec<String>,
     jobs: BTreeMap<String, JobRecord>,
     job_order: Vec<String>,
+    temp_query_assets: BTreeMap<String, TempQueryAssetRecord>,
 }
 
 impl Default for AppState {
@@ -68,10 +106,12 @@ impl Default for AppState {
             next_library_seq: 0,
             next_job_seq: 0,
             next_visual_unit_seq: 0,
+            next_temp_asset_seq: 0,
             libraries: BTreeMap::new(),
             library_order: Vec::new(),
             jobs: BTreeMap::new(),
             job_order: Vec::new(),
+            temp_query_assets: BTreeMap::new(),
         }
     }
 }
@@ -360,22 +400,104 @@ impl AppState {
             .ok_or_else(|| ApiError::not_found("Job was not found."))
     }
 
-    fn prepare_search(&self, request: &TextSearchRequest) -> Result<SearchPlan, ApiError> {
-        let library = self
-            .libraries
-            .get(request.library_id.trim())
-            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
-
+    fn prepare_text_search(&self, request: &TextSearchRequest) -> Result<SearchPlan, ApiError> {
         if request.text.trim().is_empty() {
             return Err(ApiError::validation_failed(
                 "Search text must not be empty.",
                 Some(json!({ "field": "text" })),
             ));
         }
+        self.prepare_search_scope(
+            request.library_id.trim(),
+            request.filters.as_ref(),
+            request.top_k,
+            request.debug,
+            request.target_index_lines.as_ref(),
+        )
+    }
 
-        let target_index_lines = request
-            .target_index_lines
-            .clone()
+    fn prepare_image_search(
+        &self,
+        request: &ImageSearchRequest,
+    ) -> Result<(SearchPlan, ResolvedImageQueryInput), ApiError> {
+        let plan = self.prepare_search_scope(
+            request.library_id.trim(),
+            request.filters.as_ref(),
+            request.top_k,
+            request.debug,
+            request.target_index_lines.as_ref(),
+        )?;
+
+        match request.image_input.kind.as_str() {
+            "temp_asset" => {
+                let temp_asset_id =
+                    request
+                        .image_input
+                        .temp_asset_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            ApiError::validation_failed(
+                                "image_input.kind=temp_asset requires temp_asset_id.",
+                                Some(json!({ "field": "image_input.temp_asset_id" })),
+                            )
+                        })?;
+                let asset = self.get_temp_query_asset(&plan.library_id, temp_asset_id)?;
+                Ok((plan, ResolvedImageQueryInput::TempAsset(asset)))
+            }
+            "library_object" => {
+                let visual_unit_id =
+                    request
+                        .image_input
+                        .visual_unit_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            ApiError::validation_failed(
+                                "image_input.kind=library_object requires visual_unit_id.",
+                                Some(json!({ "field": "image_input.visual_unit_id" })),
+                            )
+                        })?;
+                let visual_unit = self.get_library_visual_unit(&plan.library_id, visual_unit_id)?;
+                if !matches!(visual_unit.kind.as_str(), "image" | "document_page") {
+                    return Err(ApiError::not_supported(
+                        "Current 110-image-search implementation only supports library image and document_page objects as query images.",
+                        Some(json!({
+                            "field": "image_input.visual_unit_id",
+                            "received_kind": visual_unit.kind,
+                            "supported_kinds": ["image", "document_page"],
+                        })),
+                    ));
+                }
+                Ok((
+                    plan,
+                    ResolvedImageQueryInput::LibraryVisualUnit(visual_unit),
+                ))
+            }
+            _ => Err(ApiError::validation_failed(
+                "image_input.kind must be one of the supported query image input kinds.",
+                Some(json!({
+                    "field": "image_input.kind",
+                    "received": request.image_input.kind,
+                    "supported": ["temp_asset", "library_object"],
+                })),
+            )),
+        }
+    }
+
+    fn prepare_search_scope(
+        &self,
+        library_id: &str,
+        filters: Option<&Value>,
+        top_k: Option<usize>,
+        debug: Option<bool>,
+        target_index_lines: Option<&Vec<String>>,
+    ) -> Result<SearchPlan, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        let target_index_lines = target_index_lines
+            .cloned()
             .map(|lines| normalize_index_lines(Some(lines)))
             .filter(|lines| !lines.is_empty())
             .unwrap_or_else(|| library.config.enabled_index_lines.clone());
@@ -427,13 +549,123 @@ impl AppState {
         Ok(SearchPlan {
             library_id: library.id.clone(),
             collection_name: library.collection_name.clone(),
-            query_text: request.text.trim().to_string(),
-            top_k: request.top_k.unwrap_or(10).max(1),
-            kind_filter: read_string_filter(request.filters.as_ref(), "visual_unit.kind")
-                .or_else(|| read_string_filter(request.filters.as_ref(), "kind")),
-            source_type_filter: read_string_filter(request.filters.as_ref(), "source_type"),
-            debug: request.debug.unwrap_or(false),
+            top_k: top_k.unwrap_or(10).max(1),
+            kind_filter: read_string_filter(filters, "visual_unit.kind")
+                .or_else(|| read_string_filter(filters, "kind")),
+            source_type_filter: read_string_filter(filters, "source_type"),
+            debug: debug.unwrap_or(false),
         })
+    }
+
+    fn register_temp_query_asset(
+        &mut self,
+        library_id: &str,
+        staged: StagedQueryAsset,
+    ) -> Result<QueryImageAssetData, ApiError> {
+        if !self.libraries.contains_key(library_id) {
+            return Err(ApiError::not_found("Library was not found."));
+        }
+
+        self.prune_temp_query_assets();
+
+        let temp_asset_id = self.next_temp_asset_id();
+        let record = TempQueryAssetRecord {
+            id: temp_asset_id.clone(),
+            library_id: library_id.to_string(),
+            path: staged.path,
+            content_type: staged.content_type,
+            source_type: "image".to_string(),
+            original_filename: staged.original_filename,
+            expires_at_ms: current_unix_ms() + TEMP_QUERY_ASSET_TTL_MS,
+        };
+
+        let data = QueryImageAssetData {
+            temp_asset_id: record.id.clone(),
+            preview: query_image_preview_reference(library_id, &record.id)?,
+            source_type: record.source_type.clone(),
+            content_type: record.content_type.clone(),
+            original_filename: record.original_filename.clone(),
+        };
+        self.temp_query_assets.insert(record.id.clone(), record);
+        Ok(data)
+    }
+
+    fn prune_temp_query_assets(&mut self) -> TempQueryAssetPruneSummary {
+        let now_ms = current_unix_ms();
+        let mut expired_ids = Vec::new();
+        let mut missing_ids = Vec::new();
+
+        for (temp_asset_id, asset) in &self.temp_query_assets {
+            if asset.expires_at_ms <= now_ms {
+                expired_ids.push(temp_asset_id.clone());
+            } else if !FsPath::new(&asset.path).exists() {
+                missing_ids.push(temp_asset_id.clone());
+            }
+        }
+
+        let expired_removed = expired_ids
+            .into_iter()
+            .filter_map(|temp_asset_id| self.temp_query_assets.remove(&temp_asset_id))
+            .map(|asset| {
+                remove_temp_query_asset_file(&asset.path);
+                1usize
+            })
+            .sum();
+
+        let missing_removed = missing_ids
+            .into_iter()
+            .filter_map(|temp_asset_id| self.temp_query_assets.remove(&temp_asset_id))
+            .count();
+
+        TempQueryAssetPruneSummary {
+            expired_removed,
+            missing_removed,
+        }
+    }
+
+    fn get_temp_query_asset(
+        &self,
+        library_id: &str,
+        temp_asset_id: &str,
+    ) -> Result<TempQueryAssetRecord, ApiError> {
+        let asset = self
+            .temp_query_assets
+            .get(temp_asset_id)
+            .ok_or_else(|| ApiError::not_found("Query image was not found or has expired."))?;
+
+        if asset.library_id != library_id {
+            return Err(ApiError::not_found(
+                "Query image was not found for the selected library.",
+            ));
+        }
+        if asset.expires_at_ms <= current_unix_ms() {
+            return Err(ApiError::not_found(
+                "Query image was not found or has expired.",
+            ));
+        }
+        if !FsPath::new(&asset.path).exists() {
+            return Err(ApiError::not_found(
+                "Query image file is no longer available.",
+            ));
+        }
+        Ok(asset.clone())
+    }
+
+    fn get_library_visual_unit(
+        &self,
+        library_id: &str,
+        visual_unit_id: &str,
+    ) -> Result<VisualUnitRecord, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        library
+            .visual_units
+            .get(visual_unit_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("Visual unit was not found."))
     }
 
     fn inspect_import_path(
@@ -566,6 +798,11 @@ impl AppState {
         format!("vu_{:06}", self.next_visual_unit_seq)
     }
 
+    fn next_temp_asset_id(&mut self) -> String {
+        self.next_temp_asset_seq += 1;
+        format!("temp_asset_{:06}", self.next_temp_asset_seq)
+    }
+
     fn new_visual_units_from_classification(
         &mut self,
         classification: &PathClassification,
@@ -638,7 +875,7 @@ struct LibraryRecord {
     active_index_lines: BTreeSet<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VisualUnitRecord {
     id: String,
     point_id: u64,
@@ -675,6 +912,35 @@ struct JobRecord {
     snapshot: JobSnapshot,
 }
 
+#[derive(Clone, Debug)]
+struct TempQueryAssetRecord {
+    id: String,
+    library_id: String,
+    path: String,
+    source_type: String,
+    content_type: String,
+    original_filename: Option<String>,
+    expires_at_ms: u128,
+}
+
+#[derive(Default)]
+struct TempQueryAssetPruneSummary {
+    expired_removed: usize,
+    missing_removed: usize,
+}
+
+impl TempQueryAssetPruneSummary {
+    fn removed_count(&self) -> usize {
+        self.expired_removed + self.missing_removed
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ResolvedImageQueryInput {
+    TempAsset(TempQueryAssetRecord),
+    LibraryVisualUnit(VisualUnitRecord),
+}
+
 struct PathClassification {
     normalized_path: String,
     source_type: String,
@@ -682,6 +948,7 @@ struct PathClassification {
     page_count: Option<usize>,
 }
 
+#[derive(Debug)]
 struct ImportRejection {
     normalized_path: Option<String>,
     reason_code: String,
@@ -839,6 +1106,24 @@ pub struct TextSearchRequest {
     pub target_index_lines: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ImageSearchRequest {
+    pub library_id: String,
+    pub image_input: QueryImageInputRequest,
+    pub filters: Option<Value>,
+    pub top_k: Option<usize>,
+    pub cursor: Option<String>,
+    pub debug: Option<bool>,
+    pub target_index_lines: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryImageInputRequest {
+    pub kind: String,
+    pub temp_asset_id: Option<String>,
+    pub visual_unit_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct TextSearchData {
     pub results: Vec<SearchResultItem>,
@@ -866,6 +1151,16 @@ pub struct PreviewReference {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueryImageAssetData {
+    pub temp_asset_id: String,
+    pub preview: PreviewReference,
+    pub source_type: String,
+    pub content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
 }
 
 struct PreparedImport {
@@ -910,11 +1205,23 @@ impl ImportJobOutcome {
 struct SearchPlan {
     library_id: String,
     collection_name: String,
-    query_text: String,
     top_k: usize,
     kind_filter: Option<BTreeSet<String>>,
     source_type_filter: Option<BTreeSet<String>>,
     debug: bool,
+}
+
+struct StagedQueryAsset {
+    path: String,
+    content_type: String,
+    original_filename: Option<String>,
+}
+
+struct IncomingQueryImageUpload {
+    bytes: Vec<u8>,
+    content_type: String,
+    original_filename: Option<String>,
+    extension: String,
 }
 
 struct IndexingError {
@@ -1067,6 +1374,18 @@ impl ApiError {
         }
     }
 
+    fn not_supported(message: impl Into<String>, details: Option<Value>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            payload: ErrorPayload {
+                code: "not_supported".to_string(),
+                message: message.into(),
+                details,
+                retryable: Some(false),
+            },
+        }
+    }
+
     fn not_ready(message: impl Into<String>, details: Option<Value>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -1114,10 +1433,13 @@ async fn root() -> Json<RootPayload> {
             "GET /libraries",
             "POST /libraries",
             "POST /libraries/{library_id}/imports",
+            "POST /libraries/{library_id}/query-assets/images",
             "GET /libraries/{library_id}/visual-units/{visual_unit_id}",
+            "GET /libraries/{library_id}/query-assets/images/{temp_asset_id}/preview",
             "GET /jobs",
             "GET /jobs/{job_id}",
             "POST /search/text",
+            "POST /search/image",
         ],
     })
 }
@@ -1185,6 +1507,21 @@ async fn import_paths(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+async fn upload_query_image(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<SuccessEnvelope<QueryImageAssetData>>), ApiError> {
+    let file = read_single_query_image_part(&mut multipart).await?;
+    let staged = persist_query_image_asset(file)?;
+    let data = {
+        let mut state = state.write().await;
+        state.register_temp_query_asset(&library_id, staged)?
+    };
+
+    Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
+}
+
 async fn get_visual_unit(
     State(state): State<SharedState>,
     Path((library_id, visual_unit_id)): Path<(String, String)>,
@@ -1226,6 +1563,36 @@ async fn get_visual_unit_preview(
     Ok((headers, bytes))
 }
 
+async fn get_query_image_preview(
+    State(state): State<SharedState>,
+    Path((library_id, temp_asset_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let asset = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.get_temp_query_asset(&library_id, &temp_asset_id)?
+    };
+
+    let bytes = fs::read(&asset.path)
+        .map_err(|_| ApiError::not_found("Query image file is no longer available."))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&asset.content_type).map_err(|_| {
+            ApiError::runtime_unavailable(
+                "Query image preview content type is invalid.",
+                Some(json!({ "temp_asset_id": temp_asset_id })),
+            )
+        })?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+
+    Ok((headers, bytes))
+}
+
 async fn list_jobs(
     State(state): State<SharedState>,
     Query(query): Query<JobsQuery>,
@@ -1251,10 +1618,33 @@ async fn search_text(
 ) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
     let plan = {
         let state = state.read().await;
-        state.prepare_search(&request)?
+        state.prepare_text_search(&request)?
     };
 
-    let query_embedding = embed_query_text(&plan.query_text).await?;
+    let query_embedding = embed_query_text(request.text.trim()).await?;
+    let candidates = query_qdrant(&plan, &query_embedding).await?;
+    let response = build_search_response(plan, query_embedding, candidates)?;
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
+async fn search_image(
+    State(state): State<SharedState>,
+    Json(request): Json<ImageSearchRequest>,
+) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
+    let (plan, query_input) = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.prepare_image_search(&request)?
+    };
+
+    let (query_path, query_locator) = match &query_input {
+        ResolvedImageQueryInput::TempAsset(asset) => (asset.path.as_str(), None),
+        ResolvedImageQueryInput::LibraryVisualUnit(visual_unit) => (
+            visual_unit.source_path.as_str(),
+            Some(visual_unit.locator.clone()),
+        ),
+    };
+    let query_embedding = embed_query_image(query_path, query_locator).await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))
@@ -1310,6 +1700,121 @@ fn read_string_filter(filters: Option<&Value>, key: &str) -> Option<BTreeSet<Str
         }
         _ => None,
     }
+}
+
+async fn read_single_query_image_part(
+    multipart: &mut Multipart,
+) -> Result<IncomingQueryImageUpload, ApiError> {
+    let mut file_upload: Option<IncomingQueryImageUpload> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        ApiError::validation_failed(
+            format!("Query image upload could not be parsed: {error}"),
+            Some(json!({ "field": "file" })),
+        )
+    })? {
+        let filename = field.file_name().map(|value| value.to_string());
+        let content_type = field
+            .content_type()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let extension = infer_query_image_extension(filename.as_deref(), &content_type)
+            .ok_or_else(|| {
+                ApiError::validation_failed(
+                    "Only common image files are accepted as query images right now.",
+                    Some(json!({
+                        "field": "file",
+                        "content_type": content_type,
+                        "filename": filename,
+                    })),
+                )
+            })?;
+        let bytes = field.bytes().await.map_err(|error| {
+            ApiError::validation_failed(
+                format!("Query image upload body could not be read: {error}"),
+                Some(json!({ "field": "file" })),
+            )
+        })?;
+
+        if bytes.is_empty() {
+            return Err(ApiError::validation_failed(
+                "Query image upload must not be empty.",
+                Some(json!({ "field": "file" })),
+            ));
+        }
+        if file_upload.is_some() {
+            return Err(ApiError::validation_failed(
+                "Current 110-image-search implementation accepts exactly one query image per upload.",
+                Some(json!({ "field": "file" })),
+            ));
+        }
+
+        file_upload = Some(IncomingQueryImageUpload {
+            bytes: bytes.to_vec(),
+            content_type,
+            original_filename: filename,
+            extension,
+        });
+    }
+
+    file_upload.ok_or_else(|| {
+        ApiError::validation_failed(
+            "Query image upload requires one image file part.",
+            Some(json!({ "field": "file" })),
+        )
+    })
+}
+
+fn infer_query_image_extension(filename: Option<&str>, content_type: &str) -> Option<String> {
+    let by_filename = filename
+        .and_then(|name| FsPath::new(name).extension())
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| is_supported_query_image_extension(value));
+    if by_filename.is_some() {
+        return by_filename;
+    }
+
+    match content_type {
+        "image/png" => Some("png".to_string()),
+        "image/jpeg" => Some("jpg".to_string()),
+        "image/webp" => Some("webp".to_string()),
+        "image/bmp" => Some("bmp".to_string()),
+        "image/gif" => Some("gif".to_string()),
+        _ => None,
+    }
+}
+
+fn is_supported_query_image_extension(extension: &str) -> bool {
+    matches!(extension, "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif")
+}
+
+fn persist_query_image_asset(
+    upload: IncomingQueryImageUpload,
+) -> Result<StagedQueryAsset, ApiError> {
+    let runtime_dir = read_required_env("APP_RUNTIME_DIR")?;
+    let target_dir = FsPath::new(&runtime_dir).join("temp-assets").join("images");
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Query image asset directory could not be created: {error}"),
+            Some(json!({ "path": target_dir })),
+        )
+    })?;
+
+    let filename = format!("query-image-{}.{}", runtime_token(), upload.extension);
+    let path = target_dir.join(filename);
+    fs::write(&path, upload.bytes).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Query image asset could not be written: {error}"),
+            Some(json!({ "path": path })),
+        )
+    })?;
+
+    Ok(StagedQueryAsset {
+        path: path.to_string_lossy().to_string(),
+        content_type: upload.content_type,
+        original_filename: upload.original_filename,
+    })
 }
 
 fn pdf_page_count(path: &FsPath) -> Result<usize, String> {
@@ -1548,6 +2053,74 @@ async fn embed_query_text(text: &str) -> Result<QueryEmbeddingResult, ApiError> 
         mean_pool_vectors(&embedding.vectors).ok_or_else(|| {
             ApiError::runtime_unavailable(
                 "Sidecar query embedding response did not include usable vectors.",
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?
+    } else {
+        embedding.pooled_vector
+    };
+
+    Ok(QueryEmbeddingResult {
+        vectors: embedding.vectors,
+        pooled_vector,
+    })
+}
+
+async fn embed_query_image(
+    path: &str,
+    locator: Option<Value>,
+) -> Result<QueryEmbeddingResult, ApiError> {
+    let payload = json!({
+        "operation_kind": "image_query_embedding",
+        "inputs": {
+            "images": [{
+                "path": path,
+                "locator": locator,
+            }],
+        },
+    });
+    let response = sidecar_client()
+        .post(format!("{}/embed", sidecar_base_url()?))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Sidecar image query embedding request failed: {error}"),
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message = parse_sidecar_error_message(&body).unwrap_or_else(|| {
+            format!("Sidecar image query embedding request failed with {status}.")
+        });
+        return Err(ApiError::runtime_unavailable(
+            message,
+            Some(json!({ "service": "sidecar" })),
+        ));
+    }
+
+    let envelope: SidecarEnvelope<SidecarEmbedPayload> =
+        response.json().await.map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Sidecar image query embedding response was invalid JSON: {error}"),
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?;
+    let embedding = envelope.data.embeddings.into_iter().next().ok_or_else(|| {
+        ApiError::runtime_unavailable(
+            "Sidecar image query embedding response did not include any embeddings.",
+            Some(json!({ "service": "sidecar" })),
+        )
+    })?;
+
+    let pooled_vector = if embedding.pooled_vector.is_empty() {
+        mean_pool_vectors(&embedding.vectors).ok_or_else(|| {
+            ApiError::runtime_unavailable(
+                "Sidecar image query embedding response did not include usable vectors.",
                 Some(json!({ "service": "sidecar" })),
             )
         })?
@@ -1883,6 +2456,21 @@ fn visual_unit_preview_reference(
     })
 }
 
+fn query_image_preview_reference(
+    library_id: &str,
+    temp_asset_id: &str,
+) -> Result<PreviewReference, ApiError> {
+    Ok(PreviewReference {
+        url: format!(
+            "{}/libraries/{}/query-assets/images/{}/preview",
+            app_base_url()?.trim_end_matches('/'),
+            library_id,
+            temp_asset_id
+        ),
+        handle: Some(format!("query-image-preview:{temp_asset_id}")),
+    })
+}
+
 fn content_type_for_visual_unit(visual_unit: &VisualUnitRecord) -> &'static str {
     match visual_unit.source_type.as_str() {
         "pdf" => "application/pdf",
@@ -1906,6 +2494,21 @@ fn runtime_token() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().to_string())
         .unwrap_or_else(|_| "0".to_string())
+}
+
+fn current_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn remove_temp_query_asset_file(path: &str) {
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("Failed to remove expired query image asset file {path}: {error}");
+        }
+    }
 }
 
 fn read_required_env(name: &'static str) -> Result<String, ApiError> {
@@ -2122,7 +2725,7 @@ mod tests {
         let queued = state.queue_import(&prepared).unwrap();
 
         let error = state
-            .prepare_search(&TextSearchRequest {
+            .prepare_text_search(&TextSearchRequest {
                 library_id: library.id.clone(),
                 text: "chart".to_string(),
                 filters: None,
@@ -2209,7 +2812,7 @@ mod tests {
             .unwrap();
 
         let plan = state
-            .prepare_search(&TextSearchRequest {
+            .prepare_text_search(&TextSearchRequest {
                 library_id: library.id.clone(),
                 text: "report".to_string(),
                 filters: None,
@@ -2259,11 +2862,395 @@ mod tests {
         assert!(response.results.iter().any(|item| item.kind == "image"));
         assert_eq!(response.results[0].score, Some(0.9));
         assert_eq!(response.results[1].score, Some(0.8));
-        assert!(response.results.iter().all(|item| item.preview.url.starts_with("http://127.0.0.1:53210/libraries/")));
+        assert!(response.results.iter().all(|item| item
+            .preview
+            .url
+            .starts_with("http://127.0.0.1:53210/libraries/")));
         assert_eq!(response.debug.as_ref().unwrap()["repr_kind"], "multivector");
 
         let _ = fs::remove_file(pdf_path);
         let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn prepare_image_search_requires_existing_temp_asset() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "image-search".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let image_path = unique_test_file_path("query.png");
+        fs::write(&image_path, b"png").unwrap();
+
+        let staged = StagedQueryAsset {
+            path: image_path.to_string_lossy().to_string(),
+            content_type: "image/png".to_string(),
+            original_filename: Some("query.png".to_string()),
+        };
+        let asset = state
+            .register_temp_query_asset(&library.id, staged)
+            .unwrap();
+
+        let (plan, temp_asset) = state
+            .prepare_image_search(&ImageSearchRequest {
+                library_id: library.id.clone(),
+                image_input: QueryImageInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some(asset.temp_asset_id.clone()),
+                    visual_unit_id: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(true),
+                target_index_lines: None,
+            })
+            .unwrap();
+
+        assert_eq!(plan.library_id, library.id);
+        match temp_asset {
+            ResolvedImageQueryInput::TempAsset(temp_asset) => {
+                assert_eq!(temp_asset.id, asset.temp_asset_id);
+                assert_eq!(temp_asset.path, image_path.to_string_lossy().to_string());
+            }
+            ResolvedImageQueryInput::LibraryVisualUnit(_) => {
+                panic!("expected temp query asset input")
+            }
+        }
+
+        let missing = state
+            .prepare_image_search(&ImageSearchRequest {
+                library_id: library.id.clone(),
+                image_input: QueryImageInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some("temp_asset_999999".to_string()),
+                    visual_unit_id: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(missing.payload.code, "not_found");
+
+        let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn prepare_image_search_accepts_library_image_objects() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "image-search-library-object".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let image_path = unique_test_file_path("library-query.png");
+        fs::write(&image_path, b"png").unwrap();
+        let classification = state
+            .inspect_import_path(&image_path.to_string_lossy())
+            .unwrap();
+        let visual_unit = state
+            .new_visual_units_from_classification(&classification)
+            .into_iter()
+            .next()
+            .unwrap();
+        let visual_unit_id = visual_unit.id.clone();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .visual_units
+            .insert(visual_unit.id.clone(), visual_unit.clone());
+
+        let (plan, input) = state
+            .prepare_image_search(&ImageSearchRequest {
+                library_id: library.id.clone(),
+                image_input: QueryImageInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    visual_unit_id: Some(visual_unit_id),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+
+        assert_eq!(plan.library_id, library.id);
+        match input {
+            ResolvedImageQueryInput::LibraryVisualUnit(visual_unit) => {
+                assert_eq!(visual_unit.kind, "image");
+                assert_eq!(visual_unit.source_path, image_path.to_string_lossy());
+            }
+            ResolvedImageQueryInput::TempAsset(_) => {
+                panic!("expected library visual unit query input")
+            }
+        }
+
+        let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn prepare_image_search_accepts_library_document_page_objects() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "document-page-query-object".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let pdf_path = unique_test_file_path("library-query-page.pdf");
+        write_test_pdf(&pdf_path, 1);
+        let classification = state
+            .inspect_import_path(&pdf_path.to_string_lossy())
+            .unwrap();
+        let visual_unit = state
+            .new_visual_units_from_classification(&classification)
+            .into_iter()
+            .next()
+            .unwrap();
+        let visual_unit_id = visual_unit.id.clone();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .visual_units
+            .insert(visual_unit.id.clone(), visual_unit.clone());
+
+        let (plan, input) = state
+            .prepare_image_search(&ImageSearchRequest {
+                library_id: library.id.clone(),
+                image_input: QueryImageInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    visual_unit_id: Some(visual_unit_id),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+
+        assert_eq!(plan.library_id, library.id);
+        match input {
+            ResolvedImageQueryInput::LibraryVisualUnit(visual_unit) => {
+                assert_eq!(visual_unit.kind, "document_page");
+                assert_eq!(visual_unit.locator["page"], 1);
+            }
+            ResolvedImageQueryInput::TempAsset(_) => {
+                panic!("expected library visual unit query input")
+            }
+        }
+
+        let _ = fs::remove_file(pdf_path);
+    }
+
+    #[test]
+    fn prepare_image_search_rejects_unsupported_library_object_query_images() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "unsupported-query-object".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let visual_unit_id = "vu_video_000001".to_string();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .visual_units
+            .insert(
+                visual_unit_id.clone(),
+                VisualUnitRecord {
+                    id: visual_unit_id.clone(),
+                    point_id: 1,
+                    source_path: "/tmp/example.mp4".to_string(),
+                    source_type: "video".to_string(),
+                    kind: "video_segment".to_string(),
+                    locator: json!({ "start_ms": 0, "end_ms": 1000 }),
+                    neighbor_context: json!({}),
+                },
+            );
+
+        let error = state
+            .prepare_image_search(&ImageSearchRequest {
+                library_id: library.id.clone(),
+                image_input: QueryImageInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    visual_unit_id: Some(visual_unit_id),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "not_supported");
+        let details = error.payload.details.unwrap();
+        assert_eq!(details["supported_kinds"][0], "image");
+        assert_eq!(details["supported_kinds"][1], "document_page");
+    }
+
+    #[test]
+    fn get_temp_query_asset_rejects_expired_assets() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "expired-query-image".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let image_path = unique_test_file_path("expired-query.png");
+        fs::write(&image_path, b"png").unwrap();
+        let staged = StagedQueryAsset {
+            path: image_path.to_string_lossy().to_string(),
+            content_type: "image/png".to_string(),
+            original_filename: Some("expired-query.png".to_string()),
+        };
+        let asset = state
+            .register_temp_query_asset(&library.id, staged)
+            .unwrap();
+        state
+            .temp_query_assets
+            .get_mut(&asset.temp_asset_id)
+            .unwrap()
+            .expires_at_ms = 0;
+
+        let error = state
+            .get_temp_query_asset(&library.id, &asset.temp_asset_id)
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "not_found");
+        assert_eq!(
+            error.payload.message,
+            "Query image was not found or has expired."
+        );
+
+        let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn prune_temp_query_assets_removes_expired_asset_records_and_files() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "prune-expired-query-image".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let image_path = unique_test_file_path("expired-prune-query.png");
+        fs::write(&image_path, b"png").unwrap();
+        let staged = StagedQueryAsset {
+            path: image_path.to_string_lossy().to_string(),
+            content_type: "image/png".to_string(),
+            original_filename: Some("expired-prune-query.png".to_string()),
+        };
+        let asset = state
+            .register_temp_query_asset(&library.id, staged)
+            .unwrap();
+        state
+            .temp_query_assets
+            .get_mut(&asset.temp_asset_id)
+            .unwrap()
+            .expires_at_ms = 0;
+
+        let summary = state.prune_temp_query_assets();
+
+        assert_eq!(summary.expired_removed, 1);
+        assert_eq!(summary.missing_removed, 0);
+        assert!(!state.temp_query_assets.contains_key(&asset.temp_asset_id));
+        assert!(!image_path.exists());
+    }
+
+    #[test]
+    fn prune_temp_query_assets_removes_missing_asset_records() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "prune-missing-query-image".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let image_path = unique_test_file_path("missing-prune-query.png");
+        fs::write(&image_path, b"png").unwrap();
+        let staged = StagedQueryAsset {
+            path: image_path.to_string_lossy().to_string(),
+            content_type: "image/png".to_string(),
+            original_filename: Some("missing-prune-query.png".to_string()),
+        };
+        let asset = state
+            .register_temp_query_asset(&library.id, staged)
+            .unwrap();
+        fs::remove_file(&image_path).unwrap();
+
+        let summary = state.prune_temp_query_assets();
+
+        assert_eq!(summary.expired_removed, 0);
+        assert_eq!(summary.missing_removed, 1);
+        assert!(!state.temp_query_assets.contains_key(&asset.temp_asset_id));
     }
 
     #[test]

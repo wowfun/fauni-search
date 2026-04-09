@@ -9,10 +9,12 @@
   - 本地路径导入提交
   - 嵌入式任务面板
   - 三栏工作台中的对象详情与预览侧栏
-  - 文本搜索输入、显式 `not_ready` 反馈和真实搜索结果列表
-- 当前 sidecar 已经具备真实的 ColQwen `query_embedding` 和 `document_embedding` 能力，并提供 `/health`、`/capabilities`、`/embed`。
+  - 统一搜索入口中的 Text / Image 模式
+  - 通过文件选择或粘贴图片进入临时查询资产链路，以及把库内 `image` / `document_page` 结果对象直接作为 query image
+  - 显式 `not_ready` 反馈和真实搜索结果列表
+- 当前 sidecar 已经具备真实的 ColQwen `query_embedding`、`image_query_embedding` 与 `document_embedding` 能力，并提供 `/health`、`/capabilities`、`/embed`。
 - 当前 app 已经接通真实的 `app -> sidecar -> Qdrant` multivector 搜索链，当前可实际命中 `image` 与真实页级 `document_page`。
-- 当前仍然是早期工作台，不包含完整产品控制面，也还没有 `video_segment`、图片查询或视频查询。
+- 当前仍然是早期工作台，不包含完整产品控制面，也还没有 `video_segment` 或视频查询。
 - 默认使用根 `.env` 作为本地运行时配置；传 `--dev` 时使用 `.env.dev`。同一次运行中，被选中的 env 文件是端口、URL、日志目录和运行时目录的单一事实源。
 
 ## 第一次使用：安装与初始化
@@ -97,7 +99,7 @@ bash scripts/local/stop.sh --dev --all
 
 当前支持的服务名是 `app`、`sidecar`、`ui`、`qdrant`。
 
-## 启动完成后：验证文本搜索链路
+## 启动完成后：验证真实检索链路
 
 这一步是验证命令，不属于安装或启动流程。确认 app、sidecar 与 Qdrant 都已运行后，可以执行：
 
@@ -115,6 +117,16 @@ bash scripts/local/smoke-text-search.sh --dev --json
 
 该脚本会创建一个临时库，导入一张现有图片 fixture 和一个写入 `APP_RUNTIME_DIR/smoke-text-search/` 的多页 PDF，随后验证文本查询能够同时返回 `image` 与 `document_page`，并确认搜索后端是 `qdrant` / `multivector`。
 
+图片查询对应 smoke：
+
+```bash
+bash scripts/local/smoke-image-search.sh --dev --json
+```
+
+该脚本会创建一个临时库，导入同一组图片 / PDF 内容，上传一张临时查询图片，然后验证 `/search/image` 能够同时返回 `image` 与 `document_page`，并确认搜索后端是 `qdrant` / `multivector`。
+随后它还会复用库内返回的 `image` 结果对象，以 `library_object` 形式再次发起图片搜索，并验证这条路径也能命中 `image` 与 `document_page`。
+最后它还会复用库内返回的 `document_page` 对象，以 `library_object` 形式再次发起图片搜索，并验证文档页 query image 链路也能命中 `image` 与 `document_page`。
+
 ## 快速检查
 
 快速检查不启动长驻服务，也不加载真实 GPU 模型：
@@ -125,13 +137,13 @@ bash scripts/local/check.sh
 
 该命令默认执行 Rust 测试、sidecar 窄测试和 UI 构建。隔离开发配置可以使用 `bash scripts/local/check.sh --dev`。
 
-当前最小 UI happy-path smoke 入口：
+当前最小 UI smoke 入口：
 
 ```bash
 pnpm --dir ui test:e2e
 ```
 
-这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。当前覆盖最小 happy path、建库后直接搜索的 `not_ready`，以及无效导入路径的拒绝反馈。运行前仍需要先完成一次：
+这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。当前覆盖文本 happy path、图片查询 happy path、粘贴图片查询、库内 `image` / `document_page` 对象作为 query image、建库后直接搜索的 `not_ready`，以及无效导入路径或非图片查询上传的拒绝反馈。运行前仍需要先完成一次：
 
 ```bash
 bash scripts/local/bootstrap-linux.sh --dev
@@ -160,7 +172,9 @@ UI 当前包含：
 - 路径导入表单与回执区
 - TATDQA demo fixture 的填入与“导入并搜索”快捷动作
 - 最近任务列表
-- 中间列的文本搜索输入框、错误反馈区和真实结果列表
+- 中间列的统一搜索入口、Text / Image 模式切换、错误反馈区和真实结果列表
+- `Image` 模式下的查询图片卡片；当前支持文件选择、粘贴图片，也支持从结果列表把库内 `image` / `document_page` 对象直接设为 query image
+- 临时上传查询图片的有效窗口是临时性的；运行期会自动回收过期查询图片及其预览文件，过期后需重新上传
 - 搜索结果卡片中的每条结果 score 展示；该值只用于当前响应内的相对排序参考
 - 右侧详情栏中的图片/PDF 预览、locator、preview 链接和 neighbor context
 - 从导入回执或搜索结果直接打开右侧详情的交互链
@@ -202,6 +216,7 @@ UI 当前包含：
 - `status.sh` 会报告 app、sidecar、UI 和 Qdrant 的 URL、ready 状态、pid、日志路径与配置来源；加 `--json` 时输出机器可读 JSON。
 - `stop.sh` 会停止指定本地服务，支持 `--all` 停止 app、sidecar、UI 和 Qdrant，并会优先使用 pid 文件再回退到端口 / 命令发现。
 - `smoke-text-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 文本搜索 smoke；加 `--json` 时输出机器可读摘要。
+- `smoke-image-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 图片搜索 smoke；加 `--json` 时输出机器可读摘要。
 - `check.sh` 是无 GPU 快速检查入口，不启动长驻服务。
 - `pnpm --dir ui test:e2e` 是当前阶段最小 Playwright UI smoke，固定使用 `--dev` 配置；若 `--dev` 服务未运行则会自行启动并在结束后自清理。
 - `download-model.sh` 会读取本次运行选中的 env 文件中的 `TEXT_SEARCH_MODEL_ID` / `TEXT_SEARCH_MODEL_REVISION`，并继承 `HF_ENDPOINT` / `HF_HUB_ENABLE_HF_TRANSFER` 来控制 Hugging Face 下载行为。
@@ -216,6 +231,6 @@ UI 当前包含：
 - `stop`：停止本地服务，入口是 `stop.sh`
 - `test`：无 GPU 快速检查，入口是 `check.sh`
 - `ui-smoke`：最小浏览器闭环验证，入口是 `pnpm --dir ui test:e2e`
-- `smoke`：真实链路验证，入口是 `smoke-text-search.sh`
+- `smoke`：真实链路验证，入口是 `smoke-text-search.sh` / `smoke-image-search.sh`
 
 更多排障信息见 [排障](./troubleshooting.md)。
