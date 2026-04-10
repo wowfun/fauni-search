@@ -80,6 +80,7 @@ class EmbedRequest(BaseModel):
         "query_embedding",
         "image_query_embedding",
         "video_query_embedding",
+        "document_query_embedding",
         "document_embedding",
     ]
     inputs: EmbedInputs
@@ -160,6 +161,18 @@ def create_app(runtime: EmbeddingRuntime | None = None) -> FastAPI:
                     )
                 data = runtime.embed_video_queries(
                     [item.model_dump() for item in request.inputs.videos],
+                    debug=request.debug,
+                )
+            elif request.operation_kind == "document_query_embedding":
+                if not request.inputs.documents:
+                    raise SidecarApiError(
+                        status_code=422,
+                        code="validation_failed",
+                        message="document_query_embedding requires inputs.documents.",
+                        details={"field": "inputs.documents"},
+                    )
+                data = runtime.embed_document_queries(
+                    [item.model_dump() for item in request.inputs.documents],
                     debug=request.debug,
                 )
             else:

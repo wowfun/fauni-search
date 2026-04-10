@@ -230,6 +230,31 @@ tail -n 80 data/runtime/dev/logs/app.log
 - 如果你还需要继续用这张图片查询，直接重新上传
 - 若问题出现在刚上传后立刻失效，再优先检查 `app.log` 中是否出现了临时资产目录不可写、文件丢失或清理异常
 
+## 查询文档过一段时间后失效
+
+症状：
+- `Document` 模式里先前上传的查询 PDF 还显示文件名，但重新搜索时报 `not_found`
+- 查询文档预览接口返回 404
+
+检查：
+
+```bash
+bash scripts/local/status.sh --json
+tail -n 80 data/runtime/logs/app.log
+```
+
+如果使用 `--dev`：
+
+```bash
+bash scripts/local/status.sh --dev --json
+tail -n 80 data/runtime/dev/logs/app.log
+```
+
+处理：
+- 这是当前阶段的预期行为：临时上传查询文档有过期窗口，Rust 主服务会主动回收过期资产及其预览文件
+- 如果你还需要继续用这份 PDF 查询，直接重新上传
+- 如果问题出现在刚上传后立刻失效，优先检查 `app.log` 中是否出现了临时资产目录不可写、文件丢失或清理异常
+
 ## 粘贴图片没有进入查询图片卡片
 
 症状：
@@ -359,6 +384,31 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 - 如果失败发生在 `source_id` 复用路径，优先确认对应库里确实已经导入视频，并且返回结果中包含可复用的视频源
 - 如果失败发生在指定时间范围查询，优先确认 `start_ms` / `end_ms` 没有越界，且 `start_ms < end_ms`
 - 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/dev/logs/sidecar.log`
+- 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
+
+## `smoke-document-search.sh` 失败
+
+症状：
+- `smoke-document-search.sh` 报查询文档上传失败
+- `smoke-document-search.sh` 报 `/search/document` 返回错误
+- `smoke-document-search.sh` 报结果中缺少 `document_page` 或 `image`
+- `smoke-document-search.sh` 报页范围无效或 `document_page` 复用失败
+
+检查：
+
+```bash
+bash scripts/local/status.sh --dev --json
+tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/sidecar.log
+tail -n 80 data/runtime/dev/logs/qdrant.log
+```
+
+处理：
+- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、sidecar、Qdrant 都是 ready
+- 如果失败发生在查询文档上传阶段，优先检查 app 日志中的 `validation_failed`；当前阶段只接受 PDF 查询上传
+- 如果失败发生在页范围查询阶段，优先确认 `start_page` / `end_page` 都存在、都从 `1` 开始，并且满足 `start_page <= end_page`
+- 如果失败发生在 `document_page` 复用路径，优先确认返回结果里确实包含 `kind=document_page` 的 visual unit；当前阶段工作区只是把它映射成 `source_id + 单页 locator`
+- 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先检查 sidecar 是否已经声明 `document_query_embedding` 能力
 - 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
 
 ## 模型下载失败

@@ -28,6 +28,9 @@ class EmbeddingRuntime(Protocol):
     def embed_video_queries(self, videos: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
         ...
 
+    def embed_document_queries(self, documents: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+        ...
+
     def embed_documents(self, documents: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
         ...
 
@@ -131,6 +134,13 @@ class ColQwenRuntime:
                 },
                 {
                     "operation_kind": "video_query_embedding",
+                    "supported": can_service,
+                    "target_index_lines": ["multivector"],
+                    "input_kind": "local_file",
+                    "model": self._model_metadata(),
+                },
+                {
+                    "operation_kind": "document_query_embedding",
                     "supported": can_service,
                     "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
@@ -287,6 +297,68 @@ class ColQwenRuntime:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
         payload: dict[str, Any] = {
             "operation_kind": "video_query_embedding",
+            "model": self._model_metadata(loaded=True),
+            "embeddings": items,
+        }
+
+        if debug:
+            payload["debug"] = {
+                "elapsed_ms": elapsed_ms,
+                "loaded_at": self._load_state.loaded_at,
+                "last_load_ms": self._load_state.last_load_ms,
+            }
+
+        return payload
+
+    def embed_document_queries(
+        self, documents: list[dict[str, Any]], debug: bool = False
+    ) -> dict[str, Any]:
+        model, processor = self._ensure_loaded()
+
+        import torch
+
+        started_at = time.perf_counter()
+        items = []
+
+        for index, document in enumerate(documents):
+            path = document["path"]
+            pages, locator = load_document_query_pages(document)
+            batch = processor.process_images(pages).to(model.device)
+
+            with torch.inference_mode():
+                model.rope_deltas = None
+                embeddings = model(**batch)
+
+            page_vectors = []
+            for page_index in range(len(pages)):
+                vectors = embeddings[page_index].to(torch.float32).cpu()
+                page_vectors.append(vectors)
+
+            pooled_source = torch.cat(page_vectors, dim=0)
+            pooled_vector = (
+                pooled_source.mean(dim=0)
+                if pooled_source.ndim == 2 and pooled_source.shape[0] > 0
+                else None
+            )
+
+            items.append(
+                {
+                    "index": index,
+                    "path": path,
+                    "source_type": "pdf",
+                    "kind": "document",
+                    "locator": locator,
+                    "page_count": len(pages),
+                    "vector_count": int(sum(vectors.shape[0] for vectors in page_vectors)),
+                    "dim": int(page_vectors[0].shape[1]) if page_vectors and page_vectors[0].ndim == 2 else 0,
+                    "vectors": [vector.tolist() for vectors in page_vectors for vector in vectors],
+                    "pooled_vector": pooled_vector.tolist() if pooled_vector is not None else [],
+                }
+            )
+
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        payload: dict[str, Any] = {
+            "operation_kind": "document_query_embedding",
             "model": self._model_metadata(loaded=True),
             "embeddings": items,
         }
@@ -545,6 +617,46 @@ def load_query_input_video(video_input: dict[str, Any]) -> tuple[list[Any], str,
     return frames, "video", "video", video_range
 
 
+def load_document_query_pages(document: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+    path = document["path"]
+    locator = document.get("locator")
+    normalized = Path(path).expanduser()
+    suffix = normalized.suffix.lower()
+    if suffix != ".pdf":
+        raise RuntimeError(
+            f"Unsupported document query input type for embedding: {normalized}"
+        )
+    if not module_available("pypdfium2"):
+        raise RuntimeError("pypdfium2 is unavailable in the current GPU environment.")
+
+    import pypdfium2 as pdfium
+
+    try:
+        pdf_document = pdfium.PdfDocument(str(normalized))
+        page_count = len(pdf_document)
+        if page_count == 0:
+            raise RuntimeError(f"PDF has no pages: {normalized}")
+        start_page, end_page = resolve_pdf_page_range(locator, page_count, normalized)
+        images = []
+        for page_number in range(start_page, end_page + 1):
+            page = pdf_document.get_page(page_number - 1)
+            bitmap = page.render(scale=2)
+            images.append(bitmap.to_pil().convert("RGB"))
+            page.close()
+        pdf_document.close()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to render pages from {normalized}: {exc}") from exc
+
+    return (
+        images,
+        {
+            "start_page": start_page,
+            "end_page": end_page,
+            "page_count": page_count,
+        },
+    )
+
+
 def resolve_pdf_page_number(
     locator: dict[str, Any] | None,
     page_count: int,
@@ -563,6 +675,31 @@ def resolve_pdf_page_number(
             f"PDF locator for {normalized_path} requested page {raw_page}, but the document has {page_count} page(s)."
         )
     return raw_page
+
+
+def resolve_pdf_page_range(
+    locator: dict[str, Any] | None,
+    page_count: int,
+    normalized_path: Path,
+) -> tuple[int, int]:
+    if locator is None:
+        return 1, page_count
+
+    raw_start_page = locator.get("start_page")
+    raw_end_page = locator.get("end_page")
+    if raw_start_page is None or raw_end_page is None:
+        raise RuntimeError(
+            f"PDF locator for {normalized_path} must include start_page and end_page."
+        )
+    if not isinstance(raw_start_page, int) or not isinstance(raw_end_page, int):
+        raise RuntimeError(
+            f"PDF locator for {normalized_path} must use integer start_page and end_page."
+        )
+    if raw_start_page < 1 or raw_end_page < raw_start_page or raw_end_page > page_count:
+        raise RuntimeError(
+            f"PDF locator for {normalized_path} must satisfy 1 <= start_page <= end_page <= {page_count}."
+        )
+    return raw_start_page, raw_end_page
 
 
 def supported_video_suffixes() -> set[str]:

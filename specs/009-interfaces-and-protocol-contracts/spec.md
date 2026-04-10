@@ -70,11 +70,13 @@
   - `POST /search/text`
   - `POST /search/image`
   - `POST /search/video`
+  - `POST /search/document`
 - 这三类端点共享同一搜索请求封套，至少包含：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_index_lines`
 - `/search/text` 的请求载荷必须携带 `text`
 - `/search/image` 的请求载荷必须携带 `image_input`
 - `/search/video` 的请求载荷必须携带 `video_input`
-- `image_input` 与 `video_input` 都必须编码为显式区分输入来源的结构化对象
+- `/search/document` 的请求载荷必须携带 `document_input`
+- `image_input`、`video_input` 与 `document_input` 都必须编码为显式区分输入来源的结构化对象
 - 图片与视频查询长期上允许两类稳定编码形式：临时查询资产引用、库内对象引用
 - 图片查询的稳定输入对象至少应支持以下两种显式编码：
   - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "..." }`
@@ -82,7 +84,11 @@
 - 视频查询的稳定输入对象至少应支持以下两种显式编码：
   - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "...", "locator": { "start_ms": ..., "end_ms": ... }? }`
   - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "visual_unit_id": "..."?, "locator": { "start_ms": ..., "end_ms": ... }? }`
+- 文档查询的稳定输入对象至少应支持以下两种显式编码：
+  - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "...", "locator": { "start_page": ..., "end_page": ... }? }`
+  - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "locator": { "start_page": ..., "end_page": ... }? }`
 - 视频查询的 `locator` 若出现，必须同时包含 `start_ms` 与 `end_ms`；缺失 `locator` 时表示整段视频查询
+- 文档查询的 `locator` 若出现，必须同时包含 `start_page` 与 `end_page`；缺失 `locator` 时表示整份文档查询
 - 当视频查询使用库内对象引用时，能力专题可以选择：
   - 通过 `source_id` 表示“整段视频或显式时间范围”
   - 通过 `visual_unit_id` 表示“直接复用某个库内 `video_segment` 作为查询输入”
@@ -115,10 +121,13 @@
 - `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
 - 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/images`
 - 若通过 HTTP 暴露，临时查询视频上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/videos`
+- 若通过 HTTP 暴露，临时查询文档上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/documents`
 - `POST /libraries/{library_id}/query-assets/images` 的首个稳定输入变体是单图片上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
 - `POST /libraries/{library_id}/query-assets/videos` 的首个稳定输入变体是单视频上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
+- `POST /libraries/{library_id}/query-assets/documents` 的首个稳定输入变体是单文档上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
 - 临时查询图片上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
 - 临时查询视频上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
+- 临时查询文档上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
 - 动作型成功响应应在 `data` 中返回至少以下信息：
   - `accepted`
   - `rejected`
@@ -158,9 +167,11 @@
   - `query_embedding`，用于承接文本查询编码；其输入至少应能表达一个或多个查询文本，以及与目标索引线相关的最小上下文
   - `image_query_embedding`，用于承接图片查询编码；其输入至少应能表达一个或多个本地图片引用，且在需要时能够携带视觉单元级 `locator`
   - `video_query_embedding`，用于承接视频查询编码；其输入至少应能表达一个或多个本地视频引用，并在需要时能够携带视频时间范围 `locator`
+  - `document_query_embedding`，用于承接文档查询编码；其输入至少应能表达一个或多个本地文档引用，并在需要时能够携带文档页范围 `locator`
   - `document_embedding`，用于承接当前阶段 PDF 页图或图片对象的编码；其输入至少应能表达一个或多个本地文件引用，以及与目标索引线相关的最小上下文
 - `image_query_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达库内 `document_page` 作为查询图片的路径
 - `video_query_embedding` 的单项输入在需要时必须能够携带视频时间范围 `locator`；当前阶段至少应支持用 `start_ms` / `end_ms` 表达整段视频中的目标片段
+- `document_query_embedding` 的单项输入在需要时必须能够携带文档页范围 `locator`；当前阶段至少应支持用 `start_page` / `end_page` 表达整份 PDF 中的目标片段
 - `document_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达 PDF 的目标页
 - `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了视觉单元级 `locator`，响应应能返回与该输入对应的定位摘要
 - 推理 / 编码成功响应必须返回与 `operation_kind` 对应的结构化 `data`，例如向量输出、派生结果描述或媒体处理摘要；不得依赖未文档化的 sidecar 私有字段

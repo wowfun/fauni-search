@@ -55,12 +55,20 @@ pub fn build_app(state: SharedState) -> Router {
             post(upload_query_video),
         )
         .route(
+            "/libraries/:library_id/query-assets/documents",
+            post(upload_query_document),
+        )
+        .route(
             "/libraries/:library_id/query-assets/images/:temp_asset_id/preview",
             get(get_query_image_preview),
         )
         .route(
             "/libraries/:library_id/query-assets/videos/:temp_asset_id/preview",
             get(get_query_video_preview),
+        )
+        .route(
+            "/libraries/:library_id/query-assets/documents/:temp_asset_id/preview",
+            get(get_query_document_preview),
         )
         .route(
             "/libraries/:library_id/video-sources/:source_id/preview",
@@ -79,6 +87,7 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/search/text", post(search_text))
         .route("/search/image", post(search_image))
         .route("/search/video", post(search_video))
+        .route("/search/document", post(search_document))
         .layer(DefaultBodyLimit::max(APP_BODY_LIMIT_BYTES))
         .with_state(state)
 }
@@ -662,6 +671,90 @@ impl AppState {
         }
     }
 
+    fn prepare_document_search(
+        &self,
+        request: &DocumentSearchRequest,
+    ) -> Result<(SearchPlan, ResolvedDocumentQueryInput), ApiError> {
+        let plan = self.prepare_search_scope(
+            request.library_id.trim(),
+            request.filters.as_ref(),
+            request.top_k,
+            request.debug,
+            request.target_index_lines.as_ref(),
+        )?;
+
+        match request.document_input.kind.as_str() {
+            "temp_asset" => {
+                let temp_asset_id = request
+                    .document_input
+                    .temp_asset_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ApiError::validation_failed(
+                            "document_input.kind=temp_asset requires temp_asset_id.",
+                            Some(json!({ "field": "document_input.temp_asset_id" })),
+                        )
+                    })?;
+                let asset = self.get_temp_query_document_asset(&plan.library_id, temp_asset_id)?;
+                let locator = resolve_document_query_locator(
+                    request.document_input.locator.as_ref(),
+                    asset.page_count,
+                    "document_input.locator",
+                )?;
+                Ok((
+                    plan,
+                    ResolvedDocumentQueryInput {
+                        path: asset.path,
+                        locator,
+                    },
+                ))
+            }
+            "library_object" => {
+                let source_id = request
+                    .document_input
+                    .source_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ApiError::validation_failed(
+                            "document_input.kind=library_object requires source_id.",
+                            Some(json!({ "field": "document_input.source_id" })),
+                        )
+                    })?;
+                let source = self.get_library_source(&plan.library_id, source_id)?;
+                if source.source_type != "pdf" {
+                    return Err(ApiError::not_supported(
+                        "Current 130-document-search implementation only supports library PDF sources as query documents.",
+                        Some(json!({
+                            "field": "document_input.source_id",
+                            "received_source_type": source.source_type,
+                            "supported_source_type": "pdf",
+                        })),
+                    ));
+                }
+                let locator = resolve_document_query_locator(
+                    request.document_input.locator.as_ref(),
+                    source.page_count,
+                    "document_input.locator",
+                )?;
+                Ok((
+                    plan,
+                    ResolvedDocumentQueryInput {
+                        path: source.source_path,
+                        locator,
+                    },
+                ))
+            }
+            _ => Err(ApiError::validation_failed(
+                "document_input.kind must be one of the supported query document input kinds.",
+                Some(json!({
+                    "field": "document_input.kind",
+                    "received": request.document_input.kind,
+                    "supported": ["temp_asset", "library_object"],
+                })),
+            )),
+        }
+    }
+
     fn prepare_search_scope(
         &self,
         library_id: &str,
@@ -767,6 +860,22 @@ impl AppState {
         })
     }
 
+    fn register_temp_query_document_asset(
+        &mut self,
+        library_id: &str,
+        staged: StagedQueryAsset,
+    ) -> Result<QueryDocumentAssetData, ApiError> {
+        let record = self.register_temp_query_asset_record(library_id, staged)?;
+        Ok(QueryDocumentAssetData {
+            temp_asset_id: record.id.clone(),
+            preview: query_document_preview_reference(library_id, &record.id)?,
+            source_type: record.source_type.clone(),
+            content_type: record.content_type.clone(),
+            original_filename: record.original_filename.clone(),
+            page_count: record.page_count,
+        })
+    }
+
     fn register_temp_query_asset_record(
         &mut self,
         library_id: &str,
@@ -786,6 +895,7 @@ impl AppState {
             content_type: staged.content_type,
             source_type: staged.source_type,
             original_filename: staged.original_filename,
+            page_count: staged.page_count,
             duration_ms: staged.duration_ms,
             expires_at_ms: current_unix_ms() + TEMP_QUERY_ASSET_TTL_MS,
         };
@@ -888,6 +998,44 @@ impl AppState {
         if !FsPath::new(&asset.path).exists() {
             return Err(ApiError::not_found(
                 "Query video file is no longer available.",
+            ));
+        }
+        Ok(asset.clone())
+    }
+
+    fn get_temp_query_document_asset(
+        &self,
+        library_id: &str,
+        temp_asset_id: &str,
+    ) -> Result<TempQueryAssetRecord, ApiError> {
+        let asset = self
+            .temp_query_assets
+            .get(temp_asset_id)
+            .ok_or_else(|| ApiError::not_found("Query document was not found or has expired."))?;
+
+        if asset.library_id != library_id {
+            return Err(ApiError::not_found(
+                "Query document was not found for the selected library.",
+            ));
+        }
+        if asset.source_type != "pdf" {
+            return Err(ApiError::not_supported(
+                "Current 130-document-search implementation only accepts PDF temp assets as query documents.",
+                Some(json!({
+                    "field": "document_input.temp_asset_id",
+                    "received_source_type": asset.source_type,
+                    "supported_source_type": "pdf",
+                })),
+            ));
+        }
+        if asset.expires_at_ms <= current_unix_ms() {
+            return Err(ApiError::not_found(
+                "Query document was not found or has expired.",
+            ));
+        }
+        if !FsPath::new(&asset.path).exists() {
+            return Err(ApiError::not_found(
+                "Query document file is no longer available.",
             ));
         }
         Ok(asset.clone())
@@ -1091,6 +1239,7 @@ impl AppState {
             id: classification.source_id.clone(),
             source_path: classification.normalized_path.clone(),
             source_type: classification.source_type.clone(),
+            page_count: classification.page_count,
             duration_ms: classification.duration_ms,
         }
     }
@@ -1213,6 +1362,7 @@ struct SourceRecord {
     id: String,
     source_path: String,
     source_type: String,
+    page_count: Option<usize>,
     duration_ms: Option<u64>,
 }
 
@@ -1264,6 +1414,7 @@ struct TempQueryAssetRecord {
     source_type: String,
     content_type: String,
     original_filename: Option<String>,
+    page_count: Option<usize>,
     duration_ms: Option<u64>,
     expires_at_ms: u128,
 }
@@ -1288,6 +1439,12 @@ enum ResolvedImageQueryInput {
 
 #[derive(Clone, Debug)]
 struct ResolvedVideoQueryInput {
+    path: String,
+    locator: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedDocumentQueryInput {
     path: String,
     locator: Option<Value>,
 }
@@ -1486,6 +1643,17 @@ pub struct VideoSearchRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DocumentSearchRequest {
+    pub library_id: String,
+    pub document_input: QueryDocumentInputRequest,
+    pub filters: Option<Value>,
+    pub top_k: Option<usize>,
+    pub cursor: Option<String>,
+    pub debug: Option<bool>,
+    pub target_index_lines: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct QueryImageInputRequest {
     pub kind: String,
     pub temp_asset_id: Option<String>,
@@ -1498,6 +1666,14 @@ pub struct QueryVideoInputRequest {
     pub temp_asset_id: Option<String>,
     pub source_id: Option<String>,
     pub visual_unit_id: Option<String>,
+    pub locator: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryDocumentInputRequest {
+    pub kind: String,
+    pub temp_asset_id: Option<String>,
+    pub source_id: Option<String>,
     pub locator: Option<Value>,
 }
 
@@ -1551,6 +1727,18 @@ pub struct QueryVideoAssetData {
     pub original_filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueryDocumentAssetData {
+    pub temp_asset_id: String,
+    pub preview: PreviewReference,
+    pub source_type: String,
+    pub content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1622,6 +1810,7 @@ struct StagedQueryAsset {
     source_type: String,
     content_type: String,
     original_filename: Option<String>,
+    page_count: Option<usize>,
     duration_ms: Option<u64>,
 }
 
@@ -1633,6 +1822,13 @@ struct IncomingQueryImageUpload {
 }
 
 struct IncomingQueryVideoUpload {
+    bytes: Vec<u8>,
+    content_type: String,
+    original_filename: Option<String>,
+    extension: String,
+}
+
+struct IncomingQueryDocumentUpload {
     bytes: Vec<u8>,
     content_type: String,
     original_filename: Option<String>,
@@ -1852,15 +2048,18 @@ async fn root() -> Json<RootPayload> {
             "GET /libraries/{library_id}/video-sources",
             "POST /libraries/{library_id}/query-assets/images",
             "POST /libraries/{library_id}/query-assets/videos",
+            "POST /libraries/{library_id}/query-assets/documents",
             "GET /libraries/{library_id}/video-sources/{source_id}/preview",
             "GET /libraries/{library_id}/visual-units/{visual_unit_id}",
             "GET /libraries/{library_id}/query-assets/images/{temp_asset_id}/preview",
             "GET /libraries/{library_id}/query-assets/videos/{temp_asset_id}/preview",
+            "GET /libraries/{library_id}/query-assets/documents/{temp_asset_id}/preview",
             "GET /jobs",
             "GET /jobs/{job_id}",
             "POST /search/text",
             "POST /search/image",
             "POST /search/video",
+            "POST /search/document",
         ],
     })
 }
@@ -1967,6 +2166,21 @@ async fn upload_query_video(
     Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
 }
 
+async fn upload_query_document(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<SuccessEnvelope<QueryDocumentAssetData>>), ApiError> {
+    let file = read_single_query_document_part(&mut multipart).await?;
+    let staged = persist_query_document_asset(file)?;
+    let data = {
+        let mut state = state.write().await;
+        state.register_temp_query_document_asset(&library_id, staged)?
+    };
+
+    Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
+}
+
 async fn get_visual_unit(
     State(state): State<SharedState>,
     Path((library_id, visual_unit_id)): Path<(String, String)>,
@@ -2056,6 +2270,36 @@ async fn get_query_video_preview(
         HeaderValue::from_str(&asset.content_type).map_err(|_| {
             ApiError::runtime_unavailable(
                 "Query video preview content type is invalid.",
+                Some(json!({ "temp_asset_id": temp_asset_id })),
+            )
+        })?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+
+    Ok((headers, bytes))
+}
+
+async fn get_query_document_preview(
+    State(state): State<SharedState>,
+    Path((library_id, temp_asset_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let asset = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.get_temp_query_document_asset(&library_id, &temp_asset_id)?
+    };
+
+    let bytes = fs::read(&asset.path)
+        .map_err(|_| ApiError::not_found("Query document file is no longer available."))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&asset.content_type).map_err(|_| {
+            ApiError::runtime_unavailable(
+                "Query document preview content type is invalid.",
                 Some(json!({ "temp_asset_id": temp_asset_id })),
             )
         })?,
@@ -2161,6 +2405,22 @@ async fn search_video(
 
     let query_embedding =
         embed_query_video(query_input.path.as_str(), query_input.locator.clone()).await?;
+    let candidates = query_qdrant(&plan, &query_embedding).await?;
+    let response = build_search_response(plan, query_embedding, candidates)?;
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
+async fn search_document(
+    State(state): State<SharedState>,
+    Json(request): Json<DocumentSearchRequest>,
+) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
+    let (plan, query_input) = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.prepare_document_search(&request)?
+    };
+
+    let query_embedding = embed_query_document(query_input.path.as_str(), query_input.locator).await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))
@@ -2344,6 +2604,69 @@ async fn read_single_query_video_part(
     })
 }
 
+async fn read_single_query_document_part(
+    multipart: &mut Multipart,
+) -> Result<IncomingQueryDocumentUpload, ApiError> {
+    let mut file_upload: Option<IncomingQueryDocumentUpload> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        ApiError::validation_failed(
+            format!("Query document upload could not be parsed: {error}"),
+            Some(json!({ "field": "file" })),
+        )
+    })? {
+        let filename = field.file_name().map(|value| value.to_string());
+        let content_type = field
+            .content_type()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let extension = infer_query_document_extension(filename.as_deref(), &content_type)
+            .ok_or_else(|| {
+                ApiError::validation_failed(
+                    "Only PDF files are accepted as query documents right now.",
+                    Some(json!({
+                        "field": "file",
+                        "content_type": content_type,
+                        "filename": filename,
+                    })),
+                )
+            })?;
+        let bytes = field.bytes().await.map_err(|error| {
+            ApiError::validation_failed(
+                format!("Query document upload body could not be read: {error}"),
+                Some(json!({ "field": "file" })),
+            )
+        })?;
+
+        if bytes.is_empty() {
+            return Err(ApiError::validation_failed(
+                "Query document upload must not be empty.",
+                Some(json!({ "field": "file" })),
+            ));
+        }
+        if file_upload.is_some() {
+            return Err(ApiError::validation_failed(
+                "Current 130-document-search implementation accepts exactly one query document per upload.",
+                Some(json!({ "field": "file" })),
+            ));
+        }
+
+        file_upload = Some(IncomingQueryDocumentUpload {
+            bytes: bytes.to_vec(),
+            content_type,
+            original_filename: filename,
+            extension,
+        });
+    }
+
+    file_upload.ok_or_else(|| {
+        ApiError::validation_failed(
+            "Query document upload requires one document file part.",
+            Some(json!({ "field": "file" })),
+        )
+    })
+}
+
 fn infer_query_image_extension(filename: Option<&str>, content_type: &str) -> Option<String> {
     let by_filename = filename
         .and_then(|name| FsPath::new(name).extension())
@@ -2381,12 +2704,32 @@ fn infer_query_video_extension(filename: Option<&str>, content_type: &str) -> Op
     }
 }
 
+fn infer_query_document_extension(filename: Option<&str>, content_type: &str) -> Option<String> {
+    let by_filename = filename
+        .and_then(|name| FsPath::new(name).extension())
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| is_supported_query_document_extension(value));
+    if by_filename.is_some() {
+        return by_filename;
+    }
+
+    match content_type {
+        "application/pdf" => Some("pdf".to_string()),
+        _ => None,
+    }
+}
+
 fn is_supported_query_image_extension(extension: &str) -> bool {
     matches!(extension, "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif")
 }
 
 fn is_supported_query_video_extension(extension: &str) -> bool {
     matches!(extension, "mp4" | "mov" | "m4v")
+}
+
+fn is_supported_query_document_extension(extension: &str) -> bool {
+    matches!(extension, "pdf")
 }
 
 fn persist_query_image_asset(
@@ -2415,6 +2758,7 @@ fn persist_query_image_asset(
         source_type: "image".to_string(),
         content_type: upload.content_type,
         original_filename: upload.original_filename,
+        page_count: None,
         duration_ms: None,
     })
 }
@@ -2453,7 +2797,44 @@ fn persist_query_video_asset(
         source_type: "video".to_string(),
         content_type: upload.content_type,
         original_filename: upload.original_filename,
+        page_count: None,
         duration_ms: Some(duration_ms),
+    })
+}
+
+fn persist_query_document_asset(
+    upload: IncomingQueryDocumentUpload,
+) -> Result<StagedQueryAsset, ApiError> {
+    let runtime_dir = read_required_env("APP_RUNTIME_DIR")?;
+    let target_dir = FsPath::new(&runtime_dir).join("temp-assets").join("documents");
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Query document asset directory could not be created: {error}"),
+            Some(json!({ "path": target_dir })),
+        )
+    })?;
+
+    let filename = format!("query-document-{}.{}", runtime_token(), upload.extension);
+    let path = target_dir.join(filename);
+    fs::write(&path, upload.bytes).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Query document asset could not be written: {error}"),
+            Some(json!({ "path": path })),
+        )
+    })?;
+
+    let page_count = pdf_page_count(&path).map_err(|message| {
+        remove_temp_query_asset_file(path.to_string_lossy().as_ref());
+        ApiError::validation_failed(message, Some(json!({ "field": "file" })))
+    })?;
+
+    Ok(StagedQueryAsset {
+        path: path.to_string_lossy().to_string(),
+        source_type: "pdf".to_string(),
+        content_type: upload.content_type,
+        original_filename: upload.original_filename,
+        page_count: Some(page_count),
+        duration_ms: None,
     })
 }
 
@@ -2559,6 +2940,56 @@ fn resolve_video_query_locator(
         "start_ms": start_ms,
         "end_ms": end_ms,
         "duration_ms": duration_ms,
+    })))
+}
+
+fn resolve_document_query_locator(
+    locator: Option<&Value>,
+    page_count: Option<usize>,
+    field_name: &str,
+) -> Result<Option<Value>, ApiError> {
+    let page_count = page_count.ok_or_else(|| {
+        ApiError::runtime_unavailable(
+            "Document page count is unavailable for the selected query input.",
+            Some(json!({ "field": field_name })),
+        )
+    })?;
+
+    let Some(locator) = locator else {
+        return Ok(None);
+    };
+
+    let start_page = locator
+        .get("start_page")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            ApiError::validation_failed(
+                "Document locator must include integer start_page.",
+                Some(json!({ "field": format!("{field_name}.start_page") })),
+            )
+        })?;
+    let end_page = locator.get("end_page").and_then(Value::as_u64).ok_or_else(|| {
+        ApiError::validation_failed(
+            "Document locator must include integer end_page.",
+            Some(json!({ "field": format!("{field_name}.end_page") })),
+        )
+    })?;
+    if start_page < 1 || end_page < start_page || end_page > page_count as u64 {
+        return Err(ApiError::validation_failed(
+            "Document locator must satisfy 1 <= start_page <= end_page <= page_count.",
+            Some(json!({
+                "field": field_name,
+                "start_page": start_page,
+                "end_page": end_page,
+                "page_count": page_count,
+            })),
+        ));
+    }
+
+    Ok(Some(json!({
+        "start_page": start_page,
+        "end_page": end_page,
+        "page_count": page_count,
     })))
 }
 
@@ -2937,6 +3368,74 @@ async fn embed_query_video(
     })
 }
 
+async fn embed_query_document(
+    path: &str,
+    locator: Option<Value>,
+) -> Result<QueryEmbeddingResult, ApiError> {
+    let payload = json!({
+        "operation_kind": "document_query_embedding",
+        "inputs": {
+            "documents": [{
+                "path": path,
+                "locator": locator,
+            }],
+        },
+    });
+    let response = sidecar_client()
+        .post(format!("{}/embed", sidecar_base_url()?))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Sidecar document query embedding request failed: {error}"),
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message = parse_sidecar_error_message(&body).unwrap_or_else(|| {
+            format!("Sidecar document query embedding request failed with {status}.")
+        });
+        return Err(ApiError::runtime_unavailable(
+            message,
+            Some(json!({ "service": "sidecar" })),
+        ));
+    }
+
+    let envelope: SidecarEnvelope<SidecarEmbedPayload> =
+        response.json().await.map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Sidecar document query embedding response was invalid JSON: {error}"),
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?;
+    let embedding = envelope.data.embeddings.into_iter().next().ok_or_else(|| {
+        ApiError::runtime_unavailable(
+            "Sidecar document query embedding response did not include any embeddings.",
+            Some(json!({ "service": "sidecar" })),
+        )
+    })?;
+
+    let pooled_vector = if embedding.pooled_vector.is_empty() {
+        mean_pool_vectors(&embedding.vectors).ok_or_else(|| {
+            ApiError::runtime_unavailable(
+                "Sidecar document query embedding response did not include usable vectors.",
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?
+    } else {
+        embedding.pooled_vector
+    };
+
+    Ok(QueryEmbeddingResult {
+        vectors: embedding.vectors,
+        pooled_vector,
+    })
+}
+
 async fn ensure_qdrant_collection(collection_name: &str, vector_size: usize) -> Result<(), String> {
     let base_url = qdrant_base_url().map_err(|error| error.payload.message)?;
     let client = qdrant_client();
@@ -3288,6 +3787,21 @@ fn query_video_preview_reference(
     })
 }
 
+fn query_document_preview_reference(
+    library_id: &str,
+    temp_asset_id: &str,
+) -> Result<PreviewReference, ApiError> {
+    Ok(PreviewReference {
+        url: format!(
+            "{}/libraries/{}/query-assets/documents/{}/preview#page=1&view=FitH",
+            app_base_url()?.trim_end_matches('/'),
+            library_id,
+            temp_asset_id
+        ),
+        handle: Some(format!("query-document-preview:{temp_asset_id}")),
+    })
+}
+
 fn video_source_preview_reference(
     library_id: &str,
     source_id: &str,
@@ -3371,7 +3885,7 @@ fn current_unix_ms() -> u128 {
 fn remove_temp_query_asset_file(path: &str) {
     if let Err(error) = fs::remove_file(path) {
         if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("Failed to remove expired query image asset file {path}: {error}");
+            tracing::warn!("Failed to remove expired query asset file {path}: {error}");
         }
     }
 }
@@ -3766,6 +4280,7 @@ mod tests {
             source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("query.png".to_string()),
+            page_count: None,
             duration_ms: None,
         };
         let asset = state
@@ -4032,6 +4547,7 @@ mod tests {
             source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("expired-query.png".to_string()),
+            page_count: None,
             duration_ms: None,
         };
         let asset = state
@@ -4076,6 +4592,7 @@ mod tests {
             source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("expired-prune-query.png".to_string()),
+            page_count: None,
             duration_ms: None,
         };
         let asset = state
@@ -4115,6 +4632,7 @@ mod tests {
             source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("missing-prune-query.png".to_string()),
+            page_count: None,
             duration_ms: None,
         };
         let asset = state
@@ -4192,6 +4710,7 @@ mod tests {
             source_type: "video".to_string(),
             content_type: "video/mp4".to_string(),
             original_filename: Some("query.mp4".to_string()),
+            page_count: None,
             duration_ms: Some(3000),
         };
         let asset = state
@@ -4282,6 +4801,7 @@ mod tests {
             source_type: "video".to_string(),
             content_type: "video/mp4".to_string(),
             original_filename: Some("invalid-range.mp4".to_string()),
+            page_count: None,
             duration_ms: Some(2000),
         };
         let asset = state
@@ -4337,6 +4857,7 @@ mod tests {
             source_type: "video".to_string(),
             content_type: "video/mp4".to_string(),
             original_filename: Some("expired-query.mp4".to_string()),
+            page_count: None,
             duration_ms: Some(2000),
         };
         let asset = state
@@ -4400,6 +4921,7 @@ mod tests {
                     id: "src_image_000001".to_string(),
                     source_path: "/tmp/example.png".to_string(),
                     source_type: "image".to_string(),
+                    page_count: None,
                     duration_ms: None,
                 },
             );
@@ -4546,6 +5068,266 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.payload.code, "validation_failed");
+    }
+
+    #[test]
+    fn prepare_document_search_accepts_temp_assets_and_library_sources() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "document-search".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let pdf_path = unique_test_file_path("query-document.pdf");
+        write_test_pdf(&pdf_path, 3);
+        let staged = StagedQueryAsset {
+            path: pdf_path.to_string_lossy().to_string(),
+            source_type: "pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            original_filename: Some("query-document.pdf".to_string()),
+            page_count: Some(3),
+            duration_ms: None,
+        };
+        let asset = state
+            .register_temp_query_document_asset(&library.id, staged)
+            .unwrap();
+
+        let (plan, temp_input) = state
+            .prepare_document_search(&DocumentSearchRequest {
+                library_id: library.id.clone(),
+                document_input: QueryDocumentInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some(asset.temp_asset_id.clone()),
+                    source_id: None,
+                    locator: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+        assert_eq!(plan.library_id, library.id);
+        assert_eq!(temp_input.path, pdf_path.to_string_lossy());
+        assert!(temp_input.locator.is_none());
+
+        let classification = state.inspect_import_path(&pdf_path.to_string_lossy()).unwrap();
+        let source = state.source_record_from_classification(&classification);
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .sources
+            .insert(source.id.clone(), source.clone());
+
+        let (_, library_input) = state
+            .prepare_document_search(&DocumentSearchRequest {
+                library_id: library.id.clone(),
+                document_input: QueryDocumentInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    source_id: Some(source.id),
+                    locator: Some(json!({ "start_page": 2, "end_page": 3 })),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+
+        assert_eq!(library_input.path, pdf_path.to_string_lossy());
+        assert_eq!(
+            library_input.locator.unwrap(),
+            json!({ "start_page": 2, "end_page": 3, "page_count": 3 })
+        );
+
+        let _ = fs::remove_file(pdf_path);
+    }
+
+    #[test]
+    fn prepare_document_search_rejects_invalid_ranges() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "document-range-errors".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let pdf_path = unique_test_file_path("invalid-document-range.pdf");
+        write_test_pdf(&pdf_path, 2);
+        let staged = StagedQueryAsset {
+            path: pdf_path.to_string_lossy().to_string(),
+            source_type: "pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            original_filename: Some("invalid-document-range.pdf".to_string()),
+            page_count: Some(2),
+            duration_ms: None,
+        };
+        let asset = state
+            .register_temp_query_document_asset(&library.id, staged)
+            .unwrap();
+
+        let error = state
+            .prepare_document_search(&DocumentSearchRequest {
+                library_id: library.id.clone(),
+                document_input: QueryDocumentInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some(asset.temp_asset_id),
+                    source_id: None,
+                    locator: Some(json!({ "start_page": 2, "end_page": 5 })),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "validation_failed");
+
+        let _ = fs::remove_file(pdf_path);
+    }
+
+    #[test]
+    fn prepare_document_search_rejects_expired_temp_assets() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "expired-query-document".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let pdf_path = unique_test_file_path("expired-query-document.pdf");
+        write_test_pdf(&pdf_path, 2);
+        let staged = StagedQueryAsset {
+            path: pdf_path.to_string_lossy().to_string(),
+            source_type: "pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            original_filename: Some("expired-query-document.pdf".to_string()),
+            page_count: Some(2),
+            duration_ms: None,
+        };
+        let asset = state
+            .register_temp_query_document_asset(&library.id, staged)
+            .unwrap();
+        state
+            .temp_query_assets
+            .get_mut(&asset.temp_asset_id)
+            .unwrap()
+            .expires_at_ms = 0;
+
+        let error = state
+            .prepare_document_search(&DocumentSearchRequest {
+                library_id: library.id.clone(),
+                document_input: QueryDocumentInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some(asset.temp_asset_id),
+                    source_id: None,
+                    locator: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "not_found");
+
+        let _ = fs::remove_file(pdf_path);
+    }
+
+    #[test]
+    fn prepare_document_search_rejects_non_pdf_library_sources() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "unsupported-document-query-source".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .sources
+            .insert(
+                "src_image_000002".to_string(),
+                SourceRecord {
+                    id: "src_image_000002".to_string(),
+                    source_path: "/tmp/example.png".to_string(),
+                    source_type: "image".to_string(),
+                    page_count: None,
+                    duration_ms: None,
+                },
+            );
+
+        let error = state
+            .prepare_document_search(&DocumentSearchRequest {
+                library_id: library.id.clone(),
+                document_input: QueryDocumentInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    source_id: Some("src_image_000002".to_string()),
+                    locator: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "not_supported");
+        let details = error.payload.details.unwrap();
+        assert_eq!(details["supported_source_type"], "pdf");
+        assert_eq!(details["received_source_type"], "image");
     }
 
     #[test]

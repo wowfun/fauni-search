@@ -70,6 +70,20 @@ class FakeRuntime:
                     },
                 },
                 {
+                    "operation_kind": "document_query_embedding",
+                    "supported": True,
+                    "target_index_lines": ["multivector"],
+                    "input_kind": "local_file",
+                    "model": {
+                        "model_id": "fake/model",
+                        "revision": "main",
+                        "backend": "colqwen3.5",
+                        "loaded": False,
+                        "device": None,
+                        "dtype": None,
+                    },
+                },
+                {
                     "operation_kind": "document_embedding",
                     "supported": True,
                     "target_index_lines": ["multivector"],
@@ -173,6 +187,37 @@ class FakeRuntime:
             payload["debug"] = {"elapsed_ms": 2.11}
         return payload
 
+    def embed_document_queries(self, documents: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "operation_kind": "document_query_embedding",
+            "model": {
+                "model_id": "fake/model",
+                "revision": "main",
+                "backend": "colqwen3.5",
+                "loaded": True,
+                "device": "cuda:0",
+                "dtype": "torch.bfloat16",
+            },
+            "embeddings": [
+                {
+                    "index": index,
+                    "path": document["path"],
+                    "source_type": "pdf",
+                    "kind": "document",
+                    "locator": document.get("locator", {"start_page": 1, "end_page": 3}),
+                    "page_count": 3,
+                    "vector_count": 4,
+                    "dim": 3,
+                    "vectors": [[0.2, 0.3, 0.5], [0.1, 0.7, 0.2], [0.4, 0.1, 0.5], [0.4, 0.4, 0.2]],
+                    "pooled_vector": [0.275, 0.375, 0.35],
+                }
+                for index, document in enumerate(documents)
+            ],
+        }
+        if debug:
+            payload["debug"] = {"elapsed_ms": 2.23}
+        return payload
+
     def embed_documents(self, documents: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
         payload: dict[str, object] = {
             "operation_kind": "document_embedding",
@@ -224,6 +269,7 @@ def test_capabilities_exposes_query_embedding_operation() -> None:
         "query_embedding",
         "image_query_embedding",
         "video_query_embedding",
+        "document_query_embedding",
         "document_embedding",
     ]
     assert payload["operations"][0]["target_index_lines"] == ["multivector"]
@@ -269,6 +315,33 @@ def test_embed_returns_document_vectors() -> None:
     assert payload["embeddings"][0]["locator"] == {"page": 2, "page_label": "2"}
     assert payload["embeddings"][0]["pooled_vector"] == [0.75, 0.25, 0.0]
     assert payload["debug"]["elapsed_ms"] == 2.34
+
+
+def test_embed_returns_document_query_vectors() -> None:
+    routes = build_route_map(FakeRuntime())
+    request = EmbedRequest.model_validate(
+        {
+            "operation_kind": "document_query_embedding",
+            "inputs": {
+                "documents": [
+                    {
+                        "path": "/tmp/query.pdf",
+                        "locator": {"start_page": 2, "end_page": 3},
+                    }
+                ]
+            },
+            "debug": True,
+        }
+    )
+
+    response = routes["/embed"](request)
+    payload = response["data"]
+
+    assert payload["operation_kind"] == "document_query_embedding"
+    assert payload["embeddings"][0]["path"] == "/tmp/query.pdf"
+    assert payload["embeddings"][0]["locator"] == {"start_page": 2, "end_page": 3}
+    assert payload["embeddings"][0]["pooled_vector"] == [0.275, 0.375, 0.35]
+    assert payload["debug"]["elapsed_ms"] == 2.23
 
 
 def test_embed_returns_image_query_vectors() -> None:

@@ -1,7 +1,15 @@
 # CHANGELOG
 
+## 2026-04-10
+### Added
+- Added the first runnable `130-document-search` slice across the app, sidecar, shared workspace UI, and `scripts/local/smoke-document-search.sh`.
+
+### Changed
+- Updated the shared `Document` mode docs, troubleshooting notes, and local operator guidance around the current document-query lifecycle.
+
 ## 2026-04-09
 ### Added
+- Added the initial `130-document-search` topic docs (`spec.md`, `plan.md`, `testing.md`) to define document-query retrieval, optional page-range inputs, and the first PDF-only current-stage scope.
 - Added the `110-image-search` topic docs (`spec.md`, `plan.md`, `testing.md`) and the first runnable image-search slice across the Rust app, Python sidecar, shared workspace UI, and `scripts/local/smoke-image-search.sh`.
 - Added the initial `120-video-search` topic docs plus a local video-artifact extraction helper for local-only smoke fixtures.
 - Added the first runnable `120-video-search` slice across the Rust app, Python sidecar, shared workspace UI, and `scripts/local/smoke-video-search.sh`, covering video query uploads, `/search/video`, library-object reuse, optional time-range selection, and Playwright/runtime smoke coverage.
@@ -9,6 +17,8 @@
 ### Changed
 - Moved shared non-text query-mode workspace rules into `008/search-workspace.md`, keeping `110-image-search` focused on image-specific planning.
 - Extended the base `002/003/004/009` fact sources for `120-video-search`, including `video_segment` locators, `/search/video`, and video query-asset / sidecar protocol shapes.
+- Extended the base `002/004/008/009` fact sources for `130-document-search`, covering document-query temp assets, `start_page/end_page` locators, `/search/document`, `document_query_embedding`, and shared `Document` mode workspace expectations.
+- Refined `130-document-search` v1 around uploaded PDFs and `document_page` reuse in the workspace, numeric page-range inputs, API-level `source_id` reuse, and `video_segment` as an optional extension hit rather than a first-pass gate.
 - Hardened the `120-video-search` runtime and validation path with larger upload support, explicit negative-path coverage, and reusable `video_segment` follow-up queries in smoke and workspace flows.
 - Tightened image-query v1 contracts and validation around `not_ready`, invalid uploads, temporary query assets, and cleanup of expired query-image files.
 - Expanded image-query inputs from temporary uploads to reusable library objects, covering both `image` and `document_page` with locator-aware embeddings and smoke coverage.

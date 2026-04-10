@@ -52,16 +52,17 @@
 
 ## 非文本查询模式的共享交互
 
-- 共享搜索工作区可以承接 `Image`、`Video` 等非文本查询模式，但这些模式的具体输入语义与对象边界继续由对应能力专题定义
+- 共享搜索工作区可以承接 `Image`、`Video`、`Document` 等非文本查询模式，但这些模式的具体输入语义与对象边界继续由对应能力专题定义
 - 非文本查询模式必须在工作区中提供稳定的查询输入卡片，而不是把上传、对象复用、预览或替换动作散落为隐式旁路
 - 查询输入卡片必须能够表达当前输入来源状态，例如当前使用的是临时上传输入、库内对象引用，或当前尚未提供有效查询输入
 - 查询输入卡片必须支持以下共享交互能力：
   - 查询输入预览
   - 清除或替换当前输入
   - 在能力专题允许时，将库内对象复用为新的查询输入
+- `Document` 等需要范围控制的非文本模式，可以在共享输入卡片内提供页范围、时间范围等专题专属控件；这些控件的具体语义仍由对应能力专题定义
 - 非文本查询模式中，查询输入失效、未就绪、上传失败或选择失败必须在工作区内明确可区分，而不是统一退化为空状态
 - 非文本查询模式下，查询输入、结果浏览、详情展开与预览展示仍必须在同一搜索工作区内连续完成
-- 本文件只定义这些共享交互约束，不承接 `image_input`、`video_input`、`source_id`、`visual_unit_id` 或时间范围等能力专属编码事实
+- 本文件只定义这些共享交互约束，不承接 `image_input`、`video_input`、`document_input`、`source_id`、`visual_unit_id`、页范围或时间范围等能力专属编码事实
 
 ## 结果与详情关系
 
@@ -84,4 +85,4 @@
 - [004-search](../004-search/spec.md) 定义搜索查询、结果语义与单次单输入约束
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务、阶段推进与失败观察语义
 - [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义搜索、详情、预览与相关动作接口的请求 / 响应编码
-- [100-text-search](../100-text-search/spec.md)、[110-image-search](../110-image-search/spec.md) 与未来的 `120-video-search` 等能力专题复用本文件中的共享搜索工作区约束
+- [100-text-search](../100-text-search/spec.md)、[110-image-search](../110-image-search/spec.md)、[120-video-search](../120-video-search/spec.md) 与 [130-document-search](../130-document-search/spec.md) 复用本文件中的共享搜索工作区约束

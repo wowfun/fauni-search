@@ -91,6 +91,48 @@ first_page.save(path, "PDF", save_all=True, append_images=[second_page])
   return pdfPath;
 }
 
+function createTempDocumentSearchFixtures() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fauni-search-document-search-"));
+  const imagePath = path.join(tempDir, "report-page.png");
+  const pdfPath = path.join(tempDir, "query-document.pdf");
+
+  execFileSync(
+    venvPythonPath,
+    [
+      "-c",
+      `
+from PIL import Image, ImageDraw
+from pathlib import Path
+
+image_path = Path(${JSON.stringify(imagePath)})
+pdf_path = Path(${JSON.stringify(pdfPath)})
+
+first_page = Image.new("RGB", (960, 720), "white")
+first_draw = ImageDraw.Draw(first_page)
+first_draw.rectangle((60, 60, 900, 660), outline="black", width=6)
+first_draw.text((120, 170), "Q2 2025 Financial Report", fill="black")
+first_draw.text((120, 260), "Revenue 46 percent", fill="black")
+first_draw.text((120, 350), "Net income 18 percent", fill="black")
+first_draw.text((120, 440), "Cash flow positive", fill="black")
+
+second_page = Image.new("RGB", (960, 720), "white")
+second_draw = ImageDraw.Draw(second_page)
+second_draw.rectangle((60, 60, 900, 660), outline="black", width=6)
+second_draw.text((120, 170), "Q2 2025 Financial Report", fill="black")
+second_draw.text((120, 260), "Operating margin 18 percent", fill="black")
+second_draw.text((120, 350), "Cash conversion stable", fill="black")
+second_draw.text((120, 440), "Forward guidance unchanged", fill="black")
+
+first_page.save(image_path, "PNG")
+first_page.save(pdf_path, "PDF", save_all=True, append_images=[second_page])
+      `,
+    ],
+    { stdio: "pipe" }
+  );
+
+  return { tempDir, imagePath, pdfPath };
+}
+
 function createTempVideoSearchFixtures() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fauni-search-video-search-"));
   const framePath = path.join(tempDir, "report-frame.png");
@@ -459,5 +501,130 @@ test("video mode rejects non-video query uploads with explicit feedback", async 
   await expect(page.getByTestId("search-error-code")).toHaveText("validation_failed");
   await expect(page.getByTestId("search-error-message")).toContainText(
     "Only mp4, mov, or m4v files are accepted as query videos right now."
+  );
+});
+
+test("document mode uploads a query document and returns real mixed results", async ({ page }) => {
+  const fixtures = createTempDocumentSearchFixtures();
+  try {
+    await createLibrary(page, "document-search");
+
+    await page
+      .getByTestId("import-paths-input")
+      .fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
+    await page.getByTestId("import-submit-button").click();
+    await waitForFirstJobCompleted(page);
+
+    await page.getByTestId("search-mode-document").click();
+    await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
+    await expect(page.getByTestId("query-document-preview")).toBeVisible();
+
+    await page.getByTestId("search-submit-button").click();
+
+    const documentPageResult = page.locator('[data-testid="result-card"][data-kind="document_page"]').first();
+    const imageResult = page.locator('[data-testid="result-card"][data-kind="image"]').first();
+    await expect(documentPageResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await expect(imageResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await expect(page.getByTestId("result-score").first()).toBeVisible();
+    await expect(page.getByTestId("detail-panel")).toBeVisible();
+    await expect(page.getByTestId("visual-preview")).toBeVisible();
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("document mode can search a specific page range", async ({ page }) => {
+  const fixtures = createTempDocumentSearchFixtures();
+  try {
+    await createLibrary(page, "document-range-search");
+
+    await page
+      .getByTestId("import-paths-input")
+      .fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
+    await page.getByTestId("import-submit-button").click();
+    await waitForFirstJobCompleted(page);
+
+    await page.getByTestId("search-mode-document").click();
+    await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
+    await expect(page.getByTestId("query-document-preview")).toBeVisible();
+    await page.getByTestId("query-document-range-start").fill("2");
+    await page.getByTestId("query-document-range-end").fill("2");
+    await expect(page.getByTestId("query-document-range-card")).toContainText("P2 → P2");
+
+    await page.getByTestId("search-submit-button").click();
+
+    const firstResult = page.getByTestId("result-card").first();
+    await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await expect(firstResult.getByTestId("result-score")).toBeVisible();
+    await expect(page.getByTestId("detail-panel")).toBeVisible();
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("document mode can reuse a library document_page as the query document", async ({ page }) => {
+  const fixtures = createTempDocumentSearchFixtures();
+  try {
+    await createLibrary(page, "document-library-object");
+
+    await page
+      .getByTestId("import-paths-input")
+      .fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
+    await page.getByTestId("import-submit-button").click();
+    await waitForFirstJobCompleted(page);
+
+    await page.getByTestId("search-mode-document").click();
+    await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
+    await expect(page.getByTestId("query-document-preview")).toBeVisible();
+    await page.getByTestId("search-submit-button").click();
+
+    const documentPageResult = page.locator('[data-testid="result-card"][data-kind="document_page"]').first();
+    await expect(documentPageResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await documentPageResult.getByTestId("use-as-query-document-button").click();
+
+    await expect(page.getByTestId("query-document-card")).toContainText("库内页面");
+    await expect(page.getByTestId("query-document-range-card")).toContainText("固定为该页面对应的单页范围");
+
+    await page.getByTestId("search-submit-button").click();
+
+    const firstResult = page.getByTestId("result-card").first();
+    await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await expect(firstResult.getByTestId("result-score")).toBeVisible();
+    await expect(page.getByTestId("detail-panel")).toBeVisible();
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("document mode before import shows not_ready instead of an empty result", async ({ page }) => {
+  const fixtures = createTempDocumentSearchFixtures();
+  try {
+    await createLibrary(page, "document-not-ready");
+
+    await page.getByTestId("search-mode-document").click();
+    await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
+    await expect(page.getByTestId("query-document-preview")).toBeVisible();
+
+    await page.getByTestId("search-submit-button").click();
+
+    await expect(page.getByTestId("search-error-notice")).toBeVisible();
+    await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
+    await expect(page.getByTestId("search-error-message")).toContainText("active index");
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("document mode rejects non-pdf query uploads with explicit feedback", async ({ page }) => {
+  await createLibrary(page, "document-invalid-upload");
+
+  await page.getByTestId("search-mode-document").click();
+  await page.getByTestId("query-document-input").setInputFiles(invalidQueryUploadPath);
+  await page.getByTestId("search-submit-button").click();
+
+  await expect(page.getByTestId("search-error-notice")).toBeVisible();
+  await expect(page.getByTestId("search-error-code")).toHaveText("validation_failed");
+  await expect(page.getByTestId("search-error-message")).toContainText(
+    "Only PDF files are accepted as query documents right now."
   );
 });

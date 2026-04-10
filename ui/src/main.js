@@ -42,6 +42,13 @@ const state = {
   queryVideoLibraryObject: null,
   queryVideoDurationMs: null,
   queryVideoRange: null,
+  queryDocumentFile: null,
+  queryDocumentObjectUrl: null,
+  queryDocumentAsset: null,
+  queryDocumentLibraryObject: null,
+  queryDocumentPageCount: null,
+  queryDocumentStartPageDraft: "",
+  queryDocumentEndPageDraft: "",
   importReceipt: null,
   selectedVisualUnit: null,
   searchOutcome: null,
@@ -212,6 +219,59 @@ function setPendingQueryVideoFile(file) {
   clearQueryVideoState();
   state.queryVideoFile = normalizeQueryVideoFile(file);
   state.queryVideoObjectUrl = URL.createObjectURL(state.queryVideoFile);
+}
+
+function clearQueryDocumentState() {
+  if (state.queryDocumentObjectUrl) {
+    URL.revokeObjectURL(state.queryDocumentObjectUrl);
+  }
+  state.queryDocumentFile = null;
+  state.queryDocumentObjectUrl = null;
+  state.queryDocumentAsset = null;
+  state.queryDocumentLibraryObject = null;
+  state.queryDocumentPageCount = null;
+  state.queryDocumentStartPageDraft = "";
+  state.queryDocumentEndPageDraft = "";
+}
+
+function normalizeQueryDocumentFile(file, fallbackName = "query-document.pdf") {
+  if (file.name && file.name.trim()) {
+    return file;
+  }
+
+  return new File([file], fallbackName, {
+    type: file.type || "application/pdf",
+    lastModified: Date.now(),
+  });
+}
+
+function setQueryDocumentPageCount(pageCount) {
+  if (typeof pageCount === "number" && Number.isFinite(pageCount) && pageCount > 0) {
+    state.queryDocumentPageCount = Math.max(1, Math.round(pageCount));
+    return;
+  }
+  state.queryDocumentPageCount = null;
+}
+
+function setPendingQueryDocumentFile(file) {
+  clearQueryDocumentState();
+  state.queryDocumentFile = normalizeQueryDocumentFile(file);
+  state.queryDocumentObjectUrl = URL.createObjectURL(state.queryDocumentFile);
+}
+
+function setLibraryQueryDocumentVisualUnit(visualUnit) {
+  clearQueryDocumentState();
+  const page = Number(visualUnit?.locator?.page ?? 0);
+  state.queryDocumentLibraryObject = {
+    ...visualUnit,
+    locator:
+      page > 0
+        ? {
+            start_page: page,
+            end_page: page,
+          }
+        : null,
+  };
 }
 
 function setLibraryQueryVideoSource(source) {
@@ -449,6 +509,116 @@ function queryVideoRangeStep() {
   return 1000;
 }
 
+function queryDocumentPreviewUrl() {
+  return (
+    state.queryDocumentObjectUrl ??
+    state.queryDocumentAsset?.preview?.url ??
+    state.queryDocumentLibraryObject?.preview?.url ??
+    null
+  );
+}
+
+function queryDocumentStatusLabel() {
+  if (state.queryDocumentLibraryObject) {
+    return `库内页面 · ${state.queryDocumentLibraryObject.visual_unit_id}`;
+  }
+  if (state.queryDocumentAsset) {
+    return `已上传 · ${state.queryDocumentAsset.temp_asset_id}`;
+  }
+  if (state.queryDocumentFile) {
+    return "待上传";
+  }
+  return "未选择";
+}
+
+function queryDocumentDisplayName() {
+  if (state.queryDocumentFile) {
+    return state.queryDocumentFile.name;
+  }
+  if (state.queryDocumentAsset?.original_filename) {
+    return state.queryDocumentAsset.original_filename;
+  }
+  if (state.queryDocumentLibraryObject?.source_path) {
+    return sourceName(state.queryDocumentLibraryObject.source_path);
+  }
+  return null;
+}
+
+function activeQueryDocumentPreview() {
+  return state.queryDocumentAsset?.preview ?? state.queryDocumentLibraryObject?.preview ?? null;
+}
+
+function currentQueryDocumentStartPage() {
+  if (state.queryDocumentLibraryObject?.locator?.start_page != null) {
+    return state.queryDocumentLibraryObject.locator.start_page;
+  }
+  return state.queryDocumentStartPageDraft;
+}
+
+function currentQueryDocumentEndPage() {
+  if (state.queryDocumentLibraryObject?.locator?.end_page != null) {
+    return state.queryDocumentLibraryObject.locator.end_page;
+  }
+  return state.queryDocumentEndPageDraft;
+}
+
+function queryDocumentRangeSummary() {
+  if (state.queryDocumentLibraryObject?.locator?.start_page != null) {
+    const page = state.queryDocumentLibraryObject.locator.start_page;
+    return `库内页面 · P${page}`;
+  }
+
+  if (!state.queryDocumentStartPageDraft && !state.queryDocumentEndPageDraft) {
+    return state.queryDocumentPageCount
+      ? `整份文档 · 共 ${state.queryDocumentPageCount} 页`
+      : "整份文档";
+  }
+
+  if (state.queryDocumentStartPageDraft && !state.queryDocumentEndPageDraft) {
+    return `单页 · P${state.queryDocumentStartPageDraft}`;
+  }
+
+  return `页范围 · P${state.queryDocumentStartPageDraft} → P${state.queryDocumentEndPageDraft}`;
+}
+
+function queryDocumentLocatorPayload() {
+  if (state.queryDocumentLibraryObject?.locator) {
+    return state.queryDocumentLibraryObject.locator;
+  }
+
+  const startDraft = String(state.queryDocumentStartPageDraft ?? "").trim();
+  const endDraft = String(state.queryDocumentEndPageDraft ?? "").trim();
+  if (!startDraft && !endDraft) {
+    return null;
+  }
+  if (!startDraft) {
+    throw {
+      code: "validation_failed",
+      message: "指定文档页范围时必须先填写起始页。",
+    };
+  }
+
+  const startPage = Math.trunc(Number(startDraft));
+  const endPage = endDraft ? Math.trunc(Number(endDraft)) : startPage;
+  if (!Number.isFinite(startPage) || startPage < 1) {
+    throw {
+      code: "validation_failed",
+      message: "起始页必须是大于等于 1 的整数。",
+    };
+  }
+  if (!Number.isFinite(endPage) || endPage < startPage) {
+    throw {
+      code: "validation_failed",
+      message: "结束页必须是大于等于起始页的整数。",
+    };
+  }
+
+  return {
+    start_page: startPage,
+    end_page: endPage,
+  };
+}
+
 function renderStatusNotices() {
   const blocks = [];
 
@@ -643,9 +813,17 @@ function renderVisualUnitDetail() {
             ${
               visualUnit.kind === "image" || visualUnit.kind === "document_page"
                 ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询图片</button>`
-                : visualUnit.kind === "video_segment"
-                  ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询视频</button>`
-                  : ""
+                : ""
+            }
+            ${
+              visualUnit.kind === "document_page"
+                ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-document-button" data-use-query-document-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询文档</button>`
+                : ""
+            }
+            ${
+              visualUnit.kind === "video_segment"
+                ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询视频</button>`
+                : ""
             }
           </div>
         </div>
@@ -770,9 +948,17 @@ function renderSearchOutcome() {
                 ${
                   item.kind === "image" || item.kind === "document_page"
                     ? `<button type="button" class="secondary-button" data-testid="use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询图片</button>`
-                    : item.kind === "video_segment"
-                      ? `<button type="button" class="secondary-button" data-testid="use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询视频</button>`
-                      : ""
+                    : ""
+                }
+                ${
+                  item.kind === "document_page"
+                    ? `<button type="button" class="secondary-button" data-testid="use-as-query-document-button" data-use-query-document-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询文档</button>`
+                    : ""
+                }
+                ${
+                  item.kind === "video_segment"
+                    ? `<button type="button" class="secondary-button" data-testid="use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询视频</button>`
+                    : ""
                 }
                 <a href="${escapeHtml(item.preview.url)}" target="_blank" rel="noreferrer">Preview</a>
               </div>
@@ -788,6 +974,7 @@ function renderSearchOutcome() {
 function renderSearchControls(library) {
   const queryPreview = queryImagePreviewUrl();
   const queryVideoPreview = queryVideoPreviewUrl();
+  const queryDocumentPreview = queryDocumentPreviewUrl();
   const queryVideoDuration = state.queryVideoDurationMs;
   const queryVideoStartMs = currentQueryVideoStartMs();
   const queryVideoEndMs = currentQueryVideoEndMs();
@@ -816,6 +1003,14 @@ function renderSearchControls(library) {
         data-search-mode="video"
       >
         Video
+      </button>
+      <button
+        type="button"
+        class="${state.searchMode === "document" ? "" : "secondary-button"}"
+        data-testid="search-mode-document"
+        data-search-mode="document"
+      >
+        Document
       </button>
     </div>
     <form id="search-form" class="stack-form search-form" data-testid="search-form">
@@ -883,7 +1078,8 @@ function renderSearchControls(library) {
               </div>
             </div>
           `
-            : `
+            : state.searchMode === "video"
+              ? `
             <div class="query-video-panel" data-testid="query-video-panel">
               <label>
                 <span>查询视频</span>
@@ -1007,9 +1203,113 @@ function renderSearchControls(library) {
               </div>
             </div>
           `
+              : `
+            <div class="query-document-panel" data-testid="query-document-panel">
+              <label>
+                <span>查询文档</span>
+                <input
+                  id="query-document-input"
+                  data-testid="query-document-input"
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  ${library ? "" : "disabled"}
+                />
+              </label>
+              <div class="query-document-card" data-testid="query-document-card">
+                <div class="job-meta">
+                  <span class="pill ${state.queryDocumentAsset || state.queryDocumentLibraryObject ? "ready" : "muted"}">${escapeHtml(queryDocumentStatusLabel())}</span>
+                  ${
+                    queryDocumentDisplayName()
+                      ? `<span class="helper">${escapeHtml(queryDocumentDisplayName())}</span>`
+                      : ""
+                  }
+                </div>
+                ${
+                  queryDocumentPreview
+                    ? `<iframe class="query-document-preview-frame" data-testid="query-document-preview" src="${escapeHtml(queryDocumentPreview)}" title="Query document preview" loading="lazy"></iframe>`
+                    : `<p class="empty" data-testid="query-document-empty">选择一个本地 PDF 或从结果复用 document_page 后，这里会显示查询文档预览。</p>`
+                }
+                <div class="query-range-card" data-testid="query-document-range-card">
+                  <div class="job-meta">
+                    <strong>页范围</strong>
+                    <span class="helper">${escapeHtml(queryDocumentRangeSummary())}</span>
+                  </div>
+                  ${
+                    state.queryDocumentLibraryObject
+                      ? `<p class="helper">当前使用库内 document_page；查询范围固定为该页面对应的单页范围。</p>`
+                      : `
+                        <div class="range-grid range-grid-pages">
+                          <label>
+                            <span>起始页</span>
+                            <input
+                              id="query-document-range-start"
+                              data-testid="query-document-range-start"
+                              type="number"
+                              inputmode="numeric"
+                              min="1"
+                              step="1"
+                              value="${escapeHtml(currentQueryDocumentStartPage())}"
+                              placeholder="留空表示整份文档"
+                            />
+                          </label>
+                          <label>
+                            <span>结束页</span>
+                            <input
+                              id="query-document-range-end"
+                              data-testid="query-document-range-end"
+                              type="number"
+                              inputmode="numeric"
+                              min="1"
+                              step="1"
+                              value="${escapeHtml(currentQueryDocumentEndPage())}"
+                              placeholder="只填起始页表示单页"
+                            />
+                          </label>
+                        </div>
+                      `
+                  }
+                  <div class="inline-actions">
+                    <button
+                      type="button"
+                      id="clear-query-document-range-button"
+                      data-testid="clear-query-document-range-button"
+                      class="secondary-button"
+                      ${!state.queryDocumentLibraryObject && (state.queryDocumentStartPageDraft || state.queryDocumentEndPageDraft) ? "" : "disabled"}
+                    >
+                      整份文档
+                    </button>
+                  </div>
+                </div>
+                <div class="inline-actions">
+                  <button
+                    type="button"
+                    id="clear-query-document-button"
+                    data-testid="clear-query-document-button"
+                    class="secondary-button"
+                    ${state.queryDocumentFile || state.queryDocumentAsset || state.queryDocumentLibraryObject ? "" : "disabled"}
+                  >
+                    清除
+                  </button>
+                  ${
+                    activeQueryDocumentPreview()
+                      ? `<a data-testid="query-document-preview-link" href="${escapeHtml(activeQueryDocumentPreview().url)}" target="_blank" rel="noreferrer">打开查询文档预览</a>`
+                      : ""
+                  }
+                </div>
+              </div>
+            </div>
+          `
       }
       <button type="submit" data-testid="search-submit-button" ${library ? "" : "disabled"}>
-        ${state.searchMode === "text" ? "搜索" : state.searchMode === "image" ? "以图片搜索" : "以视频搜索"}
+        ${
+          state.searchMode === "text"
+            ? "搜索"
+            : state.searchMode === "image"
+              ? "以图片搜索"
+              : state.searchMode === "video"
+                ? "以视频搜索"
+                : "以文档搜索"
+        }
       </button>
     </form>
   `;
@@ -1024,7 +1324,7 @@ function renderWorkspace() {
         <p class="eyebrow">FauniSearch</p>
         <h1>Search workspace</h1>
         <p class="summary">
-          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路。左侧管理库和导入，中间在统一工作区中执行 Text / Image / Video 搜索并浏览结果，右侧查看预览和对象详情。
+          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路。左侧管理库和导入，中间在统一工作区中执行 Text / Image / Video / Document 搜索并浏览结果，右侧查看预览和对象详情。
         </p>
         <div class="service-strip">
           <a href="${endpoints.uiRoot}" target="_blank" rel="noreferrer">UI</a>
@@ -1183,6 +1483,17 @@ function renderWorkspace() {
   document.querySelector("#clear-query-video-range-button")?.addEventListener("click", onClearQueryVideoRange);
   document.querySelector("#query-video-range-start")?.addEventListener("input", onQueryVideoRangeStartInput);
   document.querySelector("#query-video-range-end")?.addEventListener("input", onQueryVideoRangeEndInput);
+  document.querySelector("#query-document-input")?.addEventListener("change", onQueryDocumentInput);
+  document.querySelector("#clear-query-document-button")?.addEventListener("click", onClearQueryDocument);
+  document
+    .querySelector("#clear-query-document-range-button")
+    ?.addEventListener("click", onClearQueryDocumentRange);
+  document
+    .querySelector("#query-document-range-start")
+    ?.addEventListener("input", onQueryDocumentRangeStartInput);
+  document
+    .querySelector("#query-document-range-end")
+    ?.addEventListener("input", onQueryDocumentRangeEndInput);
   document.querySelector("#fill-demo-button")?.addEventListener("click", onFillDemo);
   document.querySelector("#run-demo-button")?.addEventListener("click", onRunDemo);
   document.querySelectorAll("[data-search-mode]").forEach((button) => {
@@ -1196,6 +1507,9 @@ function renderWorkspace() {
   });
   document.querySelectorAll("[data-use-query-video-visual-unit-id]").forEach((button) => {
     button.addEventListener("click", onUseAsQueryVideo);
+  });
+  document.querySelectorAll("[data-use-query-document-visual-unit-id]").forEach((button) => {
+    button.addEventListener("click", onUseAsQueryDocument);
   });
 
   const queryVideoPreview = document.querySelector("#query-video-preview");
@@ -1366,6 +1680,7 @@ async function onCreateLibrary(event) {
     state.searchTextDraft = "";
     clearQueryImageState();
     clearQueryVideoState();
+    clearQueryDocumentState();
     state.importReceipt = null;
     state.selectedVisualUnit = null;
     state.searchOutcome = null;
@@ -1382,6 +1697,7 @@ async function onSelectLibrary(event) {
   state.selectedLibraryId = event.target.value;
   clearQueryImageState();
   clearQueryVideoState();
+  clearQueryDocumentState();
   state.importReceipt = null;
   state.selectedVisualUnit = null;
   state.searchOutcome = null;
@@ -1511,6 +1827,8 @@ async function onSearchSubmit(event) {
       await runImageSearch();
     } else if (state.searchMode === "video") {
       await runVideoSearch();
+    } else if (state.searchMode === "document") {
+      await runDocumentSearch();
     } else {
       await runTextSearch();
     }
@@ -1631,6 +1949,45 @@ async function runVideoSearch() {
   }
 }
 
+async function runDocumentSearch() {
+  if (!state.queryDocumentFile && !state.queryDocumentAsset && !state.queryDocumentLibraryObject) {
+    state.searchOutcome = {
+      error: {
+        code: "validation_failed",
+        message: "请先选择一个查询文档。",
+      },
+    };
+    renderWorkspace();
+    return;
+  }
+
+  if (state.queryDocumentFile) {
+    state.statusMessage = "正在上传查询文档...";
+    renderWorkspace();
+    await uploadQueryDocument(state.queryDocumentFile);
+  }
+
+  state.statusMessage = "正在执行真实 multivector 文档搜索...";
+  renderWorkspace();
+  const locator = queryDocumentLocatorPayload();
+  if (state.queryDocumentAsset) {
+    await searchDocument({
+      kind: "temp_asset",
+      temp_asset_id: state.queryDocumentAsset.temp_asset_id,
+      ...(locator ? { locator } : {}),
+    });
+    return;
+  }
+
+  if (state.queryDocumentLibraryObject) {
+    await searchDocument({
+      kind: "library_object",
+      source_id: state.queryDocumentLibraryObject.source_id,
+      ...(locator ? { locator } : {}),
+    });
+  }
+}
+
 async function searchText(text) {
   const data = await apiRequest("/search/text", {
     method: "POST",
@@ -1685,6 +2042,25 @@ async function uploadQueryVideo(file) {
   return data;
 }
 
+async function uploadQueryDocument(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const data = await apiRequest(`/libraries/${state.selectedLibraryId}/query-assets/documents`, {
+    method: "POST",
+    body: formData,
+  });
+  if (state.queryDocumentObjectUrl) {
+    URL.revokeObjectURL(state.queryDocumentObjectUrl);
+  }
+  state.queryDocumentFile = null;
+  state.queryDocumentObjectUrl = null;
+  state.queryDocumentAsset = data;
+  state.queryDocumentLibraryObject = null;
+  setQueryDocumentPageCount(data.page_count ?? null);
+  renderWorkspace();
+  return data;
+}
+
 async function searchImage(imageInput) {
   const data = await apiRequest("/search/image", {
     method: "POST",
@@ -1709,6 +2085,24 @@ async function searchVideo(videoInput) {
     body: JSON.stringify({
       library_id: state.selectedLibraryId,
       video_input: videoInput,
+      top_k: 5,
+      debug: true,
+    }),
+  });
+  state.searchOutcome = data;
+  renderWorkspace();
+  if (data.results[0]?.visual_unit_id) {
+    await loadVisualUnit(data.results[0].visual_unit_id);
+  }
+  return data;
+}
+
+async function searchDocument(documentInput) {
+  const data = await apiRequest("/search/document", {
+    method: "POST",
+    body: JSON.stringify({
+      library_id: state.selectedLibraryId,
+      document_input: documentInput,
       top_k: 5,
       debug: true,
     }),
@@ -1763,6 +2157,16 @@ function onQueryImageInput(event) {
   const [file] = event.target.files ?? [];
   if (file) {
     setPendingQueryImageFile(file);
+  }
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onQueryDocumentInput(event) {
+  const [file] = event.target.files ?? [];
+  if (file) {
+    setPendingQueryDocumentFile(file);
   }
   state.globalError = null;
   state.statusMessage = null;
@@ -1834,6 +2238,13 @@ function onClearQueryImage() {
   renderWorkspace();
 }
 
+function onClearQueryDocument() {
+  clearQueryDocumentState();
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
 function onQueryVideoSourceSelect(event) {
   const sourceId = event.target.value;
   if (!sourceId) {
@@ -1860,6 +2271,14 @@ function onClearQueryVideo() {
 
 function onClearQueryVideoRange() {
   state.queryVideoRange = null;
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onClearQueryDocumentRange() {
+  state.queryDocumentStartPageDraft = "";
+  state.queryDocumentEndPageDraft = "";
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
@@ -1907,6 +2326,20 @@ function onQueryVideoRangeEndInput(event) {
 
 function onQueryVideoPreviewLoadedMetadata(event) {
   syncQueryVideoDurationFromVideoElement(event.currentTarget);
+}
+
+function onQueryDocumentRangeStartInput(event) {
+  state.queryDocumentStartPageDraft = event.target.value.trim();
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onQueryDocumentRangeEndInput(event) {
+  state.queryDocumentEndPageDraft = event.target.value.trim();
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
 }
 
 function resolveLibraryObjectQueryImage(visualUnitId) {
@@ -1972,6 +2405,49 @@ function resolveLibraryObjectQueryVideo(visualUnitId) {
   return null;
 }
 
+function resolveLibraryObjectQueryDocument(visualUnitId) {
+  const resultItem =
+    state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
+  if (resultItem?.kind === "document_page") {
+    const page = Number(resultItem.locator?.page ?? 0);
+    return {
+      visual_unit_id: resultItem.visual_unit_id,
+      source_id: resultItem.source_id,
+      kind: resultItem.kind,
+      source_path: resultItem.source_path,
+      locator:
+        page > 0
+          ? {
+              start_page: page,
+              end_page: page,
+            }
+          : null,
+      preview: resultItem.preview,
+    };
+  }
+
+  const detailVisualUnit = state.selectedVisualUnit?.visual_unit;
+  if (detailVisualUnit?.visual_unit_id === visualUnitId && detailVisualUnit.kind === "document_page") {
+    const page = Number(detailVisualUnit.locator?.page ?? 0);
+    return {
+      visual_unit_id: detailVisualUnit.visual_unit_id,
+      source_id: detailVisualUnit.source_id,
+      kind: detailVisualUnit.kind,
+      source_path: detailVisualUnit.source_path,
+      locator:
+        page > 0
+          ? {
+              start_page: page,
+              end_page: page,
+            }
+          : null,
+      preview: state.selectedVisualUnit.preview,
+    };
+  }
+
+  return null;
+}
+
 function onUseAsQueryImage(event) {
   const visualUnitId = event.currentTarget.dataset.useQueryVisualUnitId;
   const libraryObject = resolveLibraryObjectQueryImage(visualUnitId);
@@ -2006,6 +2482,25 @@ function onUseAsQueryVideo(event) {
 
   setLibraryQueryVideoVisualUnit(libraryObject);
   state.searchMode = "video";
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onUseAsQueryDocument(event) {
+  const visualUnitId = event.currentTarget.dataset.useQueryDocumentVisualUnitId;
+  const libraryObject = resolveLibraryObjectQueryDocument(visualUnitId);
+  if (!libraryObject) {
+    state.globalError = {
+      code: "not_supported",
+      message: "当前只能把库内 document_page 对象作为查询文档。",
+    };
+    renderWorkspace();
+    return;
+  }
+
+  setLibraryQueryDocumentVisualUnit(libraryObject);
+  state.searchMode = "document";
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
