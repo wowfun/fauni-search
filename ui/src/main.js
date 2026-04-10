@@ -26,6 +26,7 @@ const JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const state = {
   libraries: [],
   jobs: [],
+  videoSources: [],
   selectedLibraryId: "",
   importPathsDraft: "",
   searchMode: "text",
@@ -34,6 +35,13 @@ const state = {
   queryImageObjectUrl: null,
   queryImageAsset: null,
   queryImageLibraryObject: null,
+  queryVideoFile: null,
+  queryVideoObjectUrl: null,
+  queryVideoAsset: null,
+  queryVideoSource: null,
+  queryVideoLibraryObject: null,
+  queryVideoDurationMs: null,
+  queryVideoRange: null,
   importReceipt: null,
   selectedVisualUnit: null,
   searchOutcome: null,
@@ -104,6 +112,13 @@ function pageLabel(locator) {
   return locator?.page_label ?? (locator?.page ? `P${locator.page}` : null);
 }
 
+function videoLabel(locator) {
+  if (typeof locator?.start_ms !== "number" || typeof locator?.end_ms !== "number") {
+    return null;
+  }
+  return `${formatDurationMs(locator.start_ms)} → ${formatDurationMs(locator.end_ms)}`;
+}
+
 function formatScore(score) {
   if (typeof score !== "number" || Number.isNaN(score)) {
     return null;
@@ -138,6 +153,98 @@ function setPendingQueryImageFile(file) {
   state.queryImageObjectUrl = URL.createObjectURL(state.queryImageFile);
 }
 
+function clearQueryVideoState() {
+  if (state.queryVideoObjectUrl) {
+    URL.revokeObjectURL(state.queryVideoObjectUrl);
+  }
+  state.queryVideoFile = null;
+  state.queryVideoObjectUrl = null;
+  state.queryVideoAsset = null;
+  state.queryVideoSource = null;
+  state.queryVideoLibraryObject = null;
+  state.queryVideoDurationMs = null;
+  state.queryVideoRange = null;
+}
+
+function normalizeQueryVideoFile(file, fallbackName = "query-video.mp4") {
+  if (file.name && file.name.trim()) {
+    return file;
+  }
+
+  return new File([file], fallbackName, {
+    type: file.type || "video/mp4",
+    lastModified: Date.now(),
+  });
+}
+
+function setQueryVideoDuration(durationMs) {
+  if (typeof durationMs !== "number" || Number.isNaN(durationMs) || durationMs <= 0) {
+    return;
+  }
+
+  const normalizedDurationMs = Math.max(Math.round(durationMs), 1);
+  state.queryVideoDurationMs = normalizedDurationMs;
+  if (!state.queryVideoRange) {
+    return;
+  }
+
+  const startMs = Math.max(
+    0,
+    Math.min(state.queryVideoRange.start_ms ?? 0, normalizedDurationMs - 1)
+  );
+  const endMs = Math.max(
+    startMs + 1,
+    Math.min(state.queryVideoRange.end_ms ?? normalizedDurationMs, normalizedDurationMs)
+  );
+
+  if (startMs === 0 && endMs === normalizedDurationMs) {
+    state.queryVideoRange = null;
+    return;
+  }
+
+  state.queryVideoRange = {
+    start_ms: startMs,
+    end_ms: endMs,
+  };
+}
+
+function setPendingQueryVideoFile(file) {
+  clearQueryVideoState();
+  state.queryVideoFile = normalizeQueryVideoFile(file);
+  state.queryVideoObjectUrl = URL.createObjectURL(state.queryVideoFile);
+}
+
+function setLibraryQueryVideoSource(source) {
+  clearQueryVideoState();
+  state.queryVideoSource = source;
+  setQueryVideoDuration(source?.duration_ms ?? null);
+}
+
+function setLibraryQueryVideoVisualUnit(visualUnit) {
+  clearQueryVideoState();
+  state.queryVideoLibraryObject = visualUnit;
+  setQueryVideoDuration(
+    visualUnit?.locator?.duration_ms ??
+      (typeof visualUnit?.locator?.end_ms === "number" ? visualUnit.locator.end_ms : null)
+  );
+}
+
+function probeVideoDurationFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.src = url;
+    video.onloadedmetadata = () => {
+      if (!Number.isFinite(video.duration) || video.duration <= 0) {
+        reject(new Error("video_duration_unavailable"));
+        return;
+      }
+      resolve(Math.round(video.duration * 1000));
+    };
+    video.onerror = () => reject(new Error("video_metadata_load_failed"));
+  });
+}
+
 function firstClipboardImageFile(clipboardData) {
   if (!clipboardData) {
     return null;
@@ -159,6 +266,26 @@ function firstClipboardImageFile(clipboardData) {
   }
 
   return null;
+}
+
+function formatDurationMs(durationMs) {
+  if (typeof durationMs !== "number" || Number.isNaN(durationMs) || durationMs < 0) {
+    return null;
+  }
+
+  const totalMs = Math.round(durationMs);
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const seconds = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
+  const mm = String(minutes).padStart(hours ? 2 : 1, "0");
+  const ss = String(seconds).padStart(2, "0");
+  const mmm = String(milliseconds).padStart(3, "0");
+
+  if (hours) {
+    return `${hours}:${mm}:${ss}.${mmm}`;
+  }
+  return `${minutes}:${ss}.${mmm}`;
 }
 
 function queryImagePreviewUrl() {
@@ -202,6 +329,124 @@ function activeQueryImagePreview() {
 
 function isDocumentPageQueryImage() {
   return state.queryImageLibraryObject?.kind === "document_page";
+}
+
+function queryVideoPreviewUrl() {
+  return (
+    state.queryVideoObjectUrl ??
+    state.queryVideoAsset?.preview?.url ??
+    state.queryVideoSource?.preview?.url ??
+    state.queryVideoLibraryObject?.preview?.url ??
+    null
+  );
+}
+
+function queryVideoStatusLabel() {
+  if (state.queryVideoLibraryObject) {
+    return `库内片段 · ${state.queryVideoLibraryObject.visual_unit_id}`;
+  }
+  if (state.queryVideoSource) {
+    return `库内视频 · ${state.queryVideoSource.source_id}`;
+  }
+  if (state.queryVideoAsset) {
+    return `已上传 · ${state.queryVideoAsset.temp_asset_id}`;
+  }
+  if (state.queryVideoFile) {
+    return "待上传";
+  }
+  return "未选择";
+}
+
+function queryVideoDisplayName() {
+  if (state.queryVideoFile) {
+    return state.queryVideoFile.name;
+  }
+  if (state.queryVideoAsset?.original_filename) {
+    return state.queryVideoAsset.original_filename;
+  }
+  if (state.queryVideoLibraryObject?.source_path) {
+    return sourceName(state.queryVideoLibraryObject.source_path);
+  }
+  if (state.queryVideoSource?.source_path) {
+    return sourceName(state.queryVideoSource.source_path);
+  }
+  return null;
+}
+
+function activeQueryVideoPreview() {
+  return (
+    state.queryVideoAsset?.preview ??
+    state.queryVideoSource?.preview ??
+    state.queryVideoLibraryObject?.preview ??
+    null
+  );
+}
+
+function currentQueryVideoStartMs() {
+  if (state.queryVideoLibraryObject?.locator?.start_ms != null) {
+    return state.queryVideoLibraryObject.locator.start_ms;
+  }
+  return state.queryVideoRange?.start_ms ?? 0;
+}
+
+function currentQueryVideoEndMs() {
+  if (state.queryVideoLibraryObject?.locator?.end_ms != null) {
+    return state.queryVideoLibraryObject.locator.end_ms;
+  }
+  return state.queryVideoRange?.end_ms ?? state.queryVideoDurationMs ?? 0;
+}
+
+function queryVideoRangeSummary() {
+  if (!state.queryVideoDurationMs) {
+    return "加载视频后可选择时间范围。";
+  }
+
+  if (state.queryVideoLibraryObject) {
+    return `库内片段 · ${formatDurationMs(currentQueryVideoStartMs())} → ${formatDurationMs(
+      currentQueryVideoEndMs()
+    )}`;
+  }
+
+  if (!state.queryVideoRange) {
+    return `整段视频 · 0 → ${formatDurationMs(state.queryVideoDurationMs)}`;
+  }
+
+  return `${formatDurationMs(currentQueryVideoStartMs())} → ${formatDurationMs(
+    currentQueryVideoEndMs()
+  )}`;
+}
+
+function queryVideoLocatorPayload() {
+  if (state.queryVideoLibraryObject?.locator) {
+    return state.queryVideoLibraryObject.locator;
+  }
+  if (!state.queryVideoDurationMs || !state.queryVideoRange) {
+    return null;
+  }
+
+  const startMs = Math.max(0, currentQueryVideoStartMs());
+  const endMs = Math.min(currentQueryVideoEndMs(), state.queryVideoDurationMs);
+  if (startMs <= 0 && endMs >= state.queryVideoDurationMs) {
+    return null;
+  }
+
+  return {
+    start_ms: startMs,
+    end_ms: endMs,
+  };
+}
+
+function queryVideoRangeStep() {
+  if (!state.queryVideoDurationMs) {
+    return 250;
+  }
+  if (state.queryVideoDurationMs <= 10_000) {
+    return 100;
+  }
+  if (state.queryVideoDurationMs <= 60_000) {
+    return 250;
+  }
+  return 1000;
 }
 
 function renderStatusNotices() {
@@ -331,6 +576,23 @@ function renderVisualPreview() {
     `;
   }
 
+  if (visualUnit.kind === "video_segment") {
+    const startMs = visualUnit.locator?.start_ms ?? 0;
+    const endMs = visualUnit.locator?.end_ms ?? 0;
+    return `
+      <video
+        class="preview-video"
+        data-testid="visual-preview"
+        data-preview-kind="video"
+        data-start-ms="${escapeHtml(startMs)}"
+        data-end-ms="${escapeHtml(endMs)}"
+        src="${escapeHtml(preview.url)}"
+        controls
+        preload="metadata"
+      ></video>
+    `;
+  }
+
   return `
     <iframe
       class="preview-frame"
@@ -350,6 +612,7 @@ function renderVisualUnitDetail() {
   const visualUnit = state.selectedVisualUnit.visual_unit;
   const preview = state.selectedVisualUnit.preview;
   const page = pageLabel(visualUnit.locator);
+  const segment = videoLabel(visualUnit.locator);
   return `
     <div class="detail-card" data-testid="visual-unit-detail">
       <div class="detail-preview">
@@ -359,6 +622,7 @@ function renderVisualUnitDetail() {
         <div class="job-meta">
           <span class="pill ready">${escapeHtml(visualUnit.kind)}</span>
           ${page ? `<span class="pill muted">${escapeHtml(page)}</span>` : ""}
+          ${segment ? `<span class="pill muted">${escapeHtml(segment)}</span>` : ""}
         </div>
         <h4>${escapeHtml(sourceName(visualUnit.source_path))}</h4>
         <p class="helper">${escapeHtml(visualUnit.visual_unit_id)}</p>
@@ -379,7 +643,9 @@ function renderVisualUnitDetail() {
             ${
               visualUnit.kind === "image" || visualUnit.kind === "document_page"
                 ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询图片</button>`
-                : ""
+                : visualUnit.kind === "video_segment"
+                  ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询视频</button>`
+                  : ""
             }
           </div>
         </div>
@@ -424,7 +690,7 @@ function renderJobs() {
 
 function renderSearchOutcome() {
   if (!state.searchOutcome) {
-    return '<p class="empty">结果列表会显示在这里。导入成功后，这里会以统一列表混排 `image` 和 `document_page`，并可直接打开右侧详情。</p>';
+    return '<p class="empty">结果列表会显示在这里。导入成功后，这里会以统一列表混排 `video_segment`、`image` 和 `document_page`，并可直接打开右侧详情。</p>';
   }
 
   if (state.searchOutcome.error) {
@@ -475,6 +741,8 @@ function renderSearchOutcome() {
         .map(
           (item) => {
             const scoreLabel = formatScore(item.score);
+            const page = pageLabel(item.locator);
+            const segment = videoLabel(item.locator);
             return `
             <li
               class="result-card ${item.visual_unit_id === selectedVisualUnitId() ? "active" : ""}"
@@ -489,7 +757,8 @@ function renderSearchOutcome() {
               >
                 <div class="result-topline">
                   <span class="pill ${item.kind === "image" ? "ready" : "pending"}">${escapeHtml(item.kind)}</span>
-                  ${pageLabel(item.locator) ? `<span class="pill muted">${escapeHtml(pageLabel(item.locator))}</span>` : ""}
+                  ${page ? `<span class="pill muted">${escapeHtml(page)}</span>` : ""}
+                  ${segment ? `<span class="pill muted">${escapeHtml(segment)}</span>` : ""}
                   ${scoreLabel ? `<span class="pill score-pill" data-testid="result-score">score ${escapeHtml(scoreLabel)}</span>` : ""}
                 </div>
                 <strong>${escapeHtml(sourceName(item.source_path))}</strong>
@@ -501,7 +770,9 @@ function renderSearchOutcome() {
                 ${
                   item.kind === "image" || item.kind === "document_page"
                     ? `<button type="button" class="secondary-button" data-testid="use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询图片</button>`
-                    : ""
+                    : item.kind === "video_segment"
+                      ? `<button type="button" class="secondary-button" data-testid="use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询视频</button>`
+                      : ""
                 }
                 <a href="${escapeHtml(item.preview.url)}" target="_blank" rel="noreferrer">Preview</a>
               </div>
@@ -516,6 +787,10 @@ function renderSearchOutcome() {
 
 function renderSearchControls(library) {
   const queryPreview = queryImagePreviewUrl();
+  const queryVideoPreview = queryVideoPreviewUrl();
+  const queryVideoDuration = state.queryVideoDurationMs;
+  const queryVideoStartMs = currentQueryVideoStartMs();
+  const queryVideoEndMs = currentQueryVideoEndMs();
   return `
     <div class="search-mode-switch" data-testid="search-mode-switch">
       <button
@@ -534,6 +809,14 @@ function renderSearchControls(library) {
       >
         Image
       </button>
+      <button
+        type="button"
+        class="${state.searchMode === "video" ? "" : "secondary-button"}"
+        data-testid="search-mode-video"
+        data-search-mode="video"
+      >
+        Video
+      </button>
     </div>
     <form id="search-form" class="stack-form search-form" data-testid="search-form">
       ${
@@ -551,7 +834,8 @@ function renderSearchControls(library) {
               />
             </label>
           `
-          : `
+          : state.searchMode === "image"
+            ? `
             <div class="query-image-panel" data-testid="query-image-panel">
               <label>
                 <span>查询图片</span>
@@ -599,9 +883,133 @@ function renderSearchControls(library) {
               </div>
             </div>
           `
+            : `
+            <div class="query-video-panel" data-testid="query-video-panel">
+              <label>
+                <span>查询视频</span>
+                <input
+                  id="query-video-input"
+                  data-testid="query-video-input"
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/x-m4v,video/*"
+                  ${library ? "" : "disabled"}
+                />
+              </label>
+              <label>
+                <span>或复用库内视频源</span>
+                <select
+                  id="query-video-source-select"
+                  data-testid="query-video-source-select"
+                  ${library && state.videoSources.length ? "" : "disabled"}
+                >
+                  <option value="">不使用库内视频源</option>
+                  ${state.videoSources
+                    .map(
+                      (source) => `
+                        <option
+                          value="${escapeHtml(source.source_id)}"
+                          ${state.queryVideoSource?.source_id === source.source_id ? "selected" : ""}
+                        >
+                          ${escapeHtml(sourceName(source.source_path))} (${escapeHtml(source.source_id)})
+                        </option>
+                      `
+                    )
+                    .join("")}
+                </select>
+              </label>
+              <div class="query-video-card" data-testid="query-video-card">
+                <div class="job-meta">
+                  <span class="pill ${state.queryVideoAsset || state.queryVideoSource || state.queryVideoLibraryObject ? "ready" : "muted"}">${escapeHtml(queryVideoStatusLabel())}</span>
+                  ${
+                    queryVideoDisplayName()
+                      ? `<span class="helper">${escapeHtml(queryVideoDisplayName())}</span>`
+                      : ""
+                  }
+                </div>
+                ${
+                  queryVideoPreview
+                    ? `<video
+                        class="query-video-preview"
+                        data-testid="query-video-preview"
+                        src="${escapeHtml(queryVideoPreview)}"
+                        controls
+                        preload="metadata"
+                      ></video>`
+                    : `<p class="empty" data-testid="query-video-empty">选择一个本地视频或库内视频源后，这里会显示查询视频预览。</p>`
+                }
+                <div class="query-range-card" data-testid="query-video-range-card">
+                  <div class="job-meta">
+                    <strong>时间范围</strong>
+                    <span class="helper">${escapeHtml(queryVideoRangeSummary())}</span>
+                  </div>
+                  ${
+                    state.queryVideoLibraryObject
+                      ? `<p class="helper">当前使用库内 video_segment；查询范围固定为该片段自身的时间范围。</p>`
+                      : queryVideoDuration
+                      ? `
+                        <div class="range-grid">
+                          <label>
+                            <span>开始时间</span>
+                            <input
+                              id="query-video-range-start"
+                              data-testid="query-video-range-start"
+                              type="range"
+                              min="0"
+                              max="${escapeHtml(Math.max(queryVideoDuration - 1, 0))}"
+                              step="${escapeHtml(queryVideoRangeStep())}"
+                              value="${escapeHtml(queryVideoStartMs)}"
+                            />
+                          </label>
+                          <label>
+                            <span>结束时间</span>
+                            <input
+                              id="query-video-range-end"
+                              data-testid="query-video-range-end"
+                              type="range"
+                              min="1"
+                              max="${escapeHtml(queryVideoDuration)}"
+                              step="${escapeHtml(queryVideoRangeStep())}"
+                              value="${escapeHtml(Math.max(queryVideoEndMs, 1))}"
+                            />
+                          </label>
+                        </div>
+                      `
+                      : `<p class="helper">视频元数据加载后即可通过时间轴拖选查询片段；不拖选时默认整段视频。</p>`
+                  }
+                  <div class="inline-actions">
+                    <button
+                      type="button"
+                      id="clear-query-video-range-button"
+                      data-testid="clear-query-video-range-button"
+                      class="secondary-button"
+                      ${queryVideoDuration && state.queryVideoRange && !state.queryVideoLibraryObject ? "" : "disabled"}
+                    >
+                      整段视频
+                    </button>
+                  </div>
+                </div>
+                <div class="inline-actions">
+                  <button
+                    type="button"
+                    id="clear-query-video-button"
+                    data-testid="clear-query-video-button"
+                    class="secondary-button"
+                    ${state.queryVideoFile || state.queryVideoAsset || state.queryVideoSource || state.queryVideoLibraryObject ? "" : "disabled"}
+                  >
+                    清除
+                  </button>
+                  ${
+                    activeQueryVideoPreview()
+                      ? `<a data-testid="query-video-preview-link" href="${escapeHtml(activeQueryVideoPreview().url)}" target="_blank" rel="noreferrer">打开查询视频预览</a>`
+                      : ""
+                  }
+                </div>
+              </div>
+            </div>
+          `
       }
       <button type="submit" data-testid="search-submit-button" ${library ? "" : "disabled"}>
-        ${state.searchMode === "text" ? "搜索" : "以图片搜索"}
+        ${state.searchMode === "text" ? "搜索" : state.searchMode === "image" ? "以图片搜索" : "以视频搜索"}
       </button>
     </form>
   `;
@@ -616,7 +1024,7 @@ function renderWorkspace() {
         <p class="eyebrow">FauniSearch</p>
         <h1>Search workspace</h1>
         <p class="summary">
-          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路。左侧管理库和导入，中间在统一工作区中执行 Text / Image 搜索并浏览结果，右侧查看预览和对象详情。
+          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路。左侧管理库和导入，中间在统一工作区中执行 Text / Image / Video 搜索并浏览结果，右侧查看预览和对象详情。
         </p>
         <div class="service-strip">
           <a href="${endpoints.uiRoot}" target="_blank" rel="noreferrer">UI</a>
@@ -769,6 +1177,12 @@ function renderWorkspace() {
   document.querySelector("#query-image-input")?.addEventListener("change", onQueryImageInput);
   document.querySelector("#clear-query-image-button")?.addEventListener("click", onClearQueryImage);
   document.querySelector("#query-image-paste-target")?.addEventListener("paste", onQueryImagePaste);
+  document.querySelector("#query-video-input")?.addEventListener("change", onQueryVideoInput);
+  document.querySelector("#query-video-source-select")?.addEventListener("change", onQueryVideoSourceSelect);
+  document.querySelector("#clear-query-video-button")?.addEventListener("click", onClearQueryVideo);
+  document.querySelector("#clear-query-video-range-button")?.addEventListener("click", onClearQueryVideoRange);
+  document.querySelector("#query-video-range-start")?.addEventListener("input", onQueryVideoRangeStartInput);
+  document.querySelector("#query-video-range-end")?.addEventListener("input", onQueryVideoRangeEndInput);
   document.querySelector("#fill-demo-button")?.addEventListener("click", onFillDemo);
   document.querySelector("#run-demo-button")?.addEventListener("click", onRunDemo);
   document.querySelectorAll("[data-search-mode]").forEach((button) => {
@@ -780,6 +1194,22 @@ function renderWorkspace() {
   document.querySelectorAll("[data-use-query-visual-unit-id]").forEach((button) => {
     button.addEventListener("click", onUseAsQueryImage);
   });
+  document.querySelectorAll("[data-use-query-video-visual-unit-id]").forEach((button) => {
+    button.addEventListener("click", onUseAsQueryVideo);
+  });
+
+  const queryVideoPreview = document.querySelector("#query-video-preview");
+  if (queryVideoPreview instanceof HTMLVideoElement) {
+    queryVideoPreview.addEventListener("loadedmetadata", onQueryVideoPreviewLoadedMetadata);
+    if (queryVideoPreview.readyState >= 1) {
+      syncQueryVideoDurationFromVideoElement(queryVideoPreview);
+    }
+  }
+
+  const detailVideoPreview = document.querySelector('[data-testid="visual-preview"][data-preview-kind="video"]');
+  if (detailVideoPreview instanceof HTMLVideoElement) {
+    attachBoundedVideoPlayback(detailVideoPreview);
+  }
 }
 
 async function apiRequest(path, options = {}) {
@@ -811,6 +1241,52 @@ async function apiRequest(path, options = {}) {
   return payload.data;
 }
 
+function syncQueryVideoDurationFromVideoElement(videoElement) {
+  if (!(videoElement instanceof HTMLVideoElement) || !Number.isFinite(videoElement.duration)) {
+    return;
+  }
+
+  const durationMs = Math.max(Math.round(videoElement.duration * 1000), 1);
+  if (durationMs === state.queryVideoDurationMs) {
+    return;
+  }
+
+  setQueryVideoDuration(durationMs);
+  renderWorkspace();
+}
+
+function attachBoundedVideoPlayback(videoElement) {
+  if (!(videoElement instanceof HTMLVideoElement)) {
+    return;
+  }
+
+  const startMs = Number(videoElement.dataset.startMs ?? "0");
+  const endMs = Number(videoElement.dataset.endMs ?? "0");
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return;
+  }
+
+  const startSeconds = startMs / 1000;
+  const endSeconds = endMs / 1000;
+  const syncCurrentTime = () => {
+    if (Number.isFinite(videoElement.duration) && videoElement.currentTime < startSeconds) {
+      videoElement.currentTime = startSeconds;
+    }
+  };
+  const clampPlayback = () => {
+    if (videoElement.currentTime >= endSeconds) {
+      videoElement.pause();
+      videoElement.currentTime = startSeconds;
+    }
+  };
+
+  videoElement.addEventListener("loadedmetadata", syncCurrentTime, { once: true });
+  videoElement.addEventListener("timeupdate", clampPlayback);
+  if (videoElement.readyState >= 1) {
+    syncCurrentTime();
+  }
+}
+
 async function refreshLibraries({ keepSelection = true } = {}) {
   const data = await apiRequest("/libraries");
   state.libraries = data.libraries;
@@ -830,6 +1306,33 @@ async function refreshJobs() {
   state.jobs = data.jobs;
 }
 
+async function refreshVideoSources() {
+  if (!state.selectedLibraryId) {
+    state.videoSources = [];
+    if (!state.queryVideoFile && !state.queryVideoAsset) {
+      clearQueryVideoState();
+    }
+    return;
+  }
+
+  const data = await apiRequest(
+    `/libraries/${encodeURIComponent(state.selectedLibraryId)}/video-sources`
+  );
+  state.videoSources = data.sources;
+
+  if (state.queryVideoSource) {
+    const refreshed = state.videoSources.find(
+      (source) => source.source_id === state.queryVideoSource.source_id
+    );
+    if (refreshed) {
+      state.queryVideoSource = refreshed;
+      setQueryVideoDuration(refreshed.duration_ms ?? null);
+    } else if (!state.queryVideoFile && !state.queryVideoAsset) {
+      clearQueryVideoState();
+    }
+  }
+}
+
 async function refreshJob(jobId) {
   return apiRequest(`/jobs/${encodeURIComponent(jobId)}`);
 }
@@ -837,6 +1340,7 @@ async function refreshJob(jobId) {
 async function refreshWorkspace(options) {
   await refreshLibraries(options);
   await refreshJobs();
+  await refreshVideoSources();
   renderWorkspace();
 }
 
@@ -861,6 +1365,7 @@ async function onCreateLibrary(event) {
     state.importPathsDraft = "";
     state.searchTextDraft = "";
     clearQueryImageState();
+    clearQueryVideoState();
     state.importReceipt = null;
     state.selectedVisualUnit = null;
     state.searchOutcome = null;
@@ -876,6 +1381,7 @@ async function onCreateLibrary(event) {
 async function onSelectLibrary(event) {
   state.selectedLibraryId = event.target.value;
   clearQueryImageState();
+  clearQueryVideoState();
   state.importReceipt = null;
   state.selectedVisualUnit = null;
   state.searchOutcome = null;
@@ -1003,6 +1509,8 @@ async function onSearchSubmit(event) {
     renderWorkspace();
     if (state.searchMode === "image") {
       await runImageSearch();
+    } else if (state.searchMode === "video") {
+      await runVideoSearch();
     } else {
       await runTextSearch();
     }
@@ -1071,6 +1579,58 @@ async function runImageSearch() {
   }
 }
 
+async function runVideoSearch() {
+  if (
+    !state.queryVideoFile &&
+    !state.queryVideoAsset &&
+    !state.queryVideoSource &&
+    !state.queryVideoLibraryObject
+  ) {
+    state.searchOutcome = {
+      error: {
+        code: "validation_failed",
+        message: "请先选择一个查询视频。",
+      },
+    };
+    renderWorkspace();
+    return;
+  }
+
+  if (state.queryVideoFile) {
+    state.statusMessage = "正在上传查询视频...";
+    renderWorkspace();
+    await uploadQueryVideo(state.queryVideoFile);
+  }
+
+  state.statusMessage = "正在执行真实 multivector 视频搜索...";
+  renderWorkspace();
+  const locator = queryVideoLocatorPayload();
+  if (state.queryVideoAsset) {
+    await searchVideo({
+      kind: "temp_asset",
+      temp_asset_id: state.queryVideoAsset.temp_asset_id,
+      ...(locator ? { locator } : {}),
+    });
+    return;
+  }
+
+  if (state.queryVideoSource) {
+    await searchVideo({
+      kind: "library_object",
+      source_id: state.queryVideoSource.source_id,
+      ...(locator ? { locator } : {}),
+    });
+    return;
+  }
+
+  if (state.queryVideoLibraryObject) {
+    await searchVideo({
+      kind: "library_object",
+      visual_unit_id: state.queryVideoLibraryObject.visual_unit_id,
+    });
+  }
+}
+
 async function searchText(text) {
   const data = await apiRequest("/search/text", {
     method: "POST",
@@ -1106,12 +1666,49 @@ async function uploadQueryImage(file) {
   return data;
 }
 
+async function uploadQueryVideo(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const data = await apiRequest(`/libraries/${state.selectedLibraryId}/query-assets/videos`, {
+    method: "POST",
+    body: formData,
+  });
+  if (state.queryVideoObjectUrl) {
+    URL.revokeObjectURL(state.queryVideoObjectUrl);
+  }
+  state.queryVideoFile = null;
+  state.queryVideoObjectUrl = null;
+  state.queryVideoAsset = data;
+  state.queryVideoSource = null;
+  setQueryVideoDuration(data.duration_ms ?? state.queryVideoDurationMs);
+  renderWorkspace();
+  return data;
+}
+
 async function searchImage(imageInput) {
   const data = await apiRequest("/search/image", {
     method: "POST",
     body: JSON.stringify({
       library_id: state.selectedLibraryId,
       image_input: imageInput,
+      top_k: 5,
+      debug: true,
+    }),
+  });
+  state.searchOutcome = data;
+  renderWorkspace();
+  if (data.results[0]?.visual_unit_id) {
+    await loadVisualUnit(data.results[0].visual_unit_id);
+  }
+  return data;
+}
+
+async function searchVideo(videoInput) {
+  const data = await apiRequest("/search/video", {
+    method: "POST",
+    body: JSON.stringify({
+      library_id: state.selectedLibraryId,
+      video_input: videoInput,
       top_k: 5,
       debug: true,
     }),
@@ -1172,6 +1769,37 @@ function onQueryImageInput(event) {
   renderWorkspace();
 }
 
+async function onQueryVideoInput(event) {
+  const [file] = event.target.files ?? [];
+  if (file) {
+    setPendingQueryVideoFile(file);
+  }
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+
+  if (!file || !state.queryVideoObjectUrl) {
+    return;
+  }
+
+  const previewUrl = state.queryVideoObjectUrl;
+  try {
+    const durationMs = await probeVideoDurationFromUrl(previewUrl);
+    if (state.queryVideoObjectUrl === previewUrl) {
+      setQueryVideoDuration(durationMs);
+      renderWorkspace();
+    }
+  } catch {
+    if (state.queryVideoObjectUrl === previewUrl) {
+      state.globalError = {
+        code: "validation_failed",
+        message: "当前查询视频的元数据无法读取。",
+      };
+      renderWorkspace();
+    }
+  }
+}
+
 function onQueryImagePaste(event) {
   if (state.searchMode !== "image" || !state.selectedLibraryId) {
     return;
@@ -1204,6 +1832,81 @@ function onClearQueryImage() {
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
+}
+
+function onQueryVideoSourceSelect(event) {
+  const sourceId = event.target.value;
+  if (!sourceId) {
+    if (!state.queryVideoLibraryObject) {
+      clearQueryVideoState();
+    }
+  } else {
+    const source = state.videoSources.find((item) => item.source_id === sourceId);
+    if (source) {
+      setLibraryQueryVideoSource(source);
+    }
+  }
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onClearQueryVideo() {
+  clearQueryVideoState();
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onClearQueryVideoRange() {
+  state.queryVideoRange = null;
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onQueryVideoRangeStartInput(event) {
+  if (!state.queryVideoDurationMs) {
+    return;
+  }
+
+  const startMs = Math.max(0, Math.round(Number(event.target.value) || 0));
+  const currentEndMs = Math.max(currentQueryVideoEndMs(), startMs + 1);
+  state.queryVideoRange = {
+    start_ms: Math.min(startMs, state.queryVideoDurationMs - 1),
+    end_ms: Math.min(currentEndMs, state.queryVideoDurationMs),
+  };
+  if (state.queryVideoRange.end_ms <= state.queryVideoRange.start_ms) {
+    state.queryVideoRange.end_ms = Math.min(
+      state.queryVideoDurationMs,
+      state.queryVideoRange.start_ms + queryVideoRangeStep()
+    );
+  }
+  renderWorkspace();
+}
+
+function onQueryVideoRangeEndInput(event) {
+  if (!state.queryVideoDurationMs) {
+    return;
+  }
+
+  const endMs = Math.min(
+    state.queryVideoDurationMs,
+    Math.max(1, Math.round(Number(event.target.value) || state.queryVideoDurationMs))
+  );
+  const currentStartMs = Math.min(currentQueryVideoStartMs(), endMs - 1);
+  state.queryVideoRange = {
+    start_ms: Math.max(0, currentStartMs),
+    end_ms: endMs,
+  };
+  if (state.queryVideoRange.start_ms >= state.queryVideoRange.end_ms) {
+    state.queryVideoRange.start_ms = Math.max(0, state.queryVideoRange.end_ms - queryVideoRangeStep());
+  }
+  renderWorkspace();
+}
+
+function onQueryVideoPreviewLoadedMetadata(event) {
+  syncQueryVideoDurationFromVideoElement(event.currentTarget);
 }
 
 function resolveLibraryObjectQueryImage(visualUnitId) {
@@ -1242,6 +1945,33 @@ function resolveLibraryObjectQueryImage(visualUnitId) {
   return null;
 }
 
+function resolveLibraryObjectQueryVideo(visualUnitId) {
+  const resultItem =
+    state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
+  if (resultItem?.kind === "video_segment") {
+    return {
+      visual_unit_id: resultItem.visual_unit_id,
+      kind: resultItem.kind,
+      source_path: resultItem.source_path,
+      locator: resultItem.locator,
+      preview: resultItem.preview,
+    };
+  }
+
+  const detailVisualUnit = state.selectedVisualUnit?.visual_unit;
+  if (detailVisualUnit?.visual_unit_id === visualUnitId && detailVisualUnit.kind === "video_segment") {
+    return {
+      visual_unit_id: detailVisualUnit.visual_unit_id,
+      kind: detailVisualUnit.kind,
+      source_path: detailVisualUnit.source_path,
+      locator: detailVisualUnit.locator,
+      preview: state.selectedVisualUnit.preview,
+    };
+  }
+
+  return null;
+}
+
 function onUseAsQueryImage(event) {
   const visualUnitId = event.currentTarget.dataset.useQueryVisualUnitId;
   const libraryObject = resolveLibraryObjectQueryImage(visualUnitId);
@@ -1257,6 +1987,25 @@ function onUseAsQueryImage(event) {
   clearQueryImageState();
   state.queryImageLibraryObject = libraryObject;
   state.searchMode = "image";
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onUseAsQueryVideo(event) {
+  const visualUnitId = event.currentTarget.dataset.useQueryVideoVisualUnitId;
+  const libraryObject = resolveLibraryObjectQueryVideo(visualUnitId);
+  if (!libraryObject) {
+    state.globalError = {
+      code: "not_supported",
+      message: "当前只能把库内 video_segment 对象作为查询视频片段。",
+    };
+    renderWorkspace();
+    return;
+  }
+
+  setLibraryQueryVideoVisualUnit(libraryObject);
+  state.searchMode = "video";
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();

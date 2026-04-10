@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import importlib.util
 import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -21,6 +23,9 @@ class EmbeddingRuntime(Protocol):
         ...
 
     def embed_image_queries(self, images: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+        ...
+
+    def embed_video_queries(self, videos: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
         ...
 
     def embed_documents(self, documents: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
@@ -125,6 +130,13 @@ class ColQwenRuntime:
                     "model": self._model_metadata(),
                 },
                 {
+                    "operation_kind": "video_query_embedding",
+                    "supported": can_service,
+                    "target_index_lines": ["multivector"],
+                    "input_kind": "local_file",
+                    "model": self._model_metadata(),
+                },
+                {
                     "operation_kind": "document_embedding",
                     "supported": can_service,
                     "target_index_lines": ["multivector"],
@@ -215,6 +227,66 @@ class ColQwenRuntime:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
         payload: dict[str, Any] = {
             "operation_kind": "image_query_embedding",
+            "model": self._model_metadata(loaded=True),
+            "embeddings": items,
+        }
+
+        if debug:
+            payload["debug"] = {
+                "elapsed_ms": elapsed_ms,
+                "loaded_at": self._load_state.loaded_at,
+                "last_load_ms": self._load_state.last_load_ms,
+            }
+
+        return payload
+
+    def embed_video_queries(self, videos: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+        model, processor = self._ensure_loaded()
+
+        import torch
+
+        started_at = time.perf_counter()
+        items = []
+
+        for index, video_input in enumerate(videos):
+            path = video_input["path"]
+            frames, source_type, kind, locator = load_query_input_video(video_input)
+            batch = processor.process_images(frames).to(model.device)
+
+            with torch.inference_mode():
+                model.rope_deltas = None
+                embeddings = model(**batch)
+
+            frame_vectors = []
+            for frame_index in range(len(frames)):
+                vectors = embeddings[frame_index].to(torch.float32).cpu()
+                frame_vectors.append(vectors)
+
+            pooled_source = torch.cat(frame_vectors, dim=0)
+            pooled_vector = (
+                pooled_source.mean(dim=0)
+                if pooled_source.ndim == 2 and pooled_source.shape[0] > 0
+                else None
+            )
+
+            items.append(
+                {
+                    "index": index,
+                    "path": path,
+                    "source_type": source_type,
+                    "kind": kind,
+                    "locator": locator,
+                    "frame_count": len(frames),
+                    "vector_count": int(sum(vectors.shape[0] for vectors in frame_vectors)),
+                    "dim": int(frame_vectors[0].shape[1]) if frame_vectors and frame_vectors[0].ndim == 2 else 0,
+                    "vectors": [vector.tolist() for vectors in frame_vectors for vector in vectors],
+                    "pooled_vector": pooled_vector.tolist() if pooled_vector is not None else [],
+                }
+            )
+
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        payload: dict[str, Any] = {
+            "operation_kind": "video_query_embedding",
             "model": self._model_metadata(loaded=True),
             "embeddings": items,
         }
@@ -432,6 +504,18 @@ def load_document_image(document: dict[str, Any]) -> tuple[Any, str, str, dict[s
         except Exception as exc:
             raise RuntimeError(f"Failed to load image {normalized}: {exc}") from exc
 
+    if suffix in supported_video_suffixes():
+        duration_ms = probe_video_duration_ms(normalized)
+        video_range = resolve_video_locator(locator, duration_ms, normalized)
+        midpoint_ms = video_range["start_ms"] + ((video_range["end_ms"] - video_range["start_ms"]) // 2)
+        image = extract_video_frame(normalized, midpoint_ms)
+        return (
+            image,
+            "video",
+            "video_segment",
+            video_range,
+        )
+
     raise RuntimeError(f"Unsupported document input type for embedding: {normalized}")
 
 
@@ -440,6 +524,25 @@ def load_query_input_image(image_input: dict[str, Any]) -> tuple[Any, str, str, 
         return load_document_image(image_input)
     except RuntimeError as exc:
         raise RuntimeError(f"Failed to load query image input {image_input['path']}: {exc}") from exc
+
+
+def load_query_input_video(video_input: dict[str, Any]) -> tuple[list[Any], str, str, dict[str, Any]]:
+    path = video_input["path"]
+    normalized = Path(path).expanduser()
+    suffix = normalized.suffix.lower()
+    if suffix not in supported_video_suffixes():
+        raise RuntimeError(f"Unsupported query video input type for embedding: {normalized}")
+    if not module_available("PIL"):
+        raise RuntimeError("Pillow is unavailable in the current GPU environment.")
+
+    duration_ms = probe_video_duration_ms(normalized)
+    video_range = resolve_video_locator(video_input.get("locator"), duration_ms, normalized)
+    frame_times = sample_video_query_frame_times(
+        video_range["start_ms"],
+        video_range["end_ms"],
+    )
+    frames = [extract_video_frame(normalized, time_ms) for time_ms in frame_times]
+    return frames, "video", "video", video_range
 
 
 def resolve_pdf_page_number(
@@ -460,6 +563,127 @@ def resolve_pdf_page_number(
             f"PDF locator for {normalized_path} requested page {raw_page}, but the document has {page_count} page(s)."
         )
     return raw_page
+
+
+def supported_video_suffixes() -> set[str]:
+    return {".mp4", ".mov", ".m4v"}
+
+
+def probe_video_duration_ms(path: Path) -> int:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "unknown ffprobe error"
+        raise RuntimeError(f"Failed to probe video duration for {path}: {stderr}")
+    duration_text = result.stdout.strip()
+    try:
+        duration_seconds = float(duration_text)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Failed to parse video duration for {path}: {duration_text!r}"
+        ) from exc
+    duration_ms = max(int(round(duration_seconds * 1000)), 1)
+    return duration_ms
+
+
+def resolve_video_locator(
+    locator: dict[str, Any] | None,
+    duration_ms: int,
+    normalized_path: Path,
+) -> dict[str, Any]:
+    if locator is None:
+        return {
+            "start_ms": 0,
+            "end_ms": duration_ms,
+            "duration_ms": duration_ms,
+        }
+
+    raw_start_ms = locator.get("start_ms")
+    raw_end_ms = locator.get("end_ms")
+    if raw_start_ms is None or raw_end_ms is None:
+        raise RuntimeError(
+            f"Video locator for {normalized_path} must include start_ms and end_ms."
+        )
+    if not isinstance(raw_start_ms, int) or not isinstance(raw_end_ms, int):
+        raise RuntimeError(
+            f"Video locator for {normalized_path} must use integer start_ms and end_ms."
+        )
+    if raw_start_ms < 0 or raw_end_ms <= raw_start_ms or raw_end_ms > duration_ms:
+        raise RuntimeError(
+            f"Video locator for {normalized_path} must satisfy 0 <= start_ms < end_ms <= {duration_ms}."
+        )
+    return {
+        "start_ms": raw_start_ms,
+        "end_ms": raw_end_ms,
+        "duration_ms": duration_ms,
+    }
+
+
+def sample_video_query_frame_times(start_ms: int, end_ms: int) -> list[int]:
+    span_ms = max(end_ms - start_ms, 1)
+    if span_ms < 1500:
+        frame_count = 1
+    elif span_ms < 8000:
+        frame_count = 2
+    else:
+        frame_count = 4
+
+    return [
+        start_ms + int(round(span_ms * ((index + 0.5) / frame_count)))
+        for index in range(frame_count)
+    ]
+
+
+def extract_video_frame(path: Path, time_ms: int) -> Any:
+    if not module_available("PIL"):
+        raise RuntimeError("Pillow is unavailable in the current GPU environment.")
+    from PIL import Image
+
+    seconds = max(time_ms / 1000.0, 0.0)
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{seconds:.3f}",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip() or "unknown ffmpeg error"
+        raise RuntimeError(f"Failed to extract frame at {time_ms}ms from {path}: {stderr}")
+
+    try:
+        with Image.open(io.BytesIO(result.stdout)) as image:
+            return image.convert("RGB")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to decode extracted frame at {time_ms}ms from {path}: {exc}"
+        ) from exc
 
 
 def require_env(name: str) -> str:

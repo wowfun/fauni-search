@@ -53,7 +53,7 @@
   - 运行时健康与诊断工作区
   - 收藏与搜索历史工作区
 - 搜索工作区可以是默认主工作区，但其搜索语义、结果语义、分页规则与调试输出继续由 [004-search](../004-search/spec.md) 定义；具体请求 / 响应契约由 [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义
-- 搜索工作区内部的共享布局、查询模式切换、结果 / 详情关系与共享状态反馈，由 [search-workspace.md](./search-workspace.md) 作为本专题下的正式事实源定义
+- 搜索工作区内部的共享布局、查询模式切换、结果 / 详情关系、共享状态反馈，以及非文本查询模式的共享输入交互，由 [search-workspace.md](./search-workspace.md) 作为本专题下的正式事实源定义
 - 工作区切换必须保持当前库上下文可见，并允许用户明确知道当前操作作用于哪个库
 - 应用壳层可以承载全局反馈，例如后台任务状态、运行时降级提醒与维护动作结果，但这些反馈不应改写对应专题中的底层语义
 
@@ -85,7 +85,7 @@
 
 ## 关联主题
 
-- [search-workspace.md](./search-workspace.md) 定义搜索工作区内部的共享界面与体验约束
+- [search-workspace.md](./search-workspace.md) 定义搜索工作区内部的共享界面与体验约束，以及 `Image` / `Video` 等非文本查询模式的共享交互
 - [001-architecture](../001-architecture/spec.md) 定义应用壳层所依赖的系统边界、编排中心与组件交互路径
 - [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义库、配置、来源根、任务、收藏与搜索历史的状态模型与事实源归属
 - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义刷新、重扫、重建与启用索引线切换所依赖的摄取 / 索引语义

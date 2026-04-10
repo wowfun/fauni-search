@@ -95,16 +95,18 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
 1. 确认 `scripts/local/run.sh` 已经在运行
 2. 运行 `scripts/local/smoke-text-search.sh`
 3. 如需验证图片查询，再运行 `scripts/local/smoke-image-search.sh`
+4. 如需验证视频查询，再运行 `scripts/local/smoke-video-search.sh`
 
 如果服务使用 `--dev` 启动，验证命令也使用 `scripts/local/smoke-text-search.sh --dev`。
 自动化场景可使用 `scripts/local/smoke-text-search.sh --dev --json` 获取机器可读摘要。
 图片查询对应命令是 `scripts/local/smoke-image-search.sh --dev --json`。
+视频查询对应命令是 `scripts/local/smoke-video-search.sh --dev --json`。
 
 快速无 GPU 检查入口：
 - `scripts/local/check.sh`
 - `pnpm --dir ui test:e2e`
 
-`pnpm --dir ui test:e2e` 是当前最小 UI smoke。它固定使用 `--dev` 配置：若 `--dev` 服务已在运行则直接复用；若未运行则自行启动并在结束后只清理由自身启动的 `--dev` 服务。当前覆盖文本与图片 happy path、粘贴图片查询、`not_ready`、无效导入拒绝，以及库内 `image` / `document_page` 对象直接作为 query image 的路径。运行前仍需要先完成一次 `scripts/local/bootstrap-linux.sh --dev`。
+`pnpm --dir ui test:e2e` 是当前最小 UI smoke。它固定使用 `--dev` 配置：若 `--dev` 服务已在运行则直接复用；若未运行则自行启动并在结束后只清理由自身启动的 `--dev` 服务。当前覆盖文本与图片 happy path、粘贴图片查询、`not_ready`、无效导入拒绝、库内 `image` / `document_page` 对象直接作为 query image，以及 `Video` 模式下的本地查询视频上传、时间范围选择、`not_ready`、非视频上传拒绝、`video_segment` 详情预览与库内 `video_segment` 直接作为 query video 的路径。运行前仍需要先完成一次 `scripts/local/bootstrap-linux.sh --dev`。
 
 ### 仓库内环境资产
 
@@ -159,6 +161,10 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
   - 在 app、sidecar 和 Qdrant 已启动后运行真实 GPU smoke
   - 验证临时查询图片上传、库内 `image` / `document_page` 对象引用复用、`/search/image` 与 Qdrant-backed multivector 图片搜索链
   - 支持 `--json` 输出机器可读验证摘要
+- `scripts/local/smoke-video-search.sh`
+  - 在 app、sidecar 和 Qdrant 已启动后运行真实 GPU smoke
+  - 基于 local-only manifest 自动派生截图与 clip，验证查询视频上传、`/search/video`、库内 `source_id` 复用、库内 `video_segment` 直接复用，以及 `video_segment + image + document_page` 混排结果
+  - 支持 `--json` 输出机器可读验证摘要
 - `scripts/local/check.sh`
   - 运行无 GPU 快速检查，不启动长驻服务
 - `pnpm --dir ui test:e2e`
@@ -196,6 +202,7 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
 - `test`：运行 `scripts/local/check.sh` 或更窄的 Rust / sidecar / UI 测试入口
 - `ui-smoke`：运行 `pnpm --dir ui test:e2e`，验证当前阶段最小浏览器闭环
 - `smoke`：运行 `scripts/local/smoke-text-search.sh`，验证真实模型与 Qdrant 链路
+- `smoke`：运行 `scripts/local/smoke-text-search.sh` / `scripts/local/smoke-image-search.sh` / `scripts/local/smoke-video-search.sh`，验证真实模型与 Qdrant 链路
 
 ### Python 环境策略
 
@@ -214,11 +221,13 @@ FauniSearch 是一个本地优先（Local-First）的视觉检索系统。
   - Rust HTTP 服务，当前已提供库管理、路径导入、任务查询、视觉对象详情与 Qdrant 驱动的文本搜索
 - `sidecar/`
   - Python sidecar，当前已提供 `/health`、`/capabilities` 与 `/embed`
-  - 当前已接通 `query_embedding` 与 `document_embedding`
+  - 当前已接通 `query_embedding`、`image_query_embedding`、`video_query_embedding` 与 `document_embedding`
 - `ui/`
-  - 最小 Vite 工作台，当前已接通三栏工作流：左侧建库/导入/任务，中间统一 Text / Image 搜索与结果，右侧预览与详情
+  - 最小 Vite 工作台，当前已接通三栏工作流：左侧建库/导入/任务，中间统一 Text / Image / Video 搜索与结果，右侧预览与详情
   - `Image` 模式当前既支持文件选择 / 粘贴图片进入临时查询资产链路，也支持把库内 `image` / `document_page` 结果对象直接作为 query image
+  - `Video` 模式当前支持本地查询视频上传、库内 `source_id` 复用、库内 `video_segment` 直接复用、可选时间范围选择，以及 `video_segment + image + document_page` 的统一结果浏览
   - 临时上传查询图片会在运行期按过期窗口自动回收，过期后需重新上传
+  - 临时上传查询视频与查询图片都属于运行期资产；视频 smoke 默认允许从 local-only manifest 自动派生截图与 clip
   - 搜索结果与对象详情都使用 app 提供的稳定 preview 资源引用，而不是直接暴露本地文件路径
 
 ## 项目结构

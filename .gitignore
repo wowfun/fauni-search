@@ -5,6 +5,7 @@ __pycache__/
 .env
 .env.*
 !.env*.example
+.qdrant-initialized
 .venv/
 .venv-test/
 target/

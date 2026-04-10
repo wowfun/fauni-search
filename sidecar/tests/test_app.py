@@ -56,6 +56,20 @@ class FakeRuntime:
                     },
                 },
                 {
+                    "operation_kind": "video_query_embedding",
+                    "supported": True,
+                    "target_index_lines": ["multivector"],
+                    "input_kind": "local_file",
+                    "model": {
+                        "model_id": "fake/model",
+                        "revision": "main",
+                        "backend": "colqwen3.5",
+                        "loaded": False,
+                        "device": None,
+                        "dtype": None,
+                    },
+                },
+                {
                     "operation_kind": "document_embedding",
                     "supported": True,
                     "target_index_lines": ["multivector"],
@@ -128,6 +142,37 @@ class FakeRuntime:
             payload["debug"] = {"elapsed_ms": 1.89}
         return payload
 
+    def embed_video_queries(self, videos: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "operation_kind": "video_query_embedding",
+            "model": {
+                "model_id": "fake/model",
+                "revision": "main",
+                "backend": "colqwen3.5",
+                "loaded": True,
+                "device": "cuda:0",
+                "dtype": "torch.bfloat16",
+            },
+            "embeddings": [
+                {
+                    "index": index,
+                    "path": video["path"],
+                    "source_type": "video",
+                    "kind": "video",
+                    "locator": video.get("locator", {"start_ms": 0, "end_ms": 5000, "duration_ms": 5000}),
+                    "frame_count": 2,
+                    "vector_count": 4,
+                    "dim": 3,
+                    "vectors": [[0.2, 0.3, 0.5], [0.1, 0.7, 0.2], [0.4, 0.1, 0.5], [0.4, 0.4, 0.2]],
+                    "pooled_vector": [0.275, 0.375, 0.35],
+                }
+                for index, video in enumerate(videos)
+            ],
+        }
+        if debug:
+            payload["debug"] = {"elapsed_ms": 2.11}
+        return payload
+
     def embed_documents(self, documents: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
         payload: dict[str, object] = {
             "operation_kind": "document_embedding",
@@ -178,6 +223,7 @@ def test_capabilities_exposes_query_embedding_operation() -> None:
     assert [item["operation_kind"] for item in payload["operations"]] == [
         "query_embedding",
         "image_query_embedding",
+        "video_query_embedding",
         "document_embedding",
     ]
     assert payload["operations"][0]["target_index_lines"] == ["multivector"]
@@ -271,6 +317,34 @@ def test_embed_returns_document_page_query_vectors() -> None:
     assert payload["embeddings"][0]["kind"] == "document_page"
     assert payload["embeddings"][0]["locator"] == {"page": 2, "page_label": "2"}
     assert payload["embeddings"][0]["pooled_vector"] == [0.15, 0.5, 0.35]
+
+
+def test_embed_returns_video_query_vectors() -> None:
+    routes = build_route_map(FakeRuntime())
+    request = EmbedRequest.model_validate(
+        {
+            "operation_kind": "video_query_embedding",
+            "inputs": {
+                "videos": [
+                    {"path": "/tmp/query.mp4", "locator": {"start_ms": 1000, "end_ms": 5000}}
+                ]
+            },
+            "debug": True,
+        }
+    )
+
+    response = routes["/embed"](request)
+    payload = response["data"]
+
+    assert payload["operation_kind"] == "video_query_embedding"
+    assert payload["embeddings"][0]["path"] == "/tmp/query.mp4"
+    assert payload["embeddings"][0]["locator"] == {
+        "start_ms": 1000,
+        "end_ms": 5000,
+    }
+    assert payload["embeddings"][0]["frame_count"] == 2
+    assert payload["embeddings"][0]["pooled_vector"] == [0.275, 0.375, 0.35]
+    assert payload["debug"]["elapsed_ms"] == 2.11
 
 
 def test_embed_runtime_failure_maps_to_runtime_unavailable() -> None:

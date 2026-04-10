@@ -9,12 +9,13 @@
   - 本地路径导入提交
   - 嵌入式任务面板
   - 三栏工作台中的对象详情与预览侧栏
-  - 统一搜索入口中的 Text / Image 模式
+  - 统一搜索入口中的 Text / Image / Video 模式
   - 通过文件选择或粘贴图片进入临时查询资产链路，以及把库内 `image` / `document_page` 结果对象直接作为 query image
+  - 通过本地视频上传或库内 `source_id` 复用进入视频查询链路，并可选指定时间范围
   - 显式 `not_ready` 反馈和真实搜索结果列表
-- 当前 sidecar 已经具备真实的 ColQwen `query_embedding`、`image_query_embedding` 与 `document_embedding` 能力，并提供 `/health`、`/capabilities`、`/embed`。
-- 当前 app 已经接通真实的 `app -> sidecar -> Qdrant` multivector 搜索链，当前可实际命中 `image` 与真实页级 `document_page`。
-- 当前仍然是早期工作台，不包含完整产品控制面，也还没有 `video_segment` 或视频查询。
+- 当前 sidecar 已经具备真实的 ColQwen `query_embedding`、`image_query_embedding`、`video_query_embedding` 与 `document_embedding` 能力，并提供 `/health`、`/capabilities`、`/embed`。
+- 当前 app 已经接通真实的 `app -> sidecar -> Qdrant` multivector 搜索链，当前可实际命中 `image`、真实页级 `document_page` 与 `video_segment`。
+- 当前仍然是早期工作台，不包含完整产品控制面，但已经具备文本、图片与视频三种查询主链。
 - 默认使用根 `.env` 作为本地运行时配置；传 `--dev` 时使用 `.env.dev`。同一次运行中，被选中的 env 文件是端口、URL、日志目录和运行时目录的单一事实源。
 
 ## 第一次使用：安装与初始化
@@ -127,6 +128,20 @@ bash scripts/local/smoke-image-search.sh --dev --json
 随后它还会复用库内返回的 `image` 结果对象，以 `library_object` 形式再次发起图片搜索，并验证这条路径也能命中 `image` 与 `document_page`。
 最后它还会复用库内返回的 `document_page` 对象，以 `library_object` 形式再次发起图片搜索，并验证文档页 query image 链路也能命中 `image` 与 `document_page`。
 
+视频查询对应 smoke：
+
+```bash
+bash scripts/local/smoke-video-search.sh --dev --json
+```
+
+该脚本会读取 local-only 视频 manifest，自动派生关键截图与 clip，把原视频、派生截图和派生 PDF 一起导入同一临时库，然后验证：
+- 临时上传视频 + 指定时间范围的 `/search/video`
+- 临时上传 clip 的整段视频查询
+- 库内 `source_id + 指定时间范围` 的 `/search/video`
+- 库内 `video_segment` 直接作为查询视频片段再次发起 `/search/video`
+- 统一结果列表能同时返回 `video_segment`、`image` 与 `document_page`
+- 搜索后端是 `qdrant` / `multivector`
+
 ## 快速检查
 
 快速检查不启动长驻服务，也不加载真实 GPU 模型：
@@ -143,7 +158,7 @@ bash scripts/local/check.sh
 pnpm --dir ui test:e2e
 ```
 
-这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。当前覆盖文本 happy path、图片查询 happy path、粘贴图片查询、库内 `image` / `document_page` 对象作为 query image、建库后直接搜索的 `not_ready`，以及无效导入路径或非图片查询上传的拒绝反馈。运行前仍需要先完成一次：
+这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。当前覆盖文本 happy path、图片查询 happy path、粘贴图片查询、库内 `image` / `document_page` 对象作为 query image、视频查询 happy path、库内 `video_segment` 作为 query video、建库后直接搜索的 `not_ready`，以及无效导入路径、非图片查询上传与非视频查询上传的拒绝反馈。运行前仍需要先完成一次：
 
 ```bash
 bash scripts/local/bootstrap-linux.sh --dev
@@ -172,11 +187,13 @@ UI 当前包含：
 - 路径导入表单与回执区
 - TATDQA demo fixture 的填入与“导入并搜索”快捷动作
 - 最近任务列表
-- 中间列的统一搜索入口、Text / Image 模式切换、错误反馈区和真实结果列表
+- 中间列的统一搜索入口、Text / Image / Video 模式切换、错误反馈区和真实结果列表
 - `Image` 模式下的查询图片卡片；当前支持文件选择、粘贴图片，也支持从结果列表把库内 `image` / `document_page` 对象直接设为 query image
+- `Video` 模式下的查询视频卡片；当前支持本地视频上传、库内 `source_id` 复用、库内 `video_segment` 复用、时间范围滑块，以及对当前查询视频的即时预览
 - 临时上传查询图片的有效窗口是临时性的；运行期会自动回收过期查询图片及其预览文件，过期后需重新上传
+- 临时上传查询视频同样属于运行期资产；视频查询 smoke 会基于 local-only manifest 自动派生 clip、截图与辅助 PDF，不把这些派生文件提交进仓库
 - 搜索结果卡片中的每条结果 score 展示；该值只用于当前响应内的相对排序参考
-- 右侧详情栏中的图片/PDF 预览、locator、preview 链接和 neighbor context
+- 右侧详情栏中的图片/PDF/视频预览、locator、preview 链接和 neighbor context
 - 从导入回执或搜索结果直接打开右侧详情的交互链
 
 ## 关键配置项
@@ -217,6 +234,7 @@ UI 当前包含：
 - `stop.sh` 会停止指定本地服务，支持 `--all` 停止 app、sidecar、UI 和 Qdrant，并会优先使用 pid 文件再回退到端口 / 命令发现。
 - `smoke-text-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 文本搜索 smoke；加 `--json` 时输出机器可读摘要。
 - `smoke-image-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 图片搜索 smoke；加 `--json` 时输出机器可读摘要。
+- `smoke-video-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 视频搜索 smoke；它会基于 local-only manifest 自动派生截图与 clip，并验证查询视频上传、可选时间范围、`source_id` 复用和三类对象混排结果。
 - `check.sh` 是无 GPU 快速检查入口，不启动长驻服务。
 - `pnpm --dir ui test:e2e` 是当前阶段最小 Playwright UI smoke，固定使用 `--dev` 配置；若 `--dev` 服务未运行则会自行启动并在结束后自清理。
 - `download-model.sh` 会读取本次运行选中的 env 文件中的 `TEXT_SEARCH_MODEL_ID` / `TEXT_SEARCH_MODEL_REVISION`，并继承 `HF_ENDPOINT` / `HF_HUB_ENABLE_HF_TRANSFER` 来控制 Hugging Face 下载行为。
@@ -231,6 +249,6 @@ UI 当前包含：
 - `stop`：停止本地服务，入口是 `stop.sh`
 - `test`：无 GPU 快速检查，入口是 `check.sh`
 - `ui-smoke`：最小浏览器闭环验证，入口是 `pnpm --dir ui test:e2e`
-- `smoke`：真实链路验证，入口是 `smoke-text-search.sh` / `smoke-image-search.sh`
+- `smoke`：真实链路验证，入口是 `smoke-text-search.sh` / `smoke-image-search.sh` / `smoke-video-search.sh`
 
 更多排障信息见 [排障](./troubleshooting.md)。

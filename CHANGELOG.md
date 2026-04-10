@@ -3,9 +3,13 @@
 ## 2026-04-09
 ### Added
 - Added the `110-image-search` topic docs (`spec.md`, `plan.md`, `testing.md`) and the first runnable image-search slice across the Rust app, Python sidecar, shared workspace UI, and `scripts/local/smoke-image-search.sh`.
+- Added the initial `120-video-search` topic docs plus a local video-artifact extraction helper for local-only smoke fixtures.
+- Added the first runnable `120-video-search` slice across the Rust app, Python sidecar, shared workspace UI, and `scripts/local/smoke-video-search.sh`, covering video query uploads, `/search/video`, library-object reuse, optional time-range selection, and Playwright/runtime smoke coverage.
 
 ### Changed
 - Moved shared non-text query-mode workspace rules into `008/search-workspace.md`, keeping `110-image-search` focused on image-specific planning.
+- Extended the base `002/003/004/009` fact sources for `120-video-search`, including `video_segment` locators, `/search/video`, and video query-asset / sidecar protocol shapes.
+- Hardened the `120-video-search` runtime and validation path with larger upload support, explicit negative-path coverage, and reusable `video_segment` follow-up queries in smoke and workspace flows.
 - Tightened image-query v1 contracts and validation around `not_ready`, invalid uploads, temporary query assets, and cleanup of expired query-image files.
 - Expanded image-query inputs from temporary uploads to reusable library objects, covering both `image` and `document_page` with locator-aware embeddings and smoke coverage.
 - Added clipboard paste support for shared `Image` mode on top of the existing temporary query-image upload flow.

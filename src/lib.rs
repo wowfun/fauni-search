@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -13,6 +13,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::Path as FsPath,
+    process::Command,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -24,6 +25,9 @@ const QDRANT_UPSERT_BODY_OVERHEAD_BYTES: usize = br#"{"points":[]}"#.len();
 const SIDECAR_REQUEST_TIMEOUT_SECS: u64 = 600;
 const TEMP_QUERY_ASSET_TTL_MS: u128 = 60 * 60 * 1000;
 const TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS: u64 = 60;
+const VIDEO_SEGMENT_WINDOW_MS: u64 = 8_000;
+const VIDEO_SEGMENT_OVERLAP_MS: u64 = 2_000;
+const APP_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
@@ -39,12 +43,28 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/libraries/:library_id", get(get_library))
         .route("/libraries/:library_id/imports", post(import_paths))
         .route(
+            "/libraries/:library_id/video-sources",
+            get(list_video_sources),
+        )
+        .route(
             "/libraries/:library_id/query-assets/images",
             post(upload_query_image),
         )
         .route(
+            "/libraries/:library_id/query-assets/videos",
+            post(upload_query_video),
+        )
+        .route(
             "/libraries/:library_id/query-assets/images/:temp_asset_id/preview",
             get(get_query_image_preview),
+        )
+        .route(
+            "/libraries/:library_id/query-assets/videos/:temp_asset_id/preview",
+            get(get_query_video_preview),
+        )
+        .route(
+            "/libraries/:library_id/video-sources/:source_id/preview",
+            get(get_video_source_preview),
         )
         .route(
             "/libraries/:library_id/visual-units/:visual_unit_id",
@@ -58,6 +78,8 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/jobs/:job_id", get(get_job))
         .route("/search/text", post(search_text))
         .route("/search/image", post(search_image))
+        .route("/search/video", post(search_video))
+        .layer(DefaultBodyLimit::max(APP_BODY_LIMIT_BYTES))
         .with_state(state)
 }
 
@@ -79,7 +101,7 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
                 tracing::info!(
                     expired_removed = summary.expired_removed,
                     missing_removed = summary.missing_removed,
-                    "Pruned expired query image assets."
+                    "Pruned expired query assets."
                 );
             }
         }
@@ -91,6 +113,7 @@ pub struct AppState {
     next_library_seq: u64,
     next_job_seq: u64,
     next_visual_unit_seq: u64,
+    next_source_seq: u64,
     next_temp_asset_seq: u64,
     libraries: BTreeMap<String, LibraryRecord>,
     library_order: Vec<String>,
@@ -106,6 +129,7 @@ impl Default for AppState {
             next_library_seq: 0,
             next_job_seq: 0,
             next_visual_unit_seq: 0,
+            next_source_seq: 0,
             next_temp_asset_seq: 0,
             libraries: BTreeMap::new(),
             library_order: Vec::new(),
@@ -135,6 +159,31 @@ impl AppState {
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
 
         Ok(self.library_snapshot(library))
+    }
+
+    fn list_video_sources(&self, library_id: &str) -> Result<VideoSourcesData, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        let sources = library
+            .source_order
+            .iter()
+            .filter_map(|source_id| library.sources.get(source_id))
+            .filter(|source| source.source_type == "video")
+            .map(|source| {
+                Ok(VideoSourceSummary {
+                    source_id: source.id.clone(),
+                    source_path: source.source_path.clone(),
+                    source_type: source.source_type.clone(),
+                    duration_ms: source.duration_ms,
+                    preview: video_source_preview_reference(library_id, &source.id)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ApiError>>()?;
+
+        Ok(VideoSourcesData { sources })
     }
 
     fn create_library(
@@ -174,6 +223,8 @@ impl AppState {
             config: LibraryConfigPayload {
                 enabled_index_lines,
             },
+            sources: BTreeMap::new(),
+            source_order: Vec::new(),
             visual_units: BTreeMap::new(),
             visual_unit_order: Vec::new(),
             latest_job_id: None,
@@ -199,14 +250,17 @@ impl AppState {
 
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
+        let mut new_sources = Vec::new();
         let mut new_visual_units = Vec::new();
 
         for original in request.paths {
             match self.inspect_import_path(&original) {
                 Ok(classification) => {
+                    let source = self.source_record_from_classification(&classification);
                     let visual_units = self.new_visual_units_from_classification(&classification);
                     let visual_unit_summaries =
                         visual_units.iter().map(VisualUnitRecord::summary).collect();
+                    new_sources.push(source);
                     new_visual_units.extend(visual_units);
 
                     accepted.push(ImportAcceptedItem {
@@ -217,6 +271,7 @@ impl AppState {
                             "Accepted as {} input for the pending multivector index.",
                             classification.source_type
                         ),
+                        source_id: Some(classification.source_id),
                         source_type: classification.source_type,
                         kind: classification.kind,
                         visual_units: visual_unit_summaries,
@@ -236,6 +291,7 @@ impl AppState {
             collection_name,
             accepted,
             rejected,
+            sources: new_sources,
             visual_units: new_visual_units,
         })
     }
@@ -322,6 +378,11 @@ impl AppState {
             .libraries
             .get_mut(&prepared.library_id)
             .ok_or_else(|| "Library was not found.".to_string())?;
+
+        for source in &prepared.sources {
+            library.source_order.push(source.id.clone());
+            library.sources.insert(source.id.clone(), source.clone());
+        }
 
         for visual_unit in &prepared.visual_units {
             library.visual_unit_order.push(visual_unit.id.clone());
@@ -483,6 +544,124 @@ impl AppState {
         }
     }
 
+    fn prepare_video_search(
+        &self,
+        request: &VideoSearchRequest,
+    ) -> Result<(SearchPlan, ResolvedVideoQueryInput), ApiError> {
+        let plan = self.prepare_search_scope(
+            request.library_id.trim(),
+            request.filters.as_ref(),
+            request.top_k,
+            request.debug,
+            request.target_index_lines.as_ref(),
+        )?;
+
+        match request.video_input.kind.as_str() {
+            "temp_asset" => {
+                let temp_asset_id = request
+                    .video_input
+                    .temp_asset_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ApiError::validation_failed(
+                            "video_input.kind=temp_asset requires temp_asset_id.",
+                            Some(json!({ "field": "video_input.temp_asset_id" })),
+                        )
+                    })?;
+                let asset = self.get_temp_query_video_asset(&plan.library_id, temp_asset_id)?;
+                let locator = resolve_video_query_locator(
+                    request.video_input.locator.as_ref(),
+                    asset.duration_ms,
+                    "video_input.locator",
+                )?;
+                Ok((
+                    plan,
+                    ResolvedVideoQueryInput {
+                        path: asset.path,
+                        locator,
+                    },
+                ))
+            }
+            "library_object" => {
+                if let Some(visual_unit_id) = request.video_input.visual_unit_id.as_deref() {
+                    if request.video_input.locator.is_some() {
+                        return Err(ApiError::validation_failed(
+                            "video_input.visual_unit_id reuses the segment's own locator and must not carry video_input.locator.",
+                            Some(json!({
+                                "field": "video_input.locator",
+                                "input_kind": "library_object",
+                                "library_object_kind": "video_segment",
+                            })),
+                        ));
+                    }
+
+                    let visual_unit =
+                        self.get_library_visual_unit(&plan.library_id, visual_unit_id)?;
+                    if visual_unit.kind != "video_segment" || visual_unit.source_type != "video" {
+                        return Err(ApiError::not_supported(
+                            "Current 120-video-search implementation only supports library video_segment objects as direct query video segments.",
+                            Some(json!({
+                                "field": "video_input.visual_unit_id",
+                                "received_kind": visual_unit.kind,
+                                "received_source_type": visual_unit.source_type,
+                                "supported_kind": "video_segment",
+                                "supported_source_type": "video",
+                            })),
+                        ));
+                    }
+
+                    return Ok((
+                        plan,
+                        ResolvedVideoQueryInput {
+                            path: visual_unit.source_path,
+                            locator: Some(visual_unit.locator),
+                        },
+                    ));
+                }
+
+                let source_id = request.video_input.source_id.as_deref().ok_or_else(|| {
+                    ApiError::validation_failed(
+                        "video_input.kind=library_object requires source_id or visual_unit_id.",
+                        Some(
+                            json!({ "field": "video_input", "supported_fields": ["source_id", "visual_unit_id"] }),
+                        ),
+                    )
+                })?;
+                let source = self.get_library_source(&plan.library_id, source_id)?;
+                if source.source_type != "video" {
+                    return Err(ApiError::not_supported(
+                        "Current 120-video-search implementation only supports library video sources as query videos.",
+                        Some(json!({
+                            "field": "video_input.source_id",
+                            "received_source_type": source.source_type,
+                            "supported_source_type": "video",
+                        })),
+                    ));
+                }
+                let locator = resolve_video_query_locator(
+                    request.video_input.locator.as_ref(),
+                    source.duration_ms,
+                    "video_input.locator",
+                )?;
+                Ok((
+                    plan,
+                    ResolvedVideoQueryInput {
+                        path: source.source_path,
+                        locator,
+                    },
+                ))
+            }
+            _ => Err(ApiError::validation_failed(
+                "video_input.kind must be one of the supported query video input kinds.",
+                Some(json!({
+                    "field": "video_input.kind",
+                    "received": request.video_input.kind,
+                    "supported": ["temp_asset", "library_object"],
+                })),
+            )),
+        }
+    }
+
     fn prepare_search_scope(
         &self,
         library_id: &str,
@@ -562,6 +741,37 @@ impl AppState {
         library_id: &str,
         staged: StagedQueryAsset,
     ) -> Result<QueryImageAssetData, ApiError> {
+        let record = self.register_temp_query_asset_record(library_id, staged)?;
+        Ok(QueryImageAssetData {
+            temp_asset_id: record.id.clone(),
+            preview: query_image_preview_reference(library_id, &record.id)?,
+            source_type: record.source_type.clone(),
+            content_type: record.content_type.clone(),
+            original_filename: record.original_filename.clone(),
+        })
+    }
+
+    fn register_temp_query_video_asset(
+        &mut self,
+        library_id: &str,
+        staged: StagedQueryAsset,
+    ) -> Result<QueryVideoAssetData, ApiError> {
+        let record = self.register_temp_query_asset_record(library_id, staged)?;
+        Ok(QueryVideoAssetData {
+            temp_asset_id: record.id.clone(),
+            preview: query_video_preview_reference(library_id, &record.id)?,
+            source_type: record.source_type.clone(),
+            content_type: record.content_type.clone(),
+            original_filename: record.original_filename.clone(),
+            duration_ms: record.duration_ms,
+        })
+    }
+
+    fn register_temp_query_asset_record(
+        &mut self,
+        library_id: &str,
+        staged: StagedQueryAsset,
+    ) -> Result<TempQueryAssetRecord, ApiError> {
         if !self.libraries.contains_key(library_id) {
             return Err(ApiError::not_found("Library was not found."));
         }
@@ -574,20 +784,14 @@ impl AppState {
             library_id: library_id.to_string(),
             path: staged.path,
             content_type: staged.content_type,
-            source_type: "image".to_string(),
+            source_type: staged.source_type,
             original_filename: staged.original_filename,
+            duration_ms: staged.duration_ms,
             expires_at_ms: current_unix_ms() + TEMP_QUERY_ASSET_TTL_MS,
         };
 
-        let data = QueryImageAssetData {
-            temp_asset_id: record.id.clone(),
-            preview: query_image_preview_reference(library_id, &record.id)?,
-            source_type: record.source_type.clone(),
-            content_type: record.content_type.clone(),
-            original_filename: record.original_filename.clone(),
-        };
         self.temp_query_assets.insert(record.id.clone(), record);
-        Ok(data)
+        Ok(self.temp_query_assets[&temp_asset_id].clone())
     }
 
     fn prune_temp_query_assets(&mut self) -> TempQueryAssetPruneSummary {
@@ -651,6 +855,44 @@ impl AppState {
         Ok(asset.clone())
     }
 
+    fn get_temp_query_video_asset(
+        &self,
+        library_id: &str,
+        temp_asset_id: &str,
+    ) -> Result<TempQueryAssetRecord, ApiError> {
+        let asset = self
+            .temp_query_assets
+            .get(temp_asset_id)
+            .ok_or_else(|| ApiError::not_found("Query video was not found or has expired."))?;
+
+        if asset.library_id != library_id {
+            return Err(ApiError::not_found(
+                "Query video was not found for the selected library.",
+            ));
+        }
+        if asset.source_type != "video" {
+            return Err(ApiError::not_supported(
+                "Current 120-video-search implementation only accepts video temp assets as query videos.",
+                Some(json!({
+                    "field": "video_input.temp_asset_id",
+                    "received_source_type": asset.source_type,
+                    "supported_source_type": "video",
+                })),
+            ));
+        }
+        if asset.expires_at_ms <= current_unix_ms() {
+            return Err(ApiError::not_found(
+                "Query video was not found or has expired.",
+            ));
+        }
+        if !FsPath::new(&asset.path).exists() {
+            return Err(ApiError::not_found(
+                "Query video file is no longer available.",
+            ));
+        }
+        Ok(asset.clone())
+    }
+
     fn get_library_visual_unit(
         &self,
         library_id: &str,
@@ -668,8 +910,25 @@ impl AppState {
             .ok_or_else(|| ApiError::not_found("Visual unit was not found."))
     }
 
-    fn inspect_import_path(
+    fn get_library_source(
         &self,
+        library_id: &str,
+        source_id: &str,
+    ) -> Result<SourceRecord, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        library
+            .sources
+            .get(source_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("Source object was not found."))
+    }
+
+    fn inspect_import_path(
+        &mut self,
         original_path: &str,
     ) -> Result<PathClassification, ImportRejection> {
         let trimmed = original_path.trim();
@@ -721,24 +980,43 @@ impl AppState {
                     message,
                 })?;
                 Ok(PathClassification {
+                    source_id: self.next_source_id(),
                     normalized_path,
                     source_type: "pdf".to_string(),
                     kind: "document_page".to_string(),
                     page_count: Some(page_count),
+                    duration_ms: None,
                 })
             }
             Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("bmp") | Some("gif") => {
                 Ok(PathClassification {
+                    source_id: self.next_source_id(),
                     normalized_path,
                     source_type: "image".to_string(),
                     kind: "image".to_string(),
                     page_count: None,
+                    duration_ms: None,
+                })
+            }
+            Some("mp4") | Some("mov") | Some("m4v") => {
+                let duration_ms = video_duration_ms(path).map_err(|message| ImportRejection {
+                    normalized_path: Some(normalized_path.clone()),
+                    reason_code: "invalid_video".to_string(),
+                    message,
+                })?;
+                Ok(PathClassification {
+                    source_id: self.next_source_id(),
+                    normalized_path,
+                    source_type: "video".to_string(),
+                    kind: "video_segment".to_string(),
+                    page_count: None,
+                    duration_ms: Some(duration_ms),
                 })
             }
             _ => Err(ImportRejection {
                 normalized_path: Some(normalized_path),
                 reason_code: "unsupported_type".to_string(),
-                message: "Only PDF and common image files are accepted right now.".to_string(),
+                message: "Only PDF, common image files, and mp4/mov video files are accepted right now.".to_string(),
             }),
         }
     }
@@ -798,9 +1076,23 @@ impl AppState {
         format!("vu_{:06}", self.next_visual_unit_seq)
     }
 
+    fn next_source_id(&mut self) -> String {
+        self.next_source_seq += 1;
+        format!("src_{:06}", self.next_source_seq)
+    }
+
     fn next_temp_asset_id(&mut self) -> String {
         self.next_temp_asset_seq += 1;
         format!("temp_asset_{:06}", self.next_temp_asset_seq)
+    }
+
+    fn source_record_from_classification(&self, classification: &PathClassification) -> SourceRecord {
+        SourceRecord {
+            id: classification.source_id.clone(),
+            source_path: classification.normalized_path.clone(),
+            source_type: classification.source_type.clone(),
+            duration_ms: classification.duration_ms,
+        }
     }
 
     fn new_visual_units_from_classification(
@@ -824,6 +1116,44 @@ impl AppState {
                             "total_pages": page_count,
                             "source_path": classification.normalized_path,
                             "source_type": classification.source_type,
+                        }),
+                    )
+                })
+                .collect();
+        }
+
+        if classification.kind == "video_segment" {
+            let duration_ms = classification.duration_ms.unwrap_or(1);
+            let segments = build_video_segment_ranges(duration_ms);
+            return segments
+                .iter()
+                .enumerate()
+                .map(|(segment_index, (start_ms, end_ms))| {
+                    let previous = segment_index
+                        .checked_sub(1)
+                        .and_then(|index| segments.get(index))
+                        .map(|(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }));
+                    let next = segments
+                        .get(segment_index + 1)
+                        .map(|(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }));
+                    self.new_visual_unit_record(
+                        classification,
+                        json!({
+                            "start_ms": start_ms,
+                            "end_ms": end_ms,
+                            "duration_ms": duration_ms,
+                        }),
+                        json!({
+                            "previous_segment": previous,
+                            "current_segment": {
+                                "start_ms": start_ms,
+                                "end_ms": end_ms,
+                            },
+                            "next_segment": next,
+                            "total_segments": segments.len(),
+                            "source_path": classification.normalized_path,
+                            "source_type": classification.source_type,
+                            "duration_ms": duration_ms,
                         }),
                     )
                 })
@@ -854,6 +1184,7 @@ impl AppState {
         VisualUnitRecord {
             id: visual_unit_id,
             point_id,
+            source_id: classification.source_id.clone(),
             source_path: classification.normalized_path.clone(),
             source_type: classification.source_type.clone(),
             kind: classification.kind.clone(),
@@ -869,6 +1200,8 @@ struct LibraryRecord {
     name: String,
     collection_name: String,
     config: LibraryConfigPayload,
+    sources: BTreeMap<String, SourceRecord>,
+    source_order: Vec<String>,
     visual_units: BTreeMap<String, VisualUnitRecord>,
     visual_unit_order: Vec<String>,
     latest_job_id: Option<String>,
@@ -876,9 +1209,18 @@ struct LibraryRecord {
 }
 
 #[derive(Clone, Debug)]
+struct SourceRecord {
+    id: String,
+    source_path: String,
+    source_type: String,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
 struct VisualUnitRecord {
     id: String,
     point_id: u64,
+    source_id: String,
     source_path: String,
     source_type: String,
     kind: String,
@@ -890,6 +1232,7 @@ impl VisualUnitRecord {
     fn summary(&self) -> VisualUnitSummary {
         VisualUnitSummary {
             visual_unit_id: self.id.clone(),
+            source_id: self.source_id.clone(),
             kind: self.kind.clone(),
             source_type: self.source_type.clone(),
             locator: self.locator.clone(),
@@ -899,6 +1242,7 @@ impl VisualUnitRecord {
     fn snapshot(&self) -> VisualUnitSnapshot {
         VisualUnitSnapshot {
             visual_unit_id: self.id.clone(),
+            source_id: self.source_id.clone(),
             kind: self.kind.clone(),
             source_type: self.source_type.clone(),
             source_path: self.source_path.clone(),
@@ -920,6 +1264,7 @@ struct TempQueryAssetRecord {
     source_type: String,
     content_type: String,
     original_filename: Option<String>,
+    duration_ms: Option<u64>,
     expires_at_ms: u128,
 }
 
@@ -941,11 +1286,19 @@ enum ResolvedImageQueryInput {
     LibraryVisualUnit(VisualUnitRecord),
 }
 
+#[derive(Clone, Debug)]
+struct ResolvedVideoQueryInput {
+    path: String,
+    locator: Option<Value>,
+}
+
 struct PathClassification {
+    source_id: String,
     normalized_path: String,
     source_type: String,
     kind: String,
     page_count: Option<usize>,
+    duration_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1021,6 +1374,8 @@ pub struct ImportAcceptedItem {
     pub normalized_path: Option<String>,
     pub reason_code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     pub source_type: String,
     pub kind: String,
     pub visual_units: Vec<VisualUnitSummary>,
@@ -1069,6 +1424,7 @@ pub struct JobsListData {
 #[derive(Debug, Serialize, Clone)]
 pub struct VisualUnitSummary {
     pub visual_unit_id: String,
+    pub source_id: String,
     pub kind: String,
     pub source_type: String,
     pub locator: Value,
@@ -1077,6 +1433,7 @@ pub struct VisualUnitSummary {
 #[derive(Debug, Serialize, Clone)]
 pub struct VisualUnitSnapshot {
     pub visual_unit_id: String,
+    pub source_id: String,
     pub kind: String,
     pub source_type: String,
     pub source_path: String,
@@ -1118,10 +1475,30 @@ pub struct ImageSearchRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct VideoSearchRequest {
+    pub library_id: String,
+    pub video_input: QueryVideoInputRequest,
+    pub filters: Option<Value>,
+    pub top_k: Option<usize>,
+    pub cursor: Option<String>,
+    pub debug: Option<bool>,
+    pub target_index_lines: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct QueryImageInputRequest {
     pub kind: String,
     pub temp_asset_id: Option<String>,
     pub visual_unit_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryVideoInputRequest {
+    pub kind: String,
+    pub temp_asset_id: Option<String>,
+    pub source_id: Option<String>,
+    pub visual_unit_id: Option<String>,
+    pub locator: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1136,6 +1513,7 @@ pub struct TextSearchData {
 #[derive(Debug, Serialize)]
 pub struct SearchResultItem {
     pub visual_unit_id: String,
+    pub source_id: String,
     pub preview: PreviewReference,
     pub source_path: String,
     pub source_type: String,
@@ -1163,11 +1541,39 @@ pub struct QueryImageAssetData {
     pub original_filename: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct QueryVideoAssetData {
+    pub temp_asset_id: String,
+    pub preview: PreviewReference,
+    pub source_type: String,
+    pub content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VideoSourcesData {
+    pub sources: Vec<VideoSourceSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VideoSourceSummary {
+    pub source_id: String,
+    pub source_path: String,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub preview: PreviewReference,
+}
+
 struct PreparedImport {
     library_id: String,
     collection_name: String,
     accepted: Vec<ImportAcceptedItem>,
     rejected: Vec<ImportRejectedItem>,
+    sources: Vec<SourceRecord>,
     visual_units: Vec<VisualUnitRecord>,
 }
 
@@ -1213,11 +1619,20 @@ struct SearchPlan {
 
 struct StagedQueryAsset {
     path: String,
+    source_type: String,
     content_type: String,
     original_filename: Option<String>,
+    duration_ms: Option<u64>,
 }
 
 struct IncomingQueryImageUpload {
+    bytes: Vec<u8>,
+    content_type: String,
+    original_filename: Option<String>,
+    extension: String,
+}
+
+struct IncomingQueryVideoUpload {
     bytes: Vec<u8>,
     content_type: String,
     original_filename: Option<String>,
@@ -1288,6 +1703,7 @@ struct QdrantScoredPoint {
 #[derive(Clone, Deserialize)]
 struct QdrantPointPayload {
     visual_unit_id: String,
+    source_id: String,
     source_path: String,
     source_type: String,
     kind: String,
@@ -1427,19 +1843,24 @@ async fn root() -> Json<RootPayload> {
     Json(RootPayload {
         name: "fauni-search",
         status: "workspace",
-        stage: "100-text-search skeleton",
+        stage: "search workspace",
         routes: vec![
             "GET /health",
             "GET /libraries",
             "POST /libraries",
             "POST /libraries/{library_id}/imports",
+            "GET /libraries/{library_id}/video-sources",
             "POST /libraries/{library_id}/query-assets/images",
+            "POST /libraries/{library_id}/query-assets/videos",
+            "GET /libraries/{library_id}/video-sources/{source_id}/preview",
             "GET /libraries/{library_id}/visual-units/{visual_unit_id}",
             "GET /libraries/{library_id}/query-assets/images/{temp_asset_id}/preview",
+            "GET /libraries/{library_id}/query-assets/videos/{temp_asset_id}/preview",
             "GET /jobs",
             "GET /jobs/{job_id}",
             "POST /search/text",
             "POST /search/image",
+            "POST /search/video",
         ],
     })
 }
@@ -1507,6 +1928,15 @@ async fn import_paths(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+async fn list_video_sources(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<VideoSourcesData>>, ApiError> {
+    let state = state.read().await;
+    let data = state.list_video_sources(&library_id)?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
 async fn upload_query_image(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -1517,6 +1947,21 @@ async fn upload_query_image(
     let data = {
         let mut state = state.write().await;
         state.register_temp_query_asset(&library_id, staged)?
+    };
+
+    Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
+}
+
+async fn upload_query_video(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<SuccessEnvelope<QueryVideoAssetData>>), ApiError> {
+    let file = read_single_query_video_part(&mut multipart).await?;
+    let staged = persist_query_video_asset(file)?;
+    let data = {
+        let mut state = state.write().await;
+        state.register_temp_query_video_asset(&library_id, staged)?
     };
 
     Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
@@ -1593,6 +2038,60 @@ async fn get_query_image_preview(
     Ok((headers, bytes))
 }
 
+async fn get_query_video_preview(
+    State(state): State<SharedState>,
+    Path((library_id, temp_asset_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let asset = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.get_temp_query_video_asset(&library_id, &temp_asset_id)?
+    };
+
+    let bytes = fs::read(&asset.path)
+        .map_err(|_| ApiError::not_found("Query video file is no longer available."))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&asset.content_type).map_err(|_| {
+            ApiError::runtime_unavailable(
+                "Query video preview content type is invalid.",
+                Some(json!({ "temp_asset_id": temp_asset_id })),
+            )
+        })?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+
+    Ok((headers, bytes))
+}
+
+async fn get_video_source_preview(
+    State(state): State<SharedState>,
+    Path((library_id, source_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let source = {
+        let state = state.read().await;
+        state.get_library_source(&library_id, &source_id)?
+    };
+
+    let bytes = fs::read(&source.source_path)
+        .map_err(|_| ApiError::not_found("Video source file is no longer available."))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type_for_source(&source)),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+
+    Ok((headers, bytes))
+}
+
 async fn list_jobs(
     State(state): State<SharedState>,
     Query(query): Query<JobsQuery>,
@@ -1645,6 +2144,23 @@ async fn search_image(
         ),
     };
     let query_embedding = embed_query_image(query_path, query_locator).await?;
+    let candidates = query_qdrant(&plan, &query_embedding).await?;
+    let response = build_search_response(plan, query_embedding, candidates)?;
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
+async fn search_video(
+    State(state): State<SharedState>,
+    Json(request): Json<VideoSearchRequest>,
+) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
+    let (plan, query_input) = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.prepare_video_search(&request)?
+    };
+
+    let query_embedding =
+        embed_query_video(query_input.path.as_str(), query_input.locator.clone()).await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))
@@ -1765,6 +2281,69 @@ async fn read_single_query_image_part(
     })
 }
 
+async fn read_single_query_video_part(
+    multipart: &mut Multipart,
+) -> Result<IncomingQueryVideoUpload, ApiError> {
+    let mut file_upload: Option<IncomingQueryVideoUpload> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        ApiError::validation_failed(
+            format!("Query video upload could not be parsed: {error}"),
+            Some(json!({ "field": "file" })),
+        )
+    })? {
+        let filename = field.file_name().map(|value| value.to_string());
+        let content_type = field
+            .content_type()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let extension = infer_query_video_extension(filename.as_deref(), &content_type)
+            .ok_or_else(|| {
+                ApiError::validation_failed(
+                    "Only mp4, mov, or m4v files are accepted as query videos right now.",
+                    Some(json!({
+                        "field": "file",
+                        "content_type": content_type,
+                        "filename": filename,
+                    })),
+                )
+            })?;
+        let bytes = field.bytes().await.map_err(|error| {
+            ApiError::validation_failed(
+                format!("Query video upload body could not be read: {error}"),
+                Some(json!({ "field": "file" })),
+            )
+        })?;
+
+        if bytes.is_empty() {
+            return Err(ApiError::validation_failed(
+                "Query video upload must not be empty.",
+                Some(json!({ "field": "file" })),
+            ));
+        }
+        if file_upload.is_some() {
+            return Err(ApiError::validation_failed(
+                "Current 120-video-search implementation accepts exactly one query video per upload.",
+                Some(json!({ "field": "file" })),
+            ));
+        }
+
+        file_upload = Some(IncomingQueryVideoUpload {
+            bytes: bytes.to_vec(),
+            content_type,
+            original_filename: filename,
+            extension,
+        });
+    }
+
+    file_upload.ok_or_else(|| {
+        ApiError::validation_failed(
+            "Query video upload requires one video file part.",
+            Some(json!({ "field": "file" })),
+        )
+    })
+}
+
 fn infer_query_image_extension(filename: Option<&str>, content_type: &str) -> Option<String> {
     let by_filename = filename
         .and_then(|name| FsPath::new(name).extension())
@@ -1785,8 +2364,29 @@ fn infer_query_image_extension(filename: Option<&str>, content_type: &str) -> Op
     }
 }
 
+fn infer_query_video_extension(filename: Option<&str>, content_type: &str) -> Option<String> {
+    let by_filename = filename
+        .and_then(|name| FsPath::new(name).extension())
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| is_supported_query_video_extension(value));
+    if by_filename.is_some() {
+        return by_filename;
+    }
+
+    match content_type {
+        "video/mp4" | "video/quicktime" => Some("mp4".to_string()),
+        "video/x-m4v" => Some("m4v".to_string()),
+        _ => None,
+    }
+}
+
 fn is_supported_query_image_extension(extension: &str) -> bool {
     matches!(extension, "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif")
+}
+
+fn is_supported_query_video_extension(extension: &str) -> bool {
+    matches!(extension, "mp4" | "mov" | "m4v")
 }
 
 fn persist_query_image_asset(
@@ -1812,8 +2412,48 @@ fn persist_query_image_asset(
 
     Ok(StagedQueryAsset {
         path: path.to_string_lossy().to_string(),
+        source_type: "image".to_string(),
         content_type: upload.content_type,
         original_filename: upload.original_filename,
+        duration_ms: None,
+    })
+}
+
+fn persist_query_video_asset(
+    upload: IncomingQueryVideoUpload,
+) -> Result<StagedQueryAsset, ApiError> {
+    let runtime_dir = read_required_env("APP_RUNTIME_DIR")?;
+    let target_dir = FsPath::new(&runtime_dir).join("temp-assets").join("videos");
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Query video asset directory could not be created: {error}"),
+            Some(json!({ "path": target_dir })),
+        )
+    })?;
+
+    let filename = format!("query-video-{}.{}", runtime_token(), upload.extension);
+    let path = target_dir.join(filename);
+    fs::write(&path, upload.bytes).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Query video asset could not be written: {error}"),
+            Some(json!({ "path": path })),
+        )
+    })?;
+
+    let duration_ms = video_duration_ms(&path).map_err(|message| {
+        remove_temp_query_asset_file(path.to_string_lossy().as_ref());
+        ApiError::validation_failed(
+            message,
+            Some(json!({ "field": "file" })),
+        )
+    })?;
+
+    Ok(StagedQueryAsset {
+        path: path.to_string_lossy().to_string(),
+        source_type: "video".to_string(),
+        content_type: upload.content_type,
+        original_filename: upload.original_filename,
+        duration_ms: Some(duration_ms),
     })
 }
 
@@ -1825,6 +2465,101 @@ fn pdf_page_count(path: &FsPath) -> Result<usize, String> {
         return Err("PDF has no pages.".to_string());
     }
     Ok(page_count)
+}
+
+fn video_duration_ms(path: &FsPath) -> Result<u64, String> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Video metadata could not be probed: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "unknown ffprobe error".to_string()
+        } else {
+            stderr
+        };
+        return Err(format!("Video metadata could not be probed: {detail}"));
+    }
+
+    let duration_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let duration_secs = duration_text
+        .parse::<f64>()
+        .map_err(|_| format!("Video duration was invalid: {duration_text}"))?;
+    Ok((duration_secs * 1000.0).round().max(1.0) as u64)
+}
+
+fn build_video_segment_ranges(duration_ms: u64) -> Vec<(u64, u64)> {
+    let duration_ms = duration_ms.max(1);
+    let mut ranges = Vec::new();
+    let step_ms = VIDEO_SEGMENT_WINDOW_MS.saturating_sub(VIDEO_SEGMENT_OVERLAP_MS).max(1);
+    let mut start_ms = 0;
+
+    loop {
+        let end_ms = (start_ms + VIDEO_SEGMENT_WINDOW_MS).min(duration_ms);
+        ranges.push((start_ms, end_ms.max(start_ms + 1)));
+        if end_ms >= duration_ms {
+            break;
+        }
+        start_ms += step_ms;
+    }
+
+    ranges
+}
+
+fn resolve_video_query_locator(
+    locator: Option<&Value>,
+    duration_ms: Option<u64>,
+    field_name: &str,
+) -> Result<Option<Value>, ApiError> {
+    let duration_ms = duration_ms.ok_or_else(|| {
+        ApiError::runtime_unavailable(
+            "Video duration is unavailable for the selected query input.",
+            Some(json!({ "field": field_name })),
+        )
+    })?;
+
+    let Some(locator) = locator else {
+        return Ok(None);
+    };
+    let start_ms = locator.get("start_ms").and_then(Value::as_u64).ok_or_else(|| {
+        ApiError::validation_failed(
+            "Video locator must include integer start_ms.",
+            Some(json!({ "field": format!("{field_name}.start_ms") })),
+        )
+    })?;
+    let end_ms = locator.get("end_ms").and_then(Value::as_u64).ok_or_else(|| {
+        ApiError::validation_failed(
+            "Video locator must include integer end_ms.",
+            Some(json!({ "field": format!("{field_name}.end_ms") })),
+        )
+    })?;
+    if start_ms >= end_ms || end_ms > duration_ms {
+        return Err(ApiError::validation_failed(
+            "Video locator must satisfy 0 <= start_ms < end_ms <= duration_ms.",
+            Some(json!({
+                "field": field_name,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "duration_ms": duration_ms,
+            })),
+        ));
+    }
+
+    Ok(Some(json!({
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "duration_ms": duration_ms,
+    })))
 }
 
 async fn index_visual_units(
@@ -2134,6 +2869,74 @@ async fn embed_query_image(
     })
 }
 
+async fn embed_query_video(
+    path: &str,
+    locator: Option<Value>,
+) -> Result<QueryEmbeddingResult, ApiError> {
+    let payload = json!({
+        "operation_kind": "video_query_embedding",
+        "inputs": {
+            "videos": [{
+                "path": path,
+                "locator": locator,
+            }],
+        },
+    });
+    let response = sidecar_client()
+        .post(format!("{}/embed", sidecar_base_url()?))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Sidecar video query embedding request failed: {error}"),
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message = parse_sidecar_error_message(&body).unwrap_or_else(|| {
+            format!("Sidecar video query embedding request failed with {status}.")
+        });
+        return Err(ApiError::runtime_unavailable(
+            message,
+            Some(json!({ "service": "sidecar" })),
+        ));
+    }
+
+    let envelope: SidecarEnvelope<SidecarEmbedPayload> =
+        response.json().await.map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Sidecar video query embedding response was invalid JSON: {error}"),
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?;
+    let embedding = envelope.data.embeddings.into_iter().next().ok_or_else(|| {
+        ApiError::runtime_unavailable(
+            "Sidecar video query embedding response did not include any embeddings.",
+            Some(json!({ "service": "sidecar" })),
+        )
+    })?;
+
+    let pooled_vector = if embedding.pooled_vector.is_empty() {
+        mean_pool_vectors(&embedding.vectors).ok_or_else(|| {
+            ApiError::runtime_unavailable(
+                "Sidecar video query embedding response did not include usable vectors.",
+                Some(json!({ "service": "sidecar" })),
+            )
+        })?
+    } else {
+        embedding.pooled_vector
+    };
+
+    Ok(QueryEmbeddingResult {
+        vectors: embedding.vectors,
+        pooled_vector,
+    })
+}
+
 async fn ensure_qdrant_collection(collection_name: &str, vector_size: usize) -> Result<(), String> {
     let base_url = qdrant_base_url().map_err(|error| error.payload.message)?;
     let client = qdrant_client();
@@ -2245,6 +3048,7 @@ fn build_qdrant_point(
         },
         "payload": {
             "visual_unit_id": visual_unit.id,
+            "source_id": visual_unit.source_id,
             "source_path": visual_unit.source_path,
             "source_type": visual_unit.source_type,
             "kind": visual_unit.kind,
@@ -2389,6 +3193,7 @@ fn build_search_response(
             )?;
             Ok(SearchResultItem {
                 visual_unit_id: payload.visual_unit_id.clone(),
+                source_id: payload.source_id,
                 preview,
                 source_path: payload.source_path,
                 source_type: payload.source_type,
@@ -2447,12 +3252,54 @@ fn visual_unit_preview_reference(
     let url = if kind == "document_page" {
         let page = locator.get("page").and_then(Value::as_u64).unwrap_or(1);
         format!("{base}#page={page}&view=FitH")
+    } else if kind == "video_segment" {
+        let start_seconds = locator
+            .get("start_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as f64
+            / 1000.0;
+        let end_seconds = locator
+            .get("end_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as f64
+            / 1000.0;
+        format!("{base}#t={start_seconds:.3},{end_seconds:.3}")
     } else {
         base
     };
     Ok(PreviewReference {
         url,
         handle: Some(format!("preview:{visual_unit_id}")),
+    })
+}
+
+fn query_video_preview_reference(
+    library_id: &str,
+    temp_asset_id: &str,
+) -> Result<PreviewReference, ApiError> {
+    Ok(PreviewReference {
+        url: format!(
+            "{}/libraries/{}/query-assets/videos/{}/preview",
+            app_base_url()?.trim_end_matches('/'),
+            library_id,
+            temp_asset_id
+        ),
+        handle: Some(format!("query-video-preview:{temp_asset_id}")),
+    })
+}
+
+fn video_source_preview_reference(
+    library_id: &str,
+    source_id: &str,
+) -> Result<PreviewReference, ApiError> {
+    Ok(PreviewReference {
+        url: format!(
+            "{}/libraries/{}/video-sources/{}/preview",
+            app_base_url()?.trim_end_matches('/'),
+            library_id,
+            source_id
+        ),
+        handle: Some(format!("video-source-preview:{source_id}")),
     })
 }
 
@@ -2472,9 +3319,27 @@ fn query_image_preview_reference(
 }
 
 fn content_type_for_visual_unit(visual_unit: &VisualUnitRecord) -> &'static str {
-    match visual_unit.source_type.as_str() {
+    content_type_for_source_type_and_path(&visual_unit.source_type, &visual_unit.source_path)
+}
+
+fn content_type_for_source(source: &SourceRecord) -> &'static str {
+    content_type_for_source_type_and_path(&source.source_type, &source.source_path)
+}
+
+fn content_type_for_source_type_and_path(source_type: &str, source_path: &str) -> &'static str {
+    match source_type {
         "pdf" => "application/pdf",
-        _ => match FsPath::new(&visual_unit.source_path)
+        "video" => match FsPath::new(source_path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("mov") => "video/quicktime",
+            Some("m4v") => "video/x-m4v",
+            _ => "video/mp4",
+        },
+        _ => match FsPath::new(source_path)
             .extension()
             .and_then(|value| value.to_str())
             .map(|value| value.to_ascii_lowercase())
@@ -2834,6 +3699,7 @@ mod tests {
                     score: 0.9,
                     payload: Some(QdrantPointPayload {
                         visual_unit_id: image_visual_unit_id,
+                        source_id: "src_000002".to_string(),
                         source_path: image_path.to_string_lossy().to_string(),
                         source_type: "image".to_string(),
                         kind: "image".to_string(),
@@ -2844,6 +3710,7 @@ mod tests {
                     score: 0.8,
                     payload: Some(QdrantPointPayload {
                         visual_unit_id: document_visual_unit_id,
+                        source_id: "src_000001".to_string(),
                         source_path: pdf_path.to_string_lossy().to_string(),
                         source_type: "pdf".to_string(),
                         kind: "document_page".to_string(),
@@ -2896,8 +3763,10 @@ mod tests {
 
         let staged = StagedQueryAsset {
             path: image_path.to_string_lossy().to_string(),
+            source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("query.png".to_string()),
+            duration_ms: None,
         };
         let asset = state
             .register_temp_query_asset(&library.id, staged)
@@ -3112,6 +3981,7 @@ mod tests {
                 VisualUnitRecord {
                     id: visual_unit_id.clone(),
                     point_id: 1,
+                    source_id: "src_video_000001".to_string(),
                     source_path: "/tmp/example.mp4".to_string(),
                     source_type: "video".to_string(),
                     kind: "video_segment".to_string(),
@@ -3159,8 +4029,10 @@ mod tests {
         fs::write(&image_path, b"png").unwrap();
         let staged = StagedQueryAsset {
             path: image_path.to_string_lossy().to_string(),
+            source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("expired-query.png".to_string()),
+            duration_ms: None,
         };
         let asset = state
             .register_temp_query_asset(&library.id, staged)
@@ -3201,8 +4073,10 @@ mod tests {
         fs::write(&image_path, b"png").unwrap();
         let staged = StagedQueryAsset {
             path: image_path.to_string_lossy().to_string(),
+            source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("expired-prune-query.png".to_string()),
+            duration_ms: None,
         };
         let asset = state
             .register_temp_query_asset(&library.id, staged)
@@ -3238,8 +4112,10 @@ mod tests {
         fs::write(&image_path, b"png").unwrap();
         let staged = StagedQueryAsset {
             path: image_path.to_string_lossy().to_string(),
+            source_type: "image".to_string(),
             content_type: "image/png".to_string(),
             original_filename: Some("missing-prune-query.png".to_string()),
+            duration_ms: None,
         };
         let asset = state
             .register_temp_query_asset(&library.id, staged)
@@ -3251,6 +4127,425 @@ mod tests {
         assert_eq!(summary.expired_removed, 0);
         assert_eq!(summary.missing_removed, 1);
         assert!(!state.temp_query_assets.contains_key(&asset.temp_asset_id));
+    }
+
+    #[test]
+    fn import_paths_accepts_video_and_generates_video_segments() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "video-import".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let video_path = unique_test_file_path("fixture.mp4");
+        write_test_video(&video_path, 2.5);
+
+        let prepared = state
+            .prepare_import(
+                &library.id,
+                ImportPathsRequest {
+                    paths: vec![video_path.to_string_lossy().to_string()],
+                },
+            )
+            .unwrap();
+
+        assert_eq!(prepared.sources.len(), 1);
+        assert_eq!(prepared.sources[0].source_type, "video");
+        assert_eq!(prepared.accepted.len(), 1);
+        assert_eq!(prepared.accepted[0].source_type, "video");
+        assert_eq!(prepared.accepted[0].kind, "video_segment");
+        assert_eq!(prepared.accepted[0].visual_units.len(), 1);
+        assert_eq!(prepared.accepted[0].visual_units[0].source_id, "src_000001");
+        assert_eq!(prepared.accepted[0].visual_units[0].locator["start_ms"], 0);
+        assert_eq!(prepared.accepted[0].visual_units[0].locator["duration_ms"], 2500);
+        assert_eq!(prepared.accepted[0].source_id.as_deref(), Some("src_000001"));
+
+        let _ = fs::remove_file(video_path);
+    }
+
+    #[test]
+    fn prepare_video_search_accepts_temp_assets_and_library_sources() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "video-search".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let video_path = unique_test_file_path("query.mp4");
+        write_test_video(&video_path, 3.0);
+        let staged = StagedQueryAsset {
+            path: video_path.to_string_lossy().to_string(),
+            source_type: "video".to_string(),
+            content_type: "video/mp4".to_string(),
+            original_filename: Some("query.mp4".to_string()),
+            duration_ms: Some(3000),
+        };
+        let asset = state
+            .register_temp_query_video_asset(&library.id, staged)
+            .unwrap();
+
+        let (plan, temp_input) = state
+            .prepare_video_search(&VideoSearchRequest {
+                library_id: library.id.clone(),
+                video_input: QueryVideoInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some(asset.temp_asset_id.clone()),
+                    source_id: None,
+                    visual_unit_id: None,
+                    locator: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+        assert_eq!(plan.library_id, library.id);
+        assert_eq!(temp_input.path, video_path.to_string_lossy());
+        assert!(temp_input.locator.is_none());
+
+        let classification = state
+            .inspect_import_path(&video_path.to_string_lossy())
+            .unwrap();
+        let source = state.source_record_from_classification(&classification);
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .sources
+            .insert(source.id.clone(), source.clone());
+
+        let (_, library_input) = state
+            .prepare_video_search(&VideoSearchRequest {
+                library_id: library.id.clone(),
+                video_input: QueryVideoInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    source_id: Some(source.id),
+                    visual_unit_id: None,
+                    locator: Some(json!({ "start_ms": 500, "end_ms": 1500 })),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+
+        assert_eq!(library_input.path, video_path.to_string_lossy());
+        assert_eq!(
+            library_input.locator.unwrap(),
+            json!({ "start_ms": 500, "end_ms": 1500, "duration_ms": 3000 })
+        );
+
+        let _ = fs::remove_file(video_path);
+    }
+
+    #[test]
+    fn prepare_video_search_rejects_invalid_ranges() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "video-range-errors".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let video_path = unique_test_file_path("invalid-range.mp4");
+        write_test_video(&video_path, 2.0);
+        let staged = StagedQueryAsset {
+            path: video_path.to_string_lossy().to_string(),
+            source_type: "video".to_string(),
+            content_type: "video/mp4".to_string(),
+            original_filename: Some("invalid-range.mp4".to_string()),
+            duration_ms: Some(2000),
+        };
+        let asset = state
+            .register_temp_query_video_asset(&library.id, staged)
+            .unwrap();
+
+        let error = state
+            .prepare_video_search(&VideoSearchRequest {
+                library_id: library.id.clone(),
+                video_input: QueryVideoInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some(asset.temp_asset_id),
+                    source_id: None,
+                    visual_unit_id: None,
+                    locator: Some(json!({ "start_ms": 1500, "end_ms": 2500 })),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "validation_failed");
+
+        let _ = fs::remove_file(video_path);
+    }
+
+    #[test]
+    fn prepare_video_search_rejects_expired_temp_assets() {
+        set_test_app_env();
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "expired-query-video".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let video_path = unique_test_file_path("expired-query.mp4");
+        write_test_video(&video_path, 2.0);
+        let staged = StagedQueryAsset {
+            path: video_path.to_string_lossy().to_string(),
+            source_type: "video".to_string(),
+            content_type: "video/mp4".to_string(),
+            original_filename: Some("expired-query.mp4".to_string()),
+            duration_ms: Some(2000),
+        };
+        let asset = state
+            .register_temp_query_video_asset(&library.id, staged)
+            .unwrap();
+        state
+            .temp_query_assets
+            .get_mut(&asset.temp_asset_id)
+            .unwrap()
+            .expires_at_ms = 0;
+
+        let error = state
+            .prepare_video_search(&VideoSearchRequest {
+                library_id: library.id.clone(),
+                video_input: QueryVideoInputRequest {
+                    kind: "temp_asset".to_string(),
+                    temp_asset_id: Some(asset.temp_asset_id),
+                    source_id: None,
+                    visual_unit_id: None,
+                    locator: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "not_found");
+
+        let _ = fs::remove_file(video_path);
+    }
+
+    #[test]
+    fn prepare_video_search_rejects_non_video_library_sources() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "unsupported-video-query-source".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .sources
+            .insert(
+                "src_image_000001".to_string(),
+                SourceRecord {
+                    id: "src_image_000001".to_string(),
+                    source_path: "/tmp/example.png".to_string(),
+                    source_type: "image".to_string(),
+                    duration_ms: None,
+                },
+            );
+
+        let error = state
+            .prepare_video_search(&VideoSearchRequest {
+                library_id: library.id.clone(),
+                video_input: QueryVideoInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    source_id: Some("src_image_000001".to_string()),
+                    visual_unit_id: None,
+                    locator: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "not_supported");
+        let details = error.payload.details.unwrap();
+        assert_eq!(details["supported_source_type"], "video");
+        assert_eq!(details["received_source_type"], "image");
+    }
+
+    #[test]
+    fn prepare_video_search_accepts_library_video_segments() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "video-segment-query".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let visual_unit_id = "vu_video_000123".to_string();
+        let locator = json!({ "start_ms": 600, "end_ms": 1800, "duration_ms": 3000 });
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .visual_units
+            .insert(
+                visual_unit_id.clone(),
+                VisualUnitRecord {
+                    id: visual_unit_id.clone(),
+                    point_id: 1,
+                    source_id: "src_video_000123".to_string(),
+                    source_path: "/tmp/example.mp4".to_string(),
+                    source_type: "video".to_string(),
+                    kind: "video_segment".to_string(),
+                    locator: locator.clone(),
+                    neighbor_context: json!({}),
+                },
+            );
+
+        let (_, input) = state
+            .prepare_video_search(&VideoSearchRequest {
+                library_id: library.id.clone(),
+                video_input: QueryVideoInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    source_id: None,
+                    visual_unit_id: Some(visual_unit_id),
+                    locator: None,
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+
+        assert_eq!(input.path, "/tmp/example.mp4");
+        assert_eq!(input.locator.unwrap(), locator);
+    }
+
+    #[test]
+    fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "video-segment-query-locator".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .active_index_lines
+            .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+        let visual_unit_id = "vu_video_000124".to_string();
+        state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .visual_units
+            .insert(
+                visual_unit_id.clone(),
+                VisualUnitRecord {
+                    id: visual_unit_id.clone(),
+                    point_id: 1,
+                    source_id: "src_video_000124".to_string(),
+                    source_path: "/tmp/example.mp4".to_string(),
+                    source_type: "video".to_string(),
+                    kind: "video_segment".to_string(),
+                    locator: json!({ "start_ms": 600, "end_ms": 1800, "duration_ms": 3000 }),
+                    neighbor_context: json!({}),
+                },
+            );
+
+        let error = state
+            .prepare_video_search(&VideoSearchRequest {
+                library_id: library.id.clone(),
+                video_input: QueryVideoInputRequest {
+                    kind: "library_object".to_string(),
+                    temp_asset_id: None,
+                    source_id: None,
+                    visual_unit_id: Some(visual_unit_id),
+                    locator: Some(json!({ "start_ms": 0, "end_ms": 1000 })),
+                },
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.payload.code, "validation_failed");
     }
 
     #[test]
@@ -3337,6 +4632,28 @@ mod tests {
         document.trailer.set("Root", catalog_id);
         document.compress();
         document.save(path).unwrap();
+    }
+
+    fn write_test_video(path: &std::path::Path, duration_secs: f64) {
+        let duration_arg = format!("{duration_secs:.3}");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=640x360:r=30",
+                "-t",
+                &duration_arg,
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     fn set_test_app_env() {

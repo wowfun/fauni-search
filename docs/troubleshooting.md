@@ -330,6 +330,37 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 - 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/dev/logs/sidecar.log`
 - 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
 
+## `smoke-video-search.sh` 失败
+
+症状：
+- `smoke-video-search.sh` 报 local manifest 缺失或对应视频样本不存在
+- `smoke-video-search.sh` 报 `ffmpeg` / `ffprobe` 不可用
+- `smoke-video-search.sh` 报查询视频上传失败
+- `smoke-video-search.sh` 报 `/search/video` 返回错误
+- `smoke-video-search.sh` 报结果中缺少 `video_segment`、`image` 或 `document_page`
+
+检查：
+
+```bash
+bash scripts/local/status.sh --dev --json
+command -v ffmpeg
+command -v ffprobe
+ls -l data/generate_q2_report_from_csv_bank_data-720-512.local.manifest.json
+tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/sidecar.log
+tail -n 80 data/runtime/dev/logs/qdrant.log
+```
+
+处理：
+- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、sidecar、Qdrant 都是 ready
+- 当前视频 smoke 依赖本地 `ffmpeg` / `ffprobe` 做 clip 与截图派生；如果命令不存在，先在宿主机安装对应工具后再重跑
+- 如果失败发生在派生阶段，优先检查 local-only manifest 路径与视频样本路径是否仍然存在
+- 如果失败发生在查询视频上传或 `/search/video` 阶段，优先检查 app 日志中的 `validation_failed`、`not_found` 或 `not_ready`
+- 如果失败发生在 `source_id` 复用路径，优先确认对应库里确实已经导入视频，并且返回结果中包含可复用的视频源
+- 如果失败发生在指定时间范围查询，优先确认 `start_ms` / `end_ms` 没有越界，且 `start_ms < end_ms`
+- 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/dev/logs/sidecar.log`
+- 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
+
 ## 模型下载失败
 
 症状：
