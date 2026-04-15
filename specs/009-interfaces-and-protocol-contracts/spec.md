@@ -113,11 +113,32 @@
 - `POST /libraries` 的请求载荷至少包含：`name` 与 `config`
 - `config` 作为稳定扩展对象，承接例如 `enabled_index_lines` 一类库级配置；本专题不固定其完整字段集
 - 库管理、来源根与规则管理、配置与绑定管理、收藏管理、搜索历史管理等资源型接口，应采用统一的资源快照载荷与列表 / 详情 / 变更响应形状
+- 若通过 HTTP 暴露，来源根资源接口的稳定入口应包括：
+  - `GET /libraries/{library_id}/source-roots`
+  - `POST /libraries/{library_id}/source-roots`
+  - `GET /libraries/{library_id}/source-roots/{source_root_id}`
+  - `PATCH /libraries/{library_id}/source-roots/{source_root_id}`
+  - `DELETE /libraries/{library_id}/source-roots/{source_root_id}`
+- 来源根资源的创建 / 变更载荷至少应支持：`root_path`、`enabled` 与 `rules`
+- 来源根资源快照至少应支持：`source_root_id`、`root_path`、`enabled`、`status`、`watch_state`、`coverage_summary` 与 `rules`
+- 当前阶段来源根的 `rules` 应至少能承接：
+  - `include_globs`
+  - `exclude_globs`
+  - `include_extensions`
+- 若通过 HTTP 暴露，库级来源清单接口的稳定入口应包括 `GET /libraries/{library_id}/sources`
+- `GET /libraries/{library_id}/sources` 当前阶段至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
+- 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与当前路径或等价来源定位摘要
 - 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
 - 若通过 HTTP 暴露，视觉对象预览资源的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}/preview`
 - 视觉对象详情响应至少应返回目标对象的稳定详情快照、稳定 `preview` 资源引用对象，并可附带 `neighbor_context`
 - 导入、刷新、重扫、重建、清理、维护，以及任务取消 / 重试 / 恢复等动作型接口，应采用显式动作载荷，而不是通过隐式读写触发后台执行
 - 若通过 HTTP 暴露，当前正式导入动作入口应包括 `POST /libraries/{library_id}/imports`
+- 若通过 HTTP 暴露，库级来源管理动作入口的稳定入口应包括：
+  - `POST /libraries/{library_id}/refresh`
+  - `POST /libraries/{library_id}/rescan`
+- 若通过 HTTP 暴露，来源根级来源管理动作入口的稳定入口应包括：
+  - `POST /libraries/{library_id}/source-roots/{source_root_id}/refresh`
+  - `POST /libraries/{library_id}/source-roots/{source_root_id}/rescan`
 - `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
 - 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/images`
 - 若通过 HTTP 暴露，临时查询视频上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/videos`
@@ -173,7 +194,11 @@
 - `video_query_embedding` 的单项输入在需要时必须能够携带视频时间范围 `locator`；当前阶段至少应支持用 `start_ms` / `end_ms` 表达整段视频中的目标片段
 - `document_query_embedding` 的单项输入在需要时必须能够携带文档页范围 `locator`；当前阶段至少应支持用 `start_page` / `end_page` 表达整份 PDF 中的目标片段
 - `document_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达 PDF 的目标页
+- 当前实现允许 `document_embedding` 承接批量输入，但服务端可以基于运行时批大小上限拒绝过大的 `inputs.documents`
+- 若 `document_embedding` 因批大小上限拒绝请求，应继续复用统一错误载荷并返回 `validation_failed`
 - `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了视觉单元级 `locator`，响应应能返回与该输入对应的定位摘要
+- `document_embedding` 的批大小限制属于实现配置而不是稳定协议契约；无论是否触发该限制，`POST /embed` 的成功响应 shape 都不应改变
+- 当前切片中的批处理、staging 与 active 切换属于内部执行实现；app 对外公开 API shape 不应因此改变
 - 推理 / 编码成功响应必须返回与 `operation_kind` 对应的结构化 `data`，例如向量输出、派生结果描述或媒体处理摘要；不得依赖未文档化的 sidecar 私有字段
 - sidecar 的超时、不可达、能力不满足与内部失败，必须复用稳定错误载荷与错误码族表达，而不是只依赖传输层异常
 - sidecar 协议只承接公开输入 / 输出 / 诊断契约；模型加载、驻留、容量逐出与运行时托管语义由 [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义
@@ -189,3 +214,4 @@
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务执行、任务恢复、运行时健康与 sidecar 托管语义
 - [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义结构化记录、任务记录、检索命名空间与文件载荷的物理落点
 - [008-ui-ux](../008-ui-ux/spec.md) 定义搜索工作区、管理工作区、控制面入口与应用级体验边界
+- [140-library-source-management](../140-library-source-management/spec.md) 定义来源根生命周期、来源规则、来源清单与当前阶段来源管理能力域

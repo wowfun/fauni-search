@@ -152,6 +152,55 @@ tail -n 50 data/runtime/dev/logs/qdrant.log
 - 确认 `qdrant` 命令可执行
 - 再检查 `DEV_LOG_DIR` 下的 `qdrant.log`
 
+## 旧 `index_*` collection 需要手工清理
+
+症状：
+- app 启动后原本已有库变成 `not_ready`
+- 你在 Qdrant storage 或 `GET /collections` 中还能看到旧 `index_*` 物理 collection
+- 你刚切到新的 alias 语义实现后，`refresh` / `rescan` 无法接管这些旧 collection
+
+检查：
+
+```bash
+curl -s http://127.0.0.1:56333/collections
+tail -n 80 data/runtime/logs/app.log
+tail -n 80 data/runtime/logs/qdrant.log
+```
+
+如果你使用 `--dev`，对应检查命令是：
+
+```bash
+curl -s http://127.0.0.1:57333/collections
+tail -n 80 data/runtime/dev/logs/app.log
+tail -n 80 data/runtime/dev/logs/qdrant.log
+```
+
+处理：
+- 当前 `index_{library_id}_{index_line}` 承担的是 active logical namespace；旧“直接物理 `index_*` collection”不再兼容
+- `run.sh` / `stop.sh` 不会替你自动迁移或自动删除这些旧 collection
+- 先在选中 profile 下手工删除旧物理 `index_*` collection，再让新的导入、`refresh` 或 `rescan` 重建当前 active alias 与其物理 target
+- 如果你只是清掉了 collection 文件而没有重新构建索引，库会停在 `not_ready`，这是预期行为
+
+## 索引完成后 `free -h` 仍显示高内存占用
+
+症状：
+- 导入或 `rescan` 已经完成，但 `free -h` 里的 `used` 仍然很高
+- 你怀疑索引过程结束后内存没有释放
+
+检查：
+
+```bash
+free -h
+grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SReclaimable|Shmem):' /proc/meminfo
+tail -n 80 data/runtime/logs/sidecar.log
+```
+
+处理：
+- 先看 `available`，不要只看 `used`；Linux 会把空闲内存拿去做 page cache，这不等于应用仍然持有同等规模的不可回收内存
+- 当前 sidecar 会常驻已加载模型，因此索引完成后仍可能保留一部分模型内存，这和索引阶段的瞬时峰值不是同一个问题
+- Qdrant 新建 collection 会采用 disk-backed vector 配置 `on_disk: true`，但文件缓存仍可能反映在 `free -h` 的 `buff/cache` 中
+- 如果你在 WSL2 中观察到内存长期不回收，优先检查宿主机的 WSL 内存回收配置，而不是先假设 app 仍在持续泄漏
+
 ## `run.sh` 启动失败后看哪里
 
 症状：

@@ -50,7 +50,9 @@
 - `run-qdrant.sh` 承接 Qdrant 本地进程启动或复用
 - `run.sh` 承接 app、sidecar 与 UI 的启动；默认前台运行，`--detach` 时进入分离运行
 - `run.sh` 启动 app、sidecar 与 UI 前应先确认 Qdrant 可访问；若不可访问，应自动调用同一配置上下文下的 `run-qdrant.sh` 启动或复用 Qdrant，并在 Qdrant 仍不可访问时失败
+- `run.sh` 必须复用选中 env 下同一个 `APP_RUNTIME_DIR`；重启 app 不得隐式改写持久状态路径，也不得在启动时自动清理旧的 durable store
 - `stop.sh` 承接 app、sidecar、UI 与 Qdrant 的停止；必须支持选中配置下的服务发现
+- `stop.sh --all` 只承接停进程语义，不承接数据清空、runtime wipe 或旧 collection 自动清理
 - `status.sh` 承接服务状态查询；必须支持 `--json` 输出机器可读状态快照
 - `check.sh` 承接无 GPU 快速检查
 - `smoke-text-search.sh` 承接真实 ColQwen + Qdrant 文本搜索 smoke；必须支持 `--json` 输出机器可读验证摘要
@@ -59,10 +61,14 @@
 ## 日志、pid 与状态
 
 - app、sidecar、UI 与 Qdrant 的日志位置由选中 env 文件中的 `DEV_LOG_DIR` 决定
+- `${APP_RUNTIME_DIR}` 是当前 restart-persistence 事实源的一部分；停止脚本不得把它当成临时日志目录一起清掉
 - 分离运行时，app、sidecar 与 UI 应将 pid 写入 `DEV_LOG_DIR` 下的稳定 pid 文件
 - Qdrant 由 `run-qdrant.sh` 启动或复用，其 pid 文件继续由 Qdrant 启动入口维护；`run.sh` 可以作为依赖前置步骤调用 `run-qdrant.sh`，但不应在自身清理流程中隐式停止 Qdrant
 - `status.sh` 应报告每个服务的 URL、ready 状态、pid、日志路径与配置来源
 - `stop.sh` 应优先复用 pid 文件，并保留端口 / 命令发现兜底，避免 pid 文件缺失时无法停止本仓库服务
+- 旧 runtime-token Qdrant collections 的清理属于 operator/manual concern，不属于 `run.sh` / `stop.sh` 的自动职责
+- 本次 alias cutover 后，旧 `text_search_*` collection 与旧“直接物理 `index_*` collection”的清理同样属于 operator/manual concern；`run.sh` / `stop.sh` 不负责自动迁移或自动删除这些旧 collections
+- 如需兼容切换，操作员应先在选中配置下手工清理旧物理 `index_*` collections，再让新机制重建 active alias 与其物理 target
 
 ## 快速检查与 smoke
 
