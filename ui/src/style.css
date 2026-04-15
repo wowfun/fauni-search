@@ -180,6 +180,17 @@ code {
   font-weight: 600;
 }
 
+.checkbox-line {
+  display: flex !important;
+  align-items: center;
+  gap: 0.75rem;
+  font-weight: 600;
+}
+
+.checkbox-line input {
+  width: auto;
+}
+
 input,
 select,
 textarea {
@@ -381,6 +392,31 @@ textarea {
 .stats dd {
   margin: 0;
   font-weight: 700;
+}
+
+.compact-row {
+  margin: 0.5rem 0 0.9rem;
+}
+
+.compact-stats {
+  gap: 0.45rem;
+}
+
+.filter-grid {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 1rem;
+}
+
+.source-root-card,
+.source-card {
+  gap: 0.55rem !important;
+}
+
+.danger-button {
+  color: var(--error);
+  border-color: rgba(181, 69, 36, 0.2);
 }
 
 .receipt-group + .receipt-group {
@@ -675,6 +711,10 @@ ol {
   .detail-path {
     text-align: left;
     max-width: none;
+  }
+
+  .filter-grid {
+    grid-template-columns: 1fr;
   }
 }
 

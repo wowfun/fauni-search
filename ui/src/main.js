@@ -22,12 +22,25 @@ const demoFixture = {
 
 const JOB_POLL_INTERVAL_MS = 1000;
 const JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKSPACE_POLL_INTERVAL_MS = 3000;
 
 const state = {
   libraries: [],
   jobs: [],
   videoSources: [],
+  sourceRoots: [],
+  librarySources: [],
+  libraryNameDraft: "",
   selectedLibraryId: "",
+  editingSourceRootId: "",
+  sourceRootPathDraft: "",
+  sourceRootEnabledDraft: true,
+  sourceRootIncludeGlobsDraft: "",
+  sourceRootExcludeGlobsDraft: "",
+  sourceRootIncludeExtensionsDraft: "",
+  sourceFilterRootId: "",
+  sourceFilterType: "",
+  sourceFilterStatus: "",
   importPathsDraft: "",
   searchMode: "text",
   searchTextDraft: "",
@@ -57,8 +70,103 @@ const state = {
 };
 
 const EDITABLE_TARGET_SELECTOR = 'input, textarea, [contenteditable="true"], [contenteditable=""], select';
+let lastRenderedDetailSignature = null;
 
 const root = document.querySelector("#app");
+
+function selectedVisualUnitDetailSignature() {
+  if (!state.selectedVisualUnit) {
+    return null;
+  }
+
+  const visualUnit = state.selectedVisualUnit.visual_unit;
+  return JSON.stringify({
+    visual_unit_id: visualUnit.visual_unit_id,
+    source_id: visualUnit.source_id,
+    source_path: visualUnit.source_path,
+    source_type: visualUnit.source_type,
+    kind: visualUnit.kind,
+    locator: visualUnit.locator,
+    preview_url: state.selectedVisualUnit.preview?.url ?? null,
+    neighbor_context: state.selectedVisualUnit.neighbor_context ?? null,
+  });
+}
+
+function captureFocusedEditableState() {
+  const activeElement = document.activeElement;
+  if (
+    !(activeElement instanceof HTMLElement) ||
+    !root?.contains(activeElement) ||
+    !activeElement.matches(EDITABLE_TARGET_SELECTOR) ||
+    !activeElement.id
+  ) {
+    return null;
+  }
+
+  const snapshot = {
+    id: activeElement.id,
+    value: null,
+    selectionStart: null,
+    selectionEnd: null,
+  };
+
+  if (
+    activeElement instanceof HTMLInputElement ||
+    activeElement instanceof HTMLTextAreaElement ||
+    activeElement instanceof HTMLSelectElement
+  ) {
+    snapshot.value = activeElement.value;
+  }
+
+  if (
+    (activeElement instanceof HTMLInputElement && activeElement.type !== "number") ||
+    activeElement instanceof HTMLTextAreaElement
+  ) {
+    snapshot.selectionStart = activeElement.selectionStart;
+    snapshot.selectionEnd = activeElement.selectionEnd;
+  }
+
+  return snapshot;
+}
+
+function hasFocusedEditableControl() {
+  return captureFocusedEditableState() !== null;
+}
+
+function restoreFocusedEditableState(snapshot) {
+  if (!snapshot?.id) {
+    return;
+  }
+
+  const nextElement = document.getElementById(snapshot.id);
+  if (
+    !(nextElement instanceof HTMLElement) ||
+    !nextElement.matches(EDITABLE_TARGET_SELECTOR) ||
+    nextElement.hasAttribute("disabled")
+  ) {
+    return;
+  }
+
+  nextElement.focus({ preventScroll: true });
+
+  if (
+    snapshot.value !== null &&
+    ((nextElement instanceof HTMLInputElement && nextElement.type !== "file") ||
+      nextElement instanceof HTMLTextAreaElement ||
+      nextElement instanceof HTMLSelectElement)
+  ) {
+    nextElement.value = snapshot.value;
+  }
+
+  if (
+    snapshot.selectionStart !== null &&
+    snapshot.selectionEnd !== null &&
+    ((nextElement instanceof HTMLInputElement && nextElement.type !== "number") ||
+      nextElement instanceof HTMLTextAreaElement)
+  ) {
+    nextElement.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+  }
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -71,6 +179,58 @@ function escapeHtml(value) {
 
 function selectedLibrary() {
   return state.libraries.find((library) => library.id === state.selectedLibraryId) ?? null;
+}
+
+function resetSourceRootEditor() {
+  state.editingSourceRootId = "";
+  state.sourceRootPathDraft = "";
+  state.sourceRootEnabledDraft = true;
+  state.sourceRootIncludeGlobsDraft = "";
+  state.sourceRootExcludeGlobsDraft = "";
+  state.sourceRootIncludeExtensionsDraft = "";
+}
+
+function populateSourceRootEditor(sourceRoot) {
+  state.editingSourceRootId = sourceRoot.source_root_id;
+  state.sourceRootPathDraft = sourceRoot.root_path ?? "";
+  state.sourceRootEnabledDraft = Boolean(sourceRoot.enabled);
+  state.sourceRootIncludeGlobsDraft = (sourceRoot.rules?.include_globs ?? []).join("\n");
+  state.sourceRootExcludeGlobsDraft = (sourceRoot.rules?.exclude_globs ?? []).join("\n");
+  state.sourceRootIncludeExtensionsDraft = (sourceRoot.rules?.include_extensions ?? []).join(", ");
+}
+
+function multilineDraftToList(value) {
+  return String(value ?? "")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function commaDraftToList(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function sourceRootPayloadFromDraft() {
+  return {
+    root_path: state.sourceRootPathDraft.trim(),
+    enabled: state.sourceRootEnabledDraft,
+    rules: {
+      include_globs: multilineDraftToList(state.sourceRootIncludeGlobsDraft),
+      exclude_globs: multilineDraftToList(state.sourceRootExcludeGlobsDraft),
+      include_extensions: commaDraftToList(state.sourceRootIncludeExtensionsDraft),
+    },
+  };
+}
+
+function sourceRootDisplayName(sourceRootId) {
+  if (!sourceRootId) {
+    return "全部来源根";
+  }
+  const sourceRoot = state.sourceRoots.find((item) => item.source_root_id === sourceRootId);
+  return sourceRoot?.root_path ?? sourceRootId;
 }
 
 function sleep(ms) {
@@ -581,6 +741,20 @@ function queryDocumentRangeSummary() {
   return `页范围 · P${state.queryDocumentStartPageDraft} → P${state.queryDocumentEndPageDraft}`;
 }
 
+function syncQueryDocumentRangeUi() {
+  const summary = document.querySelector("#query-document-range-summary");
+  if (summary) {
+    summary.textContent = queryDocumentRangeSummary();
+  }
+
+  const clearButton = document.querySelector("#clear-query-document-range-button");
+  if (clearButton instanceof HTMLButtonElement) {
+    clearButton.disabled =
+      Boolean(state.queryDocumentLibraryObject) ||
+      (!state.queryDocumentStartPageDraft && !state.queryDocumentEndPageDraft);
+  }
+}
+
 function queryDocumentLocatorPayload() {
   if (state.queryDocumentLibraryObject?.locator) {
     return state.queryDocumentLibraryObject.locator;
@@ -719,6 +893,268 @@ function renderImportReceipt() {
     : `<p class="helper" data-testid="import-no-job">这次提交没有创建后台任务。</p>`;
 
   return `<div data-testid="import-receipt">${accepted}${rejected}${jobSummary}</div>`;
+}
+
+function sourceRootStatusPillClass(status) {
+  if (status === "ready") {
+    return "ready";
+  }
+  if (status === "degraded") {
+    return "error";
+  }
+  if (status === "disabled") {
+    return "muted";
+  }
+  return "pending";
+}
+
+function sourceStatusPillClass(status) {
+  if (status === "active") {
+    return "ready";
+  }
+  if (status === "invalidated") {
+    return "error";
+  }
+  if (status === "out_of_scope") {
+    return "pending";
+  }
+  return "muted";
+}
+
+function renderSourceRootRulesSummary(rules) {
+  const parts = [];
+  const includeGlobs = rules?.include_globs ?? [];
+  const excludeGlobs = rules?.exclude_globs ?? [];
+  const includeExtensions = rules?.include_extensions ?? [];
+
+  parts.push(includeGlobs.length ? `include ${includeGlobs.length}` : "include all");
+  parts.push(excludeGlobs.length ? `exclude ${excludeGlobs.length}` : "exclude none");
+  parts.push(includeExtensions.length ? includeExtensions.join(", ") : "all source types");
+  return parts.join(" · ");
+}
+
+function formatScanTime(lastScanAtMs) {
+  if (!lastScanAtMs) {
+    return "尚未 refresh / rescan";
+  }
+  return new Date(Number(lastScanAtMs)).toLocaleString();
+}
+
+function renderSourceRootsPanel(library) {
+  const submitLabel = state.editingSourceRootId ? "保存来源根" : "创建来源根";
+  const panelActions = `
+    <div class="inline-actions">
+      <button
+        type="button"
+        id="library-refresh-button"
+        data-testid="library-refresh-button"
+        ${library && state.sourceRoots.length ? "" : "disabled"}
+      >
+        库级 refresh
+      </button>
+      <button
+        type="button"
+        id="library-rescan-button"
+        data-testid="library-rescan-button"
+        class="secondary-button"
+        ${library && state.sourceRoots.length ? "" : "disabled"}
+      >
+        库级 rescan
+      </button>
+    </div>
+  `;
+
+  const list = state.sourceRoots.length
+    ? `
+        <ul class="data-list source-root-list" data-testid="source-root-list">
+          ${state.sourceRoots
+            .map(
+              (sourceRoot) => `
+                <li class="source-root-card" data-testid="source-root-card" data-source-root-id="${escapeHtml(sourceRoot.source_root_id)}">
+                  <div class="list-head">
+                    <strong>${escapeHtml(sourceRoot.root_path)}</strong>
+                    <span class="helper">${escapeHtml(sourceRoot.source_root_id)}</span>
+                  </div>
+                  <div class="pill-row compact-row">
+                    <span class="pill ${sourceRootStatusPillClass(sourceRoot.status)}">${escapeHtml(sourceRoot.status)}</span>
+                    <span class="pill muted">${escapeHtml(sourceRoot.watch_state)}</span>
+                  </div>
+                  <dl class="stats compact-stats">
+                    <div><dt>Observed</dt><dd>${sourceRoot.coverage_summary?.observed_file_count ?? 0}</dd></div>
+                    <div><dt>Matched</dt><dd>${sourceRoot.coverage_summary?.matched_file_count ?? 0}</dd></div>
+                    <div><dt>Active</dt><dd>${sourceRoot.coverage_summary?.active_source_count ?? 0}</dd></div>
+                    <div><dt>Inactive</dt><dd>${sourceRoot.coverage_summary?.inactive_source_count ?? 0}</dd></div>
+                  </dl>
+                  <p class="helper">${escapeHtml(renderSourceRootRulesSummary(sourceRoot.rules))}</p>
+                  <p class="helper">Last scan: ${escapeHtml(formatScanTime(sourceRoot.coverage_summary?.last_scan_at_ms))}</p>
+                  ${
+                    sourceRoot.last_action
+                      ? `<p class="helper">Last action: ${escapeHtml(sourceRoot.last_action.action)} · ${escapeHtml(sourceRoot.last_action.status)} · ${escapeHtml(sourceRoot.last_action.summary)}</p>`
+                      : ""
+                  }
+                  <div class="inline-actions">
+                    <button type="button" class="secondary-button" data-source-root-edit-id="${escapeHtml(sourceRoot.source_root_id)}">编辑</button>
+                    <button type="button" data-source-root-refresh-id="${escapeHtml(sourceRoot.source_root_id)}" ${sourceRoot.enabled ? "" : "disabled"}>refresh</button>
+                    <button type="button" class="secondary-button" data-source-root-rescan-id="${escapeHtml(sourceRoot.source_root_id)}" ${sourceRoot.enabled ? "" : "disabled"}>rescan</button>
+                    <button type="button" class="secondary-button" data-source-root-toggle-id="${escapeHtml(sourceRoot.source_root_id)}">
+                      ${sourceRoot.enabled ? "停用" : "启用"}
+                    </button>
+                    <button type="button" class="secondary-button danger-button" data-source-root-delete-id="${escapeHtml(sourceRoot.source_root_id)}">删除</button>
+                  </div>
+                </li>
+              `
+            )
+            .join("")}
+        </ul>
+      `
+    : '<p class="empty" data-testid="source-root-empty">当前库还没有来源根。先创建一个本地目录来源根，再触发 refresh / rescan。</p>';
+
+  return `
+    <section class="panel panel-tight">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Sources</p>
+          <h2>来源根管理</h2>
+        </div>
+        ${panelActions}
+      </div>
+      <form id="source-root-form" class="stack-form" data-testid="source-root-form">
+        <label>
+          <span>目录根路径</span>
+          <input
+            id="source-root-path"
+            data-testid="source-root-path-input"
+            type="text"
+            placeholder="/path/to/library-root"
+            value="${escapeHtml(state.sourceRootPathDraft)}"
+            ${library ? "" : "disabled"}
+          />
+        </label>
+        <label class="checkbox-line">
+          <input
+            id="source-root-enabled"
+            data-testid="source-root-enabled-input"
+            type="checkbox"
+            ${state.sourceRootEnabledDraft ? "checked" : ""}
+            ${library ? "" : "disabled"}
+          />
+          <span>启用该来源根并接入 watcher</span>
+        </label>
+        <label>
+          <span>Include globs</span>
+          <textarea
+            id="source-root-include-globs"
+            data-testid="source-root-include-globs-input"
+            rows="3"
+            placeholder="images/**&#10;reports/*.pdf"
+            ${library ? "" : "disabled"}
+          >${escapeHtml(state.sourceRootIncludeGlobsDraft)}</textarea>
+        </label>
+        <label>
+          <span>Exclude globs</span>
+          <textarea
+            id="source-root-exclude-globs"
+            data-testid="source-root-exclude-globs-input"
+            rows="3"
+            placeholder="**/*.tmp&#10;archive/**"
+            ${library ? "" : "disabled"}
+          >${escapeHtml(state.sourceRootExcludeGlobsDraft)}</textarea>
+        </label>
+        <label>
+          <span>Include extensions</span>
+          <input
+            id="source-root-include-extensions"
+            data-testid="source-root-include-extensions-input"
+            type="text"
+            placeholder="png, jpg, pdf"
+            value="${escapeHtml(state.sourceRootIncludeExtensionsDraft)}"
+            ${library ? "" : "disabled"}
+          />
+        </label>
+        <div class="inline-actions">
+          <button type="submit" data-testid="source-root-submit-button" ${library ? "" : "disabled"}>
+            ${escapeHtml(submitLabel)}
+          </button>
+          <button type="button" id="source-root-reset-button" class="secondary-button" data-testid="source-root-reset-button" ${library ? "" : "disabled"}>
+            清空
+          </button>
+        </div>
+      </form>
+      ${list}
+    </section>
+  `;
+}
+
+function renderLibrarySourcesPanel(library) {
+  const list = state.librarySources.length
+    ? `
+        <ul class="data-list source-list" data-testid="library-source-list">
+          ${state.librarySources
+            .map(
+              (source) => `
+                <li class="source-card" data-testid="library-source-card" data-source-id="${escapeHtml(source.source_id)}">
+                  <div class="list-head">
+                    <strong>${escapeHtml(source.source_path)}</strong>
+                    <span class="pill ${sourceStatusPillClass(source.status)}">${escapeHtml(source.status)}</span>
+                  </div>
+                  <p class="helper">${escapeHtml(source.source_type)} · ${escapeHtml(source.kind)} · ${escapeHtml(source.source_root_label)}</p>
+                  <p class="helper">visual units: ${escapeHtml(source.visual_unit_count)}${source.status_reason ? ` · ${escapeHtml(source.status_reason)}` : ""}</p>
+                </li>
+              `
+            )
+            .join("")}
+        </ul>
+      `
+    : '<p class="empty" data-testid="library-source-empty">当前筛选条件下没有来源内容。</p>';
+
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Inventory</p>
+          <h2>库级来源清单</h2>
+        </div>
+      </div>
+      <div class="filter-grid">
+        <label>
+          <span>来源根</span>
+          <select id="source-filter-root" data-testid="source-filter-root" ${library ? "" : "disabled"}>
+            <option value="">全部来源根</option>
+            <option value="manual" ${state.sourceFilterRootId === "manual" ? "selected" : ""}>manual import</option>
+            ${state.sourceRoots
+              .map(
+                (sourceRoot) => `
+                  <option value="${escapeHtml(sourceRoot.source_root_id)}" ${state.sourceFilterRootId === sourceRoot.source_root_id ? "selected" : ""}>
+                    ${escapeHtml(sourceRoot.root_path)}
+                  </option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+        <label>
+          <span>来源类型</span>
+          <select id="source-filter-type" data-testid="source-filter-type" ${library ? "" : "disabled"}>
+            <option value="">全部类型</option>
+            <option value="image" ${state.sourceFilterType === "image" ? "selected" : ""}>image</option>
+            <option value="pdf" ${state.sourceFilterType === "pdf" ? "selected" : ""}>pdf</option>
+            <option value="video" ${state.sourceFilterType === "video" ? "selected" : ""}>video</option>
+          </select>
+        </label>
+        <label>
+          <span>来源状态</span>
+          <select id="source-filter-status" data-testid="source-filter-status" ${library ? "" : "disabled"}>
+            <option value="">全部状态</option>
+            <option value="active" ${state.sourceFilterStatus === "active" ? "selected" : ""}>active</option>
+            <option value="invalidated" ${state.sourceFilterStatus === "invalidated" ? "selected" : ""}>invalidated</option>
+            <option value="out_of_scope" ${state.sourceFilterStatus === "out_of_scope" ? "selected" : ""}>out_of_scope</option>
+          </select>
+        </label>
+      </div>
+      <p class="helper">当前显示 ${state.librarySources.length} 条来源记录。</p>
+      ${list}
+    </section>
+  `;
 }
 
 function renderVisualPreview() {
@@ -1232,7 +1668,7 @@ function renderSearchControls(library) {
                 <div class="query-range-card" data-testid="query-document-range-card">
                   <div class="job-meta">
                     <strong>页范围</strong>
-                    <span class="helper">${escapeHtml(queryDocumentRangeSummary())}</span>
+                    <span class="helper" id="query-document-range-summary">${escapeHtml(queryDocumentRangeSummary())}</span>
                   </div>
                   ${
                     state.queryDocumentLibraryObject
@@ -1315,16 +1751,89 @@ function renderSearchControls(library) {
   `;
 }
 
+function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+
+  const currentShell = root.querySelector("main.shell");
+  const currentHero = currentShell?.querySelector(".hero");
+  const currentDesk = currentShell?.querySelector(".workspace-desk");
+  const currentLeft = currentDesk?.querySelector(".workspace-left");
+  const currentCenter = currentDesk?.querySelector(".workspace-center");
+  if (
+    !(currentShell instanceof HTMLElement) ||
+    !(currentHero instanceof HTMLElement) ||
+    !(currentLeft instanceof HTMLElement) ||
+    !(currentCenter instanceof HTMLElement)
+  ) {
+    return false;
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = nextMarkup.trim();
+  const nextShell = template.content.firstElementChild;
+  const nextHero = nextShell?.querySelector(".hero");
+  const nextStatusStack = nextShell?.querySelector(".status-stack");
+  const nextDesk = nextShell?.querySelector(".workspace-desk");
+  const nextLeft = nextDesk?.querySelector(".workspace-left");
+  const nextCenter = nextDesk?.querySelector(".workspace-center");
+  if (
+    !(nextShell instanceof HTMLElement) ||
+    !(nextHero instanceof HTMLElement) ||
+    !(nextLeft instanceof HTMLElement) ||
+    !(nextCenter instanceof HTMLElement)
+  ) {
+    return false;
+  }
+
+  currentHero.replaceWith(nextHero);
+
+  const currentStatusStack = currentShell.querySelector(".status-stack");
+  const insertedHero = currentShell.querySelector(".hero");
+  if (nextStatusStack instanceof HTMLElement) {
+    if (currentStatusStack instanceof HTMLElement) {
+      currentStatusStack.replaceWith(nextStatusStack);
+    } else if (insertedHero instanceof HTMLElement) {
+      insertedHero.after(nextStatusStack);
+    } else {
+      return false;
+    }
+  } else if (currentStatusStack instanceof HTMLElement) {
+    currentStatusStack.remove();
+  }
+
+  currentLeft.replaceWith(nextLeft);
+  currentCenter.replaceWith(nextCenter);
+  return true;
+}
+
+function bindClickListeners(selector, handler, skipWithin = null) {
+  document.querySelectorAll(selector).forEach((button) => {
+    if (skipWithin instanceof HTMLElement && skipWithin.contains(button)) {
+      return;
+    }
+    button.addEventListener("click", handler);
+  });
+}
+
 function renderWorkspace() {
   const library = selectedLibrary();
+  const focusedEditableState = captureFocusedEditableState();
+  const detailSignature = selectedVisualUnitDetailSignature();
+  const previousDetailPanel = root?.querySelector('[data-testid="detail-panel"]') ?? null;
+  const shouldPreserveDetailPanel =
+    previousDetailPanel instanceof HTMLElement &&
+    detailSignature !== null &&
+    detailSignature === lastRenderedDetailSignature;
 
-  root.innerHTML = `
+  const nextMarkup = `
     <main class="shell" data-testid="workspace-shell">
       <section class="hero">
         <p class="eyebrow">FauniSearch</p>
         <h1>Search workspace</h1>
         <p class="summary">
-          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路。左侧管理库和导入，中间在统一工作区中执行 Text / Image / Video / Document 搜索并浏览结果，右侧查看预览和对象详情。
+          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路，并开始承接 140 库来源管理：左侧管理库和来源根，中间查看库级来源清单并执行搜索，右侧查看预览和对象详情。
         </p>
         <div class="service-strip">
           <a href="${endpoints.uiRoot}" target="_blank" rel="noreferrer">UI</a>
@@ -1353,6 +1862,7 @@ function renderWorkspace() {
                   data-testid="library-name-input"
                   name="libraryName"
                   type="text"
+                  value="${escapeHtml(state.libraryNameDraft)}"
                   placeholder="例如：demo-library"
                   required
                 />
@@ -1395,6 +1905,8 @@ function renderWorkspace() {
               }
             </div>
           </section>
+
+          ${renderSourceRootsPanel(library)}
 
           <section class="panel panel-tight">
             <div class="panel-head">
@@ -1441,6 +1953,7 @@ function renderWorkspace() {
         </aside>
 
         <section class="workspace-column workspace-center">
+          ${renderLibrarySourcesPanel(library)}
           <section class="panel search-panel">
             <div class="panel-head">
               <div>
@@ -1468,8 +1981,54 @@ function renderWorkspace() {
     </main>
   `;
 
+  const preservedDetailPanel =
+    shouldPreserveDetailPanel && patchWorkspaceMarkupPreservingDetail(nextMarkup)
+      ? previousDetailPanel
+      : null;
+  if (!preservedDetailPanel) {
+    root.innerHTML = nextMarkup;
+  }
+
   document.querySelector("#create-library-form")?.addEventListener("submit", onCreateLibrary);
+  document.querySelector("#library-name")?.addEventListener("input", onLibraryNameInput);
   document.querySelector("#library-select")?.addEventListener("change", onSelectLibrary);
+  document.querySelector("#source-root-form")?.addEventListener("submit", onSubmitSourceRoot);
+  document.querySelector("#source-root-reset-button")?.addEventListener("click", onResetSourceRootEditor);
+  document.querySelector("#source-root-path")?.addEventListener("input", onSourceRootPathInput);
+  document
+    .querySelector("#source-root-enabled")
+    ?.addEventListener("change", onSourceRootEnabledInput);
+  document
+    .querySelector("#source-root-include-globs")
+    ?.addEventListener("input", onSourceRootIncludeGlobsInput);
+  document
+    .querySelector("#source-root-exclude-globs")
+    ?.addEventListener("input", onSourceRootExcludeGlobsInput);
+  document
+    .querySelector("#source-root-include-extensions")
+    ?.addEventListener("input", onSourceRootIncludeExtensionsInput);
+  document.querySelector("#library-refresh-button")?.addEventListener("click", onRefreshLibrarySources);
+  document.querySelector("#library-rescan-button")?.addEventListener("click", onRescanLibrarySources);
+  document.querySelector("#source-filter-root")?.addEventListener("change", onSourceFilterRootChange);
+  document.querySelector("#source-filter-type")?.addEventListener("change", onSourceFilterTypeChange);
+  document
+    .querySelector("#source-filter-status")
+    ?.addEventListener("change", onSourceFilterStatusChange);
+  document.querySelectorAll("[data-source-root-edit-id]").forEach((button) => {
+    button.addEventListener("click", onEditSourceRoot);
+  });
+  document.querySelectorAll("[data-source-root-refresh-id]").forEach((button) => {
+    button.addEventListener("click", onRefreshSourceRoot);
+  });
+  document.querySelectorAll("[data-source-root-rescan-id]").forEach((button) => {
+    button.addEventListener("click", onRescanSourceRoot);
+  });
+  document.querySelectorAll("[data-source-root-toggle-id]").forEach((button) => {
+    button.addEventListener("click", onToggleSourceRoot);
+  });
+  document.querySelectorAll("[data-source-root-delete-id]").forEach((button) => {
+    button.addEventListener("click", onDeleteSourceRoot);
+  });
   document.querySelector("#import-form")?.addEventListener("submit", onImportPaths);
   document.querySelector("#import-paths")?.addEventListener("input", onImportPathsInput);
   document.querySelector("#search-form")?.addEventListener("submit", onSearchSubmit);
@@ -1502,15 +2061,13 @@ function renderWorkspace() {
   document.querySelectorAll("[data-visual-unit-id]").forEach((button) => {
     button.addEventListener("click", onSelectVisualUnit);
   });
-  document.querySelectorAll("[data-use-query-visual-unit-id]").forEach((button) => {
-    button.addEventListener("click", onUseAsQueryImage);
-  });
-  document.querySelectorAll("[data-use-query-video-visual-unit-id]").forEach((button) => {
-    button.addEventListener("click", onUseAsQueryVideo);
-  });
-  document.querySelectorAll("[data-use-query-document-visual-unit-id]").forEach((button) => {
-    button.addEventListener("click", onUseAsQueryDocument);
-  });
+  bindClickListeners("[data-use-query-visual-unit-id]", onUseAsQueryImage, preservedDetailPanel);
+  bindClickListeners("[data-use-query-video-visual-unit-id]", onUseAsQueryVideo, preservedDetailPanel);
+  bindClickListeners(
+    "[data-use-query-document-visual-unit-id]",
+    onUseAsQueryDocument,
+    preservedDetailPanel
+  );
 
   const queryVideoPreview = document.querySelector("#query-video-preview");
   if (queryVideoPreview instanceof HTMLVideoElement) {
@@ -1524,6 +2081,9 @@ function renderWorkspace() {
   if (detailVideoPreview instanceof HTMLVideoElement) {
     attachBoundedVideoPlayback(detailVideoPreview);
   }
+
+  lastRenderedDetailSignature = detailSignature;
+  restoreFocusedEditableState(focusedEditableState);
 }
 
 async function apiRequest(path, options = {}) {
@@ -1573,6 +2133,10 @@ function attachBoundedVideoPlayback(videoElement) {
   if (!(videoElement instanceof HTMLVideoElement)) {
     return;
   }
+  if (videoElement.dataset.boundedPlaybackAttached === "true") {
+    return;
+  }
+  videoElement.dataset.boundedPlaybackAttached = "true";
 
   const startMs = Number(videoElement.dataset.startMs ?? "0");
   const endMs = Number(videoElement.dataset.endMs ?? "0");
@@ -1608,6 +2172,53 @@ async function refreshLibraries({ keepSelection = true } = {}) {
   if (!keepSelection || !state.libraries.some((item) => item.id === state.selectedLibraryId)) {
     state.selectedLibraryId = state.libraries[0]?.id ?? "";
   }
+}
+
+async function refreshSourceRoots() {
+  if (!state.selectedLibraryId) {
+    state.sourceRoots = [];
+    resetSourceRootEditor();
+    return;
+  }
+
+  const data = await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/source-roots`);
+  state.sourceRoots = data.source_roots;
+
+  if (
+    state.editingSourceRootId &&
+    !state.sourceRoots.some(
+      (sourceRoot) => sourceRoot.source_root_id === state.editingSourceRootId
+    )
+  ) {
+    resetSourceRootEditor();
+  }
+}
+
+async function refreshLibrarySources() {
+  if (!state.selectedLibraryId) {
+    state.librarySources = [];
+    return;
+  }
+
+  const params = new URLSearchParams();
+  if (state.sourceFilterRootId && state.sourceFilterRootId !== "manual") {
+    params.set("source_root_id", state.sourceFilterRootId);
+  }
+  if (state.sourceFilterType) {
+    params.set("source_type", state.sourceFilterType);
+  }
+  if (state.sourceFilterStatus) {
+    params.set("status", state.sourceFilterStatus);
+  }
+
+  const query = params.toString();
+  const data = await apiRequest(
+    `/libraries/${encodeURIComponent(state.selectedLibraryId)}/sources${query ? `?${query}` : ""}`
+  );
+  state.librarySources =
+    state.sourceFilterRootId === "manual"
+      ? data.sources.filter((source) => !source.source_root_id)
+      : data.sources;
 }
 
 async function refreshJobs() {
@@ -1653,6 +2264,8 @@ async function refreshJob(jobId) {
 
 async function refreshWorkspace(options) {
   await refreshLibraries(options);
+  await refreshSourceRoots();
+  await refreshLibrarySources();
   await refreshJobs();
   await refreshVideoSources();
   renderWorkspace();
@@ -1660,8 +2273,7 @@ async function refreshWorkspace(options) {
 
 async function onCreateLibrary(event) {
   event.preventDefault();
-  const input = document.querySelector("#library-name");
-  const name = input?.value?.trim() ?? "";
+  const name = state.libraryNameDraft.trim();
   if (!name) {
     return;
   }
@@ -1676,8 +2288,13 @@ async function onCreateLibrary(event) {
       }),
     });
     state.selectedLibraryId = library.id;
+    resetSourceRootEditor();
+    state.sourceFilterRootId = "";
+    state.sourceFilterType = "";
+    state.sourceFilterStatus = "";
     state.importPathsDraft = "";
     state.searchTextDraft = "";
+    state.libraryNameDraft = "";
     clearQueryImageState();
     clearQueryVideoState();
     clearQueryDocumentState();
@@ -1685,7 +2302,6 @@ async function onCreateLibrary(event) {
     state.selectedVisualUnit = null;
     state.searchOutcome = null;
     state.statusMessage = null;
-    input.value = "";
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
     state.globalError = error;
@@ -1693,8 +2309,16 @@ async function onCreateLibrary(event) {
   }
 }
 
+function onLibraryNameInput(event) {
+  state.libraryNameDraft = event.target.value;
+}
+
 async function onSelectLibrary(event) {
   state.selectedLibraryId = event.target.value;
+  resetSourceRootEditor();
+  state.sourceFilterRootId = "";
+  state.sourceFilterType = "";
+  state.sourceFilterStatus = "";
   clearQueryImageState();
   clearQueryVideoState();
   clearQueryDocumentState();
@@ -1714,6 +2338,50 @@ function onSearchTextInput(event) {
   state.searchTextDraft = event.target.value;
 }
 
+function onSourceRootPathInput(event) {
+  state.sourceRootPathDraft = event.target.value;
+}
+
+function onSourceRootEnabledInput(event) {
+  state.sourceRootEnabledDraft = event.target.checked;
+}
+
+function onSourceRootIncludeGlobsInput(event) {
+  state.sourceRootIncludeGlobsDraft = event.target.value;
+}
+
+function onSourceRootExcludeGlobsInput(event) {
+  state.sourceRootExcludeGlobsDraft = event.target.value;
+}
+
+function onSourceRootIncludeExtensionsInput(event) {
+  state.sourceRootIncludeExtensionsDraft = event.target.value;
+}
+
+function onSourceFilterRootChange(event) {
+  state.sourceFilterRootId = event.target.value;
+  refreshWorkspace({ keepSelection: true }).catch((error) => {
+    state.globalError = error;
+    renderWorkspace();
+  });
+}
+
+function onSourceFilterTypeChange(event) {
+  state.sourceFilterType = event.target.value;
+  refreshWorkspace({ keepSelection: true }).catch((error) => {
+    state.globalError = error;
+    renderWorkspace();
+  });
+}
+
+function onSourceFilterStatusChange(event) {
+  state.sourceFilterStatus = event.target.value;
+  refreshWorkspace({ keepSelection: true }).catch((error) => {
+    state.globalError = error;
+    renderWorkspace();
+  });
+}
+
 function parseImportPaths(value) {
   return value
     .split("\n")
@@ -1724,6 +2392,211 @@ function parseImportPaths(value) {
 function setDemoDrafts() {
   state.importPathsDraft = demoFixture.path;
   state.searchTextDraft = demoFixture.query;
+}
+
+async function onSubmitSourceRoot(event) {
+  event.preventDefault();
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const payload = sourceRootPayloadFromDraft();
+  if (!payload.root_path) {
+    state.globalError = {
+      code: "validation_failed",
+      message: "请先填写来源根目录路径。",
+    };
+    renderWorkspace();
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = state.editingSourceRootId
+      ? "正在保存来源根..."
+      : "正在创建来源根...";
+    renderWorkspace();
+
+    const path = state.editingSourceRootId
+      ? `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(state.editingSourceRootId)}`
+      : `/libraries/${state.selectedLibraryId}/source-roots`;
+    const method = state.editingSourceRootId ? "PATCH" : "POST";
+    await apiRequest(path, {
+      method,
+      body: JSON.stringify(payload),
+    });
+
+    resetSourceRootEditor();
+    state.statusMessage = null;
+    await refreshWorkspace({ keepSelection: true });
+  } catch (error) {
+    state.globalError = error;
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+function onResetSourceRootEditor() {
+  resetSourceRootEditor();
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+function onEditSourceRoot(event) {
+  const sourceRootId = event.currentTarget.dataset.sourceRootEditId;
+  const sourceRoot = state.sourceRoots.find((item) => item.source_root_id === sourceRootId);
+  if (!sourceRoot) {
+    return;
+  }
+  populateSourceRootEditor(sourceRoot);
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+async function triggerSourceAction(path, statusMessage) {
+  state.globalError = null;
+  state.statusMessage = statusMessage;
+  renderWorkspace();
+
+  const receipt = await apiRequest(path, { method: "POST" });
+  await refreshWorkspace({ keepSelection: true });
+
+  const job = receipt.job;
+  if (job && !isTerminalJobStatus(job.status)) {
+    await waitForJobTerminal(job.job_id);
+  }
+
+  state.statusMessage = null;
+  await refreshWorkspace({ keepSelection: true });
+}
+
+async function onRefreshLibrarySources() {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  try {
+    await triggerSourceAction(
+      `/libraries/${state.selectedLibraryId}/refresh`,
+      "正在执行库级 refresh..."
+    );
+  } catch (error) {
+    state.globalError = error;
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onRescanLibrarySources() {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  try {
+    await triggerSourceAction(
+      `/libraries/${state.selectedLibraryId}/rescan`,
+      "正在执行库级 rescan..."
+    );
+  } catch (error) {
+    state.globalError = error;
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onRefreshSourceRoot(event) {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const sourceRootId = event.currentTarget.dataset.sourceRootRefreshId;
+  try {
+    await triggerSourceAction(
+      `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}/refresh`,
+      `正在 refresh ${sourceRootDisplayName(sourceRootId)}...`
+    );
+  } catch (error) {
+    state.globalError = error;
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onRescanSourceRoot(event) {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const sourceRootId = event.currentTarget.dataset.sourceRootRescanId;
+  try {
+    await triggerSourceAction(
+      `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}/rescan`,
+      `正在 rescan ${sourceRootDisplayName(sourceRootId)}...`
+    );
+  } catch (error) {
+    state.globalError = error;
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onToggleSourceRoot(event) {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const sourceRootId = event.currentTarget.dataset.sourceRootToggleId;
+  const sourceRoot = state.sourceRoots.find((item) => item.source_root_id === sourceRootId);
+  if (!sourceRoot) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = sourceRoot.enabled ? "正在停用来源根..." : "正在启用来源根...";
+    renderWorkspace();
+    await apiRequest(
+      `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !sourceRoot.enabled }),
+      }
+    );
+    state.statusMessage = null;
+    await refreshWorkspace({ keepSelection: true });
+  } catch (error) {
+    state.globalError = error;
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onDeleteSourceRoot(event) {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const sourceRootId = event.currentTarget.dataset.sourceRootDeleteId;
+  try {
+    state.globalError = null;
+    state.statusMessage = `正在删除 ${sourceRootDisplayName(sourceRootId)}...`;
+    renderWorkspace();
+    await apiRequest(
+      `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}`,
+      { method: "DELETE" }
+    );
+    if (state.editingSourceRootId === sourceRootId) {
+      resetSourceRootEditor();
+    }
+    state.statusMessage = null;
+    await refreshWorkspace({ keepSelection: true });
+  } catch (error) {
+    state.globalError = error;
+    state.statusMessage = null;
+    renderWorkspace();
+  }
 }
 
 async function onImportPaths(event) {
@@ -2332,14 +3205,14 @@ function onQueryDocumentRangeStartInput(event) {
   state.queryDocumentStartPageDraft = event.target.value.trim();
   state.globalError = null;
   state.statusMessage = null;
-  renderWorkspace();
+  syncQueryDocumentRangeUi();
 }
 
 function onQueryDocumentRangeEndInput(event) {
   state.queryDocumentEndPageDraft = event.target.value.trim();
   state.globalError = null;
   state.statusMessage = null;
-  renderWorkspace();
+  syncQueryDocumentRangeUi();
 }
 
 function resolveLibraryObjectQueryImage(visualUnitId) {
@@ -2527,6 +3400,24 @@ async function onSelectVisualUnit(event) {
   const visualUnitId = event.currentTarget.dataset.visualUnitId;
   await loadVisualUnit(visualUnitId);
 }
+
+let workspacePollInFlight = false;
+
+window.setInterval(() => {
+  if (workspacePollInFlight || !state.selectedLibraryId || hasFocusedEditableControl()) {
+    return;
+  }
+
+  workspacePollInFlight = true;
+  refreshWorkspace({ keepSelection: true })
+    .catch((error) => {
+      state.globalError = error;
+      renderWorkspace();
+    })
+    .finally(() => {
+      workspacePollInFlight = false;
+    });
+}, WORKSPACE_POLL_INTERVAL_MS);
 
 refreshWorkspace({ keepSelection: false }).catch((error) => {
   state.globalError = error;

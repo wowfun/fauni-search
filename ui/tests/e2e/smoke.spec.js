@@ -13,6 +13,7 @@ const fixtureImagePath = path.resolve(
 );
 const invalidQueryUploadPath = path.resolve(__dirname, "../../../README.md");
 const venvPythonPath = path.resolve(__dirname, "../../../.venv/bin/python");
+const workspacePollWaitMs = 3_500;
 
 async function pasteImageIntoQueryTarget(page, imagePath) {
   const target = page.getByTestId("query-image-paste-target");
@@ -202,6 +203,92 @@ page.save(pdf_path, "PDF")
   return { tempDir, framePath, pdfPath, videoPath };
 }
 
+function writeSourceManagementPdf(pdfPath, pageCount) {
+  execFileSync(
+    venvPythonPath,
+    [
+      "-c",
+      `
+from PIL import Image, ImageDraw
+from pathlib import Path
+
+path = Path(${JSON.stringify(pdfPath)})
+pages = []
+lines_by_page = [
+    ["Q2 2025 Financial Report", "Revenue 46 percent", "Cash flow positive"],
+    ["Q2 2025 Financial Report", "Operating margin 18 percent", "Forward guidance unchanged"],
+]
+
+for page_index in range(${JSON.stringify(pageCount)}):
+    page = Image.new("RGB", (960, 720), "white")
+    draw = ImageDraw.Draw(page)
+    draw.rectangle((60, 60, 900, 660), outline="black", width=6)
+    for line_index, line in enumerate(lines_by_page[page_index % len(lines_by_page)]):
+        draw.text((120, 170 + line_index * 90), line, fill="black")
+    pages.append(page)
+
+pages[0].save(path, "PDF", save_all=True, append_images=pages[1:])
+      `,
+    ],
+    { stdio: "pipe" }
+  );
+}
+
+function createTempSourceManagementFixtures() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fauni-search-source-management-"));
+  const imagePath = path.join(tempDir, "chart.png");
+  const addedImagePath = path.join(tempDir, "new-chart.png");
+  const pdfPath = path.join(tempDir, "report.pdf");
+
+  fs.copyFileSync(fixtureImagePath, imagePath);
+  writeSourceManagementPdf(pdfPath, 2);
+
+  return { tempDir, imagePath, addedImagePath, pdfPath };
+}
+
+function sourceRootCard(page, rootPath) {
+  return page.getByTestId("source-root-card").filter({ hasText: rootPath });
+}
+
+function librarySourceCard(page, sourceName) {
+  return page.getByTestId("library-source-card").filter({ hasText: sourceName });
+}
+
+async function latestJobId(page) {
+  if (!(await page.getByTestId("job-card").count())) {
+    return null;
+  }
+  return page.getByTestId("job-card").first().getAttribute("data-job-id");
+}
+
+async function waitForNewLatestJobCompleted(page, previousJobId) {
+  await expect
+    .poll(
+      async () => {
+        if (!(await page.getByTestId("job-card").count())) {
+          return null;
+        }
+        const jobId = await page.getByTestId("job-card").first().getAttribute("data-job-id");
+        return jobId && jobId !== previousJobId ? jobId : null;
+      },
+      {
+        timeout: 2 * 60 * 1000,
+        intervals: [1_000, 2_000, 5_000],
+      }
+    )
+    .toBeTruthy();
+
+  const firstJob = page.getByTestId("job-card").first();
+  await expect
+    .poll(async () => firstJob.getAttribute("data-job-status"), {
+      timeout: 2 * 60 * 1000,
+      intervals: [1_000, 2_000, 5_000],
+    })
+    .toBe("completed");
+
+  return firstJob.getAttribute("data-job-id");
+}
+
 async function setRangeValue(locator, value) {
   await locator.evaluate((element, nextValue) => {
     element.value = String(nextValue);
@@ -235,6 +322,87 @@ test("search before import shows not_ready instead of an empty result", async ({
   await expect(page.getByTestId("search-error-notice")).toBeVisible();
   await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
   await expect(page.getByTestId("search-error-message")).toContainText("active index");
+});
+
+test("workspace refresh preserves focused editable inputs and drafts", async ({ page }) => {
+  const libraryName = `playwright-focus-${Date.now()}`;
+  const secondLibraryName = `playwright-focus-next-${Date.now()}`;
+
+  await page.goto("/");
+  await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+  const libraryNameInput = page.getByTestId("library-name-input");
+  await libraryNameInput.click();
+  await page.keyboard.type(libraryName);
+  await expect(libraryNameInput).toBeFocused();
+  await expect(libraryNameInput).toHaveValue(libraryName);
+
+  await page.waitForTimeout(workspacePollWaitMs);
+  await expect(page.getByTestId("library-name-input")).toBeFocused();
+  await expect(page.getByTestId("library-name-input")).toHaveValue(libraryName);
+
+  await page.getByTestId("create-library-button").click();
+  await expect(page.getByTestId("current-library-name")).toHaveText(libraryName);
+
+  const secondLibraryNameInput = page.getByTestId("library-name-input");
+  await secondLibraryNameInput.click();
+  await page.keyboard.type(secondLibraryName);
+  await expect(page.getByTestId("library-name-input")).toBeFocused();
+  await expect(page.getByTestId("library-name-input")).toHaveValue(secondLibraryName);
+
+  await page.waitForTimeout(workspacePollWaitMs);
+  await expect(page.getByTestId("library-name-input")).toBeFocused();
+  await expect(page.getByTestId("library-name-input")).toHaveValue(secondLibraryName);
+
+  await page.getByTestId("search-mode-document").click();
+  const queryDocumentRangeStart = page.getByTestId("query-document-range-start");
+  await queryDocumentRangeStart.click();
+  await page.keyboard.type("12");
+  await expect(page.getByTestId("query-document-range-start")).toBeFocused();
+  await expect(page.getByTestId("query-document-range-start")).toHaveValue("12");
+
+  await page.waitForTimeout(workspacePollWaitMs);
+  await expect(page.getByTestId("query-document-range-start")).toBeFocused();
+  await expect(page.getByTestId("query-document-range-start")).toHaveValue("12");
+});
+
+test("workspace refresh preserves the open PDF detail preview element", async ({ page }) => {
+  const fixtures = createTempDocumentSearchFixtures();
+  try {
+    await createLibrary(page, "detail-preview-pdf-stability");
+
+    await page
+      .getByTestId("import-paths-input")
+      .fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
+    await page.getByTestId("import-submit-button").click();
+    await waitForFirstJobCompleted(page);
+
+    await page.getByTestId("search-mode-document").click();
+    await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
+    await expect(page.getByTestId("query-document-preview")).toBeVisible();
+
+    await page.getByTestId("search-submit-button").click();
+
+    const documentPageResult = page.locator('[data-testid="result-card"][data-kind="document_page"]').first();
+    await expect(documentPageResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await documentPageResult.locator(".result-select").click();
+
+    const preview = page.locator('iframe[data-testid="visual-preview"]');
+    await expect(preview).toBeVisible();
+
+    const probeValue = `pdf-preview-probe-${Date.now()}`;
+    await preview.evaluate((element, nextProbeValue) => {
+      element.setAttribute("data-preview-probe", nextProbeValue);
+    }, probeValue);
+
+    await page.waitForTimeout(workspacePollWaitMs);
+    await expect(page.locator('iframe[data-testid="visual-preview"]')).toHaveAttribute(
+      "data-preview-probe",
+      probeValue
+    );
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
 });
 
 test("invalid import paths show explicit rejection feedback", async ({ page }) => {
@@ -627,4 +795,139 @@ test("document mode rejects non-pdf query uploads with explicit feedback", async
   await expect(page.getByTestId("search-error-message")).toContainText(
     "Only PDF files are accepted as query documents right now."
   );
+});
+
+test("source management can create edit toggle refresh rescan and filter inventory", async ({ page }) => {
+  const fixtures = createTempSourceManagementFixtures();
+  try {
+    await createLibrary(page, "source-management");
+
+    await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
+    await page.getByTestId("source-root-submit-button").click();
+
+    const rootCard = sourceRootCard(page, fixtures.tempDir);
+    await expect(rootCard).toBeVisible();
+    await expect(rootCard).toContainText("watching");
+    await expect(page.getByTestId("library-refresh-button")).toBeEnabled();
+    await expect(page.getByTestId("library-rescan-button")).toBeEnabled();
+
+    let previousJobId = await latestJobId(page);
+    await rootCard.locator("[data-source-root-refresh-id]").click();
+    await waitForNewLatestJobCompleted(page, previousJobId);
+    await expect(rootCard).toContainText("Last action: refresh");
+
+    const imageCard = librarySourceCard(page, "chart.png");
+    const pdfCard = librarySourceCard(page, "report.pdf");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(2);
+    await expect(imageCard).toContainText("visual units: 1");
+    await expect(pdfCard).toContainText("visual units: 2");
+
+    previousJobId = await latestJobId(page);
+    await rootCard.locator("[data-source-root-rescan-id]").click();
+    await waitForNewLatestJobCompleted(page, previousJobId);
+    await expect(rootCard).toContainText("Last action: rescan");
+
+    await page.getByTestId("source-filter-type").selectOption("pdf");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(1);
+    await expect(pdfCard).toBeVisible();
+
+    await page.getByTestId("source-filter-root").selectOption({ label: fixtures.tempDir });
+    await expect(page.getByTestId("library-source-card")).toHaveCount(1);
+    await expect(pdfCard).toBeVisible();
+
+    await page.getByTestId("source-filter-type").selectOption("");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(2);
+
+    await rootCard.locator("[data-source-root-edit-id]").click();
+    await page.getByTestId("source-root-exclude-globs-input").fill("chart.png");
+    await page.getByTestId("source-root-submit-button").click();
+    await expect(rootCard).toContainText("exclude 1");
+
+    previousJobId = await latestJobId(page);
+    await page.getByTestId("library-refresh-button").click();
+    await waitForNewLatestJobCompleted(page, previousJobId);
+    await expect(rootCard).toContainText("Last action: refresh");
+
+    await page.getByTestId("source-filter-status").selectOption("active");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(1);
+    await expect(pdfCard).toContainText("active");
+
+    await page.getByTestId("source-filter-status").selectOption("out_of_scope");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(1);
+    await expect(imageCard).toContainText("rule_excluded");
+
+    await page.getByTestId("source-filter-status").selectOption("");
+    await rootCard.locator("[data-source-root-toggle-id]").click();
+    await expect(rootCard).toContainText("disabled");
+    await expect(rootCard.locator("[data-source-root-refresh-id]")).toBeDisabled();
+
+    await page.getByTestId("source-filter-status").selectOption("out_of_scope");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(2);
+    await expect(imageCard).toContainText("source_root_disabled");
+    await expect(pdfCard).toContainText("source_root_disabled");
+
+    await page.getByTestId("source-filter-status").selectOption("");
+    await rootCard.locator("[data-source-root-toggle-id]").click();
+    await expect(rootCard).toContainText("watching");
+    await expect(rootCard.locator("[data-source-root-refresh-id]")).toBeEnabled();
+
+    previousJobId = await latestJobId(page);
+    await page.getByTestId("library-rescan-button").click();
+    await waitForNewLatestJobCompleted(page, previousJobId);
+    await expect(rootCard).toContainText("Last action: rescan");
+
+    await page.getByTestId("source-filter-status").selectOption("active");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(1);
+    await expect(pdfCard).toContainText("active");
+
+    await page.getByTestId("source-filter-status").selectOption("out_of_scope");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(1);
+    await expect(imageCard).toContainText("rule_excluded");
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("source management watcher updates inventory for add modify and delete", async ({ page }) => {
+  const fixtures = createTempSourceManagementFixtures();
+  try {
+    await createLibrary(page, "source-management-watcher");
+
+    await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
+    await page.getByTestId("source-root-submit-button").click();
+
+    const rootCard = sourceRootCard(page, fixtures.tempDir);
+    await expect(rootCard).toBeVisible();
+
+    let previousJobId = await latestJobId(page);
+    await rootCard.locator("[data-source-root-refresh-id]").click();
+    await waitForNewLatestJobCompleted(page, previousJobId);
+
+    const pdfCard = librarySourceCard(page, "report.pdf");
+    const addedImageCard = librarySourceCard(page, "new-chart.png");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(2);
+    await expect(pdfCard).toContainText("visual units: 2");
+
+    previousJobId = await latestJobId(page);
+    fs.copyFileSync(fixtureImagePath, fixtures.addedImagePath);
+    await waitForNewLatestJobCompleted(page, previousJobId);
+    await expect(rootCard).toContainText("Last action: refresh");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(3);
+    await expect(addedImageCard).toContainText("visual units: 1");
+
+    previousJobId = await latestJobId(page);
+    writeSourceManagementPdf(fixtures.pdfPath, 1);
+    await waitForNewLatestJobCompleted(page, previousJobId);
+    await expect(pdfCard).toContainText("visual units: 1");
+
+    previousJobId = await latestJobId(page);
+    fs.rmSync(fixtures.addedImagePath, { force: true });
+    await waitForNewLatestJobCompleted(page, previousJobId);
+
+    await page.getByTestId("source-filter-status").selectOption("invalidated");
+    await expect(page.getByTestId("library-source-card")).toHaveCount(1);
+    await expect(addedImageCard).toContainText("not_found");
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
 });
