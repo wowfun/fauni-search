@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## 2026-04-15
+### Added
+- Added the first restart-persistence slice for libraries and active indexes, backed by `${APP_RUNTIME_DIR}/state.sqlite`, with Rust coverage for snapshot roundtrip, restart-time id continuation, missing-index downgrade, and watcher reseeding.
+
+### Changed
+- Switched multivector indexing to stable `index_{library_id}_{index_line}` namespaces with staged Qdrant writes, alias-based activation, `on_disk: true` vectors, app/sidecar batch limits, and explicit non-compatibility for legacy runtime-token, `text_search_*`, and direct physical `index_*` collections.
+- Restored durable library, source, visual-unit, and active-index state at boot while keeping jobs, temporary query assets, and watcher scratch ephemeral; tightened the shared `002/003/006/007/009/010` specs and docs around those restart and alias semantics.
+- Preserved the open detail preview panel across workspace polling so unchanged image, video, and PDF previews no longer remount or reload.
+
+## 2026-04-14
+### Added
+- Added the first runnable `140-library-source-management` slice across specs, app, UI, Playwright, and local smoke tooling, covering source-root CRUD, rule-based inventory, library/root `refresh` and `rescan`, and watcher-driven incremental refresh.
+
+### Changed
+- Extended the library/source model and validation around root ownership, active/inactive source state, out-of-scope invalidation, disabled-root behavior, and watcher debounce queueing.
+- Preserved source-root drafts and focused editable inputs across workspace polling so in-progress UI edits are no longer overwritten or blurred.
+
+## 2026-04-11
+### Added
+- Added the initial `140-library-source-management` topic docs (`spec.md`, `plan.md`, `testing.md`) for library-scoped source roots, source inventory, `refresh` / `rescan`, and watcher-driven incremental refresh.
+
+### Changed
+- Tightened the shared `002/003/008/009` fact sources around source roots, source inventory, and source-management control-plane contracts.
+
 ## 2026-04-10
 ### Added
 - Added the first runnable `130-document-search` slice across the app, sidecar, shared workspace UI, and `scripts/local/smoke-document-search.sh`.
