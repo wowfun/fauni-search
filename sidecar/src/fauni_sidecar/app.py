@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 import uvicorn
@@ -87,6 +88,15 @@ class EmbedRequest(BaseModel):
     provider_context: dict[str, Any] | None = None
     target: dict[str, Any] | None = None
     debug: bool = False
+
+
+def document_embed_batch_limit() -> int:
+    value = os.getenv("INDEX_EMBED_BATCH_ITEMS", "8").strip()
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 8
+    return max(parsed, 1)
 
 
 def create_app(runtime: EmbeddingRuntime | None = None) -> FastAPI:
@@ -182,6 +192,17 @@ def create_app(runtime: EmbeddingRuntime | None = None) -> FastAPI:
                         code="validation_failed",
                         message="document_embedding requires inputs.documents.",
                         details={"field": "inputs.documents"},
+                    )
+                if len(request.inputs.documents) > document_embed_batch_limit():
+                    raise SidecarApiError(
+                        status_code=422,
+                        code="validation_failed",
+                        message="document_embedding batch size exceeds the current runtime limit.",
+                        details={
+                            "field": "inputs.documents",
+                            "limit": document_embed_batch_limit(),
+                            "received": len(request.inputs.documents),
+                        },
                     )
                 data = runtime.embed_documents(
                     [item.model_dump() for item in request.inputs.documents],

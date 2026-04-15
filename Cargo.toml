@@ -7,6 +7,7 @@ edition = "2021"
 axum = { version = "0.7", features = ["json", "multipart"] }
 lopdf = "0.32"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }

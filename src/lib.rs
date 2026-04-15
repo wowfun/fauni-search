@@ -7,12 +7,15 @@ use axum::{
 };
 use lopdf::Document as PdfDocument;
 use reqwest::Client;
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    path::Path as FsPath,
+    future::Future,
+    io,
+    path::{Path as FsPath, PathBuf},
     process::Command,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -20,7 +23,8 @@ use std::{
 use tokio::sync::RwLock;
 
 const MULTIVECTOR_INDEX_LINE: &str = "multivector";
-const QDRANT_MAX_UPSERT_BODY_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_INDEX_EMBED_BATCH_ITEMS: usize = 8;
+const DEFAULT_QDRANT_MAX_UPSERT_BODY_BYTES: usize = 8 * 1024 * 1024;
 const QDRANT_UPSERT_BODY_OVERHEAD_BYTES: usize = br#"{"points":[]}"#.len();
 const SIDECAR_REQUEST_TIMEOUT_SECS: u64 = 600;
 const TEMP_QUERY_ASSET_TTL_MS: u128 = 60 * 60 * 1000;
@@ -28,11 +32,23 @@ const TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS: u64 = 60;
 const VIDEO_SEGMENT_WINDOW_MS: u64 = 8_000;
 const VIDEO_SEGMENT_OVERLAP_MS: u64 = 2_000;
 const APP_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const SOURCE_WATCHER_POLL_INTERVAL_SECS: u64 = 2;
+const SOURCE_WATCHER_DEBOUNCE_MS: u128 = 1_500;
+const STATE_SNAPSHOT_ROW_ID: i64 = 1;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ActiveNamespaceProbeResult {
+    Ready { target_collection: String },
+    Missing,
+    MissingTarget { target_collection: String },
+    LegacyDirectCollection,
+}
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
-pub fn new_state() -> SharedState {
-    Arc::new(RwLock::new(AppState::default()))
+pub async fn new_state() -> Result<SharedState, io::Error> {
+    let state = AppState::load_from_runtime_env().await?;
+    Ok(Arc::new(RwLock::new(state)))
 }
 
 pub fn build_app(state: SharedState) -> Router {
@@ -42,6 +58,33 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/libraries", get(list_libraries).post(create_library))
         .route("/libraries/:library_id", get(get_library))
         .route("/libraries/:library_id/imports", post(import_paths))
+        .route(
+            "/libraries/:library_id/source-roots",
+            get(list_source_roots).post(create_source_root),
+        )
+        .route(
+            "/libraries/:library_id/source-roots/:source_root_id",
+            get(get_source_root)
+                .patch(update_source_root)
+                .delete(delete_source_root),
+        )
+        .route("/libraries/:library_id/sources", get(list_sources))
+        .route(
+            "/libraries/:library_id/refresh",
+            post(refresh_library_sources),
+        )
+        .route(
+            "/libraries/:library_id/rescan",
+            post(rescan_library_sources),
+        )
+        .route(
+            "/libraries/:library_id/source-roots/:source_root_id/refresh",
+            post(refresh_source_root),
+        )
+        .route(
+            "/libraries/:library_id/source-roots/:source_root_id/rescan",
+            post(rescan_source_root),
+        )
         .route(
             "/libraries/:library_id/video-sources",
             get(list_video_sources),
@@ -93,6 +136,7 @@ pub fn build_app(state: SharedState) -> Router {
 }
 
 pub fn spawn_runtime_maintenance(state: SharedState) {
+    let reaper_state = state.clone();
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(Duration::from_secs(TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS));
@@ -102,7 +146,7 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
         loop {
             interval.tick().await;
             let summary = {
-                let mut state = state.write().await;
+                let mut state = reaper_state.write().await;
                 state.prune_temp_query_assets()
             };
 
@@ -115,14 +159,44 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
             }
         }
     });
+
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(SOURCE_WATCHER_POLL_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+
+            let queued = {
+                let mut state = state.write().await;
+                state.poll_source_root_watchers()
+            };
+
+            for queued_action in queued {
+                let background_state = state.clone();
+                tokio::spawn(async move {
+                    run_source_action_job(
+                        background_state,
+                        queued_action.job_id,
+                        queued_action.plan,
+                    )
+                    .await;
+                });
+            }
+        }
+    });
 }
 
+#[derive(Clone)]
 pub struct AppState {
-    runtime_token: String,
+    durable_store_path: Option<PathBuf>,
     next_library_seq: u64,
     next_job_seq: u64,
     next_visual_unit_seq: u64,
     next_source_seq: u64,
+    next_source_root_seq: u64,
     next_temp_asset_seq: u64,
     libraries: BTreeMap<String, LibraryRecord>,
     library_order: Vec<String>,
@@ -134,11 +208,12 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            runtime_token: runtime_token(),
+            durable_store_path: None,
             next_library_seq: 0,
             next_job_seq: 0,
             next_visual_unit_seq: 0,
             next_source_seq: 0,
+            next_source_root_seq: 0,
             next_temp_asset_seq: 0,
             libraries: BTreeMap::new(),
             library_order: Vec::new(),
@@ -150,6 +225,330 @@ impl Default for AppState {
 }
 
 impl AppState {
+    async fn load_from_runtime_env() -> Result<Self, io::Error> {
+        let durable_store_path = env::var("APP_RUNTIME_DIR")
+            .ok()
+            .map(|runtime_dir| PathBuf::from(runtime_dir).join("state.sqlite"));
+        Self::load_from_durable_store_path_with_probe(durable_store_path, |namespace_name| {
+            let namespace_name = namespace_name.to_string();
+            async move { probe_active_qdrant_namespace(&namespace_name).await }
+        })
+        .await
+    }
+
+    async fn load_from_durable_store_path_with_probe<F, Fut>(
+        durable_store_path: Option<PathBuf>,
+        probe_collection: F,
+    ) -> Result<Self, io::Error>
+    where
+        F: FnMut(&str) -> Fut,
+        Fut: Future<Output = Result<ActiveNamespaceProbeResult, String>>,
+    {
+        let mut state = match durable_store_path.as_ref() {
+            Some(path) => match load_durable_state_snapshot(path)? {
+                Some(snapshot) => Self::from_durable_snapshot(snapshot, durable_store_path.clone()),
+                None => Self::with_durable_store_path(durable_store_path.clone()),
+            },
+            None => Self::with_durable_store_path(None),
+        };
+
+        state.clear_ephemeral_restart_state();
+        state.reseed_source_root_runtime_fields();
+        state
+            .reconcile_active_index_lines_on_boot_with_probe(probe_collection)
+            .await;
+
+        Ok(state)
+    }
+
+    fn with_durable_store_path(durable_store_path: Option<PathBuf>) -> Self {
+        Self {
+            durable_store_path,
+            ..Self::default()
+        }
+    }
+
+    fn from_durable_snapshot(
+        snapshot: DurableAppStateSnapshot,
+        durable_store_path: Option<PathBuf>,
+    ) -> Self {
+        let mut state = Self::with_durable_store_path(durable_store_path);
+        state.apply_durable_snapshot(snapshot);
+        state
+    }
+
+    fn durable_snapshot(&self) -> DurableAppStateSnapshot {
+        DurableAppStateSnapshot {
+            version: 1,
+            library_order: self.library_order.clone(),
+            libraries: self
+                .libraries
+                .iter()
+                .map(|(library_id, library)| {
+                    (
+                        library_id.clone(),
+                        DurableLibraryRecord {
+                            id: library.id.clone(),
+                            name: library.name.clone(),
+                            config: library.config.clone(),
+                            source_roots: library
+                                .source_roots
+                                .iter()
+                                .map(|(source_root_id, root)| {
+                                    (
+                                        source_root_id.clone(),
+                                        DurableSourceRootRecord {
+                                            id: root.id.clone(),
+                                            root_path: root.root_path.clone(),
+                                            enabled: root.enabled,
+                                            rules: root.rules.clone(),
+                                        },
+                                    )
+                                })
+                                .collect(),
+                            source_root_order: library.source_root_order.clone(),
+                            sources: library.sources.clone(),
+                            source_order: library.source_order.clone(),
+                            visual_units: library.visual_units.clone(),
+                            visual_unit_order: library.visual_unit_order.clone(),
+                            active_index_lines: library.active_index_lines.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn apply_durable_snapshot(&mut self, snapshot: DurableAppStateSnapshot) {
+        self.library_order = snapshot.library_order;
+        self.libraries = snapshot
+            .libraries
+            .into_iter()
+            .map(|(library_id, library)| {
+                (
+                    library_id,
+                    LibraryRecord {
+                        id: library.id.clone(),
+                        name: library.name,
+                        collection_name: stable_collection_name(
+                            &library.id,
+                            MULTIVECTOR_INDEX_LINE,
+                        ),
+                        config: library.config,
+                        source_roots: library
+                            .source_roots
+                            .into_iter()
+                            .map(|(source_root_id, root)| {
+                                (
+                                    source_root_id,
+                                    SourceRootRecord {
+                                        id: root.id,
+                                        root_path: root.root_path,
+                                        enabled: root.enabled,
+                                        status: "disabled".to_string(),
+                                        watch_state: "disabled".to_string(),
+                                        rules: root.rules,
+                                        coverage_summary: SourceRootCoverageSummary::default(),
+                                        observed_entries: BTreeMap::new(),
+                                        pending_watch_paths: BTreeSet::new(),
+                                        pending_watch_deadline_ms: None,
+                                        pending_watch_error: None,
+                                        last_action: None,
+                                    },
+                                )
+                            })
+                            .collect(),
+                        source_root_order: library.source_root_order,
+                        sources: library.sources,
+                        source_order: library.source_order,
+                        visual_units: library.visual_units,
+                        visual_unit_order: library.visual_unit_order,
+                        latest_job_id: None,
+                        active_index_lines: library.active_index_lines,
+                    },
+                )
+            })
+            .collect();
+        self.rebuild_durable_sequences();
+    }
+
+    fn rebuild_durable_sequences(&mut self) {
+        self.next_library_seq = max_id_seq(self.libraries.keys(), "lib_");
+        self.next_source_root_seq = self
+            .libraries
+            .values()
+            .flat_map(|library| library.source_roots.keys())
+            .map(|id| parse_id_seq(id, "root_"))
+            .max()
+            .unwrap_or(0);
+        self.next_source_seq = self
+            .libraries
+            .values()
+            .flat_map(|library| library.sources.keys())
+            .map(|id| parse_id_seq(id, "src_"))
+            .max()
+            .unwrap_or(0);
+        self.next_visual_unit_seq = self
+            .libraries
+            .values()
+            .flat_map(|library| library.visual_units.keys())
+            .map(|id| parse_id_seq(id, "vu_"))
+            .max()
+            .unwrap_or(0);
+    }
+
+    fn clear_ephemeral_restart_state(&mut self) {
+        self.next_job_seq = 0;
+        self.next_temp_asset_seq = 0;
+        self.jobs.clear();
+        self.job_order.clear();
+        self.temp_query_assets.clear();
+        for library in self.libraries.values_mut() {
+            library.latest_job_id = None;
+            for root in library.source_roots.values_mut() {
+                root.last_action = None;
+            }
+        }
+    }
+
+    fn reseed_source_root_runtime_fields(&mut self) {
+        for library in self.libraries.values_mut() {
+            let source_root_ids = library.source_root_order.clone();
+            for source_root_id in source_root_ids {
+                let (active_source_count, inactive_source_count) =
+                    count_sources_for_root(library, &source_root_id);
+                let Some(root) = library.source_roots.get_mut(&source_root_id) else {
+                    continue;
+                };
+                let scan = if root.enabled {
+                    scan_source_root_directory(&root.root_path)
+                } else {
+                    SourceRootScanResult::disabled()
+                };
+                root.status = source_root_status_from_scan(root.enabled, &scan);
+                root.watch_state = source_root_watch_state(root.enabled, &scan, false);
+                root.coverage_summary = SourceRootCoverageSummary {
+                    observed_file_count: scan.observed_entries.len(),
+                    matched_file_count: count_matched_observed_entries(
+                        &scan.observed_entries,
+                        &root.rules,
+                    ),
+                    active_source_count,
+                    inactive_source_count,
+                    last_scan_at_ms: None,
+                };
+                root.observed_entries = scan.observed_entries;
+                root.pending_watch_paths.clear();
+                root.pending_watch_deadline_ms = None;
+                root.pending_watch_error = scan.error;
+            }
+        }
+    }
+
+    fn persist_durable_state(&self) -> Result<(), String> {
+        let Some(path) = self.durable_store_path.as_ref() else {
+            return Ok(());
+        };
+        write_durable_state_snapshot(path, &self.durable_snapshot())
+    }
+
+    fn commit_durable_api<T, F>(&mut self, mutation: F) -> Result<T, ApiError>
+    where
+        F: FnOnce(&mut Self) -> Result<T, ApiError>,
+    {
+        let before = self.clone();
+        let value = match mutation(self) {
+            Ok(value) => value,
+            Err(error) => {
+                *self = before;
+                return Err(error);
+            }
+        };
+
+        if let Err(message) = self.persist_durable_state() {
+            *self = before;
+            return Err(ApiError::runtime_unavailable(
+                format!("Failed to persist durable app state: {message}"),
+                Some(json!({ "store": "state.sqlite" })),
+            ));
+        }
+
+        Ok(value)
+    }
+
+    async fn reconcile_active_index_lines_on_boot_with_probe<F, Fut>(
+        &mut self,
+        mut probe_collection: F,
+    ) where
+        F: FnMut(&str) -> Fut,
+        Fut: Future<Output = Result<ActiveNamespaceProbeResult, String>>,
+    {
+        let mut changed = false;
+        let library_ids = self.library_order.clone();
+        for library_id in library_ids {
+            let active_index_lines = self
+                .libraries
+                .get(&library_id)
+                .map(|library| {
+                    library
+                        .active_index_lines
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            for index_line in active_index_lines {
+                let collection_name = stable_collection_name(&library_id, &index_line);
+                match probe_collection(&collection_name).await {
+                    Ok(ActiveNamespaceProbeResult::Ready { .. }) => {}
+                    Ok(ActiveNamespaceProbeResult::Missing) => {
+                        if let Some(library) = self.libraries.get_mut(&library_id) {
+                            changed |= library.active_index_lines.remove(&index_line);
+                        }
+                    }
+                    Ok(ActiveNamespaceProbeResult::MissingTarget { target_collection }) => {
+                        tracing::warn!(
+                            library_id = %library_id,
+                            index_line = %index_line,
+                            target_collection = %target_collection,
+                            "Active Qdrant namespace alias points to a missing collection during restart restore"
+                        );
+                        if let Some(library) = self.libraries.get_mut(&library_id) {
+                            changed |= library.active_index_lines.remove(&index_line);
+                        }
+                    }
+                    Ok(ActiveNamespaceProbeResult::LegacyDirectCollection) => {
+                        tracing::warn!(
+                            library_id = %library_id,
+                            index_line = %index_line,
+                            "Direct Qdrant collection collides with the active alias namespace during restart restore; manual cleanup is required"
+                        );
+                        if let Some(library) = self.libraries.get_mut(&library_id) {
+                            changed |= library.active_index_lines.remove(&index_line);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            library_id = %library_id,
+                            index_line = %index_line,
+                            "Failed to probe Qdrant collection during restart restore: {error}"
+                        );
+                        if let Some(library) = self.libraries.get_mut(&library_id) {
+                            changed |= library.active_index_lines.remove(&index_line);
+                        }
+                    }
+                }
+            }
+        }
+
+        if changed {
+            if let Err(error) = self.persist_durable_state() {
+                tracing::warn!("Failed to persist boot-time active index reconciliation: {error}");
+            }
+        }
+    }
+
     fn list_libraries(&self) -> LibrariesListData {
         let libraries = self
             .library_order
@@ -170,6 +569,486 @@ impl AppState {
         Ok(self.library_snapshot(library))
     }
 
+    fn list_source_roots(&self, library_id: &str) -> Result<SourceRootsListData, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        let source_roots = library
+            .source_root_order
+            .iter()
+            .filter_map(|source_root_id| library.source_roots.get(source_root_id))
+            .map(Self::source_root_snapshot)
+            .collect();
+
+        Ok(SourceRootsListData { source_roots })
+    }
+
+    fn get_source_root(
+        &self,
+        library_id: &str,
+        source_root_id: &str,
+    ) -> Result<SourceRootDetailData, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        let source_root = library
+            .source_roots
+            .get(source_root_id)
+            .ok_or_else(|| ApiError::not_found("Source root was not found."))?;
+
+        Ok(SourceRootDetailData {
+            source_root: Self::source_root_snapshot(source_root),
+        })
+    }
+
+    fn create_source_root(
+        &mut self,
+        library_id: &str,
+        request: CreateSourceRootRequest,
+    ) -> Result<SourceRootSnapshot, ApiError> {
+        self.commit_durable_api(|state| {
+            if !state.libraries.contains_key(library_id) {
+                return Err(ApiError::not_found("Library was not found."));
+            }
+
+            let root_path = normalize_source_root_path(&request.root_path)?;
+            let rules = normalize_source_root_rules(request.rules.unwrap_or_default());
+            let enabled = request.enabled.unwrap_or(true);
+            let root_id = state.next_source_root_id();
+            let scan = if enabled {
+                scan_source_root_directory(&root_path)
+            } else {
+                SourceRootScanResult::disabled()
+            };
+            let coverage_summary = SourceRootCoverageSummary {
+                observed_file_count: scan.observed_entries.len(),
+                matched_file_count: count_matched_observed_entries(&scan.observed_entries, &rules),
+                active_source_count: 0,
+                inactive_source_count: 0,
+                last_scan_at_ms: None,
+            };
+            let record = SourceRootRecord {
+                id: root_id.clone(),
+                root_path,
+                enabled,
+                status: source_root_status_from_scan(enabled, &scan),
+                watch_state: source_root_watch_state(enabled, &scan, false),
+                rules,
+                coverage_summary,
+                observed_entries: scan.observed_entries,
+                pending_watch_paths: BTreeSet::new(),
+                pending_watch_deadline_ms: None,
+                pending_watch_error: scan.error,
+                last_action: None,
+            };
+
+            let snapshot = Self::source_root_snapshot(&record);
+            let library = state
+                .libraries
+                .get_mut(library_id)
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+            library.source_root_order.push(root_id.clone());
+            library.source_roots.insert(root_id, record);
+            Ok(snapshot)
+        })
+    }
+
+    fn update_source_root(
+        &mut self,
+        library_id: &str,
+        source_root_id: &str,
+        request: UpdateSourceRootRequest,
+    ) -> Result<SourceRootSnapshot, ApiError> {
+        self.commit_durable_api(|state| {
+            let library = state
+                .libraries
+                .get_mut(library_id)
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+            if !library.source_roots.contains_key(source_root_id) {
+                return Err(ApiError::not_found("Source root was not found."));
+            }
+
+            if let Some(false) = request.enabled {
+                mark_source_root_sources_state(
+                    library,
+                    source_root_id,
+                    "out_of_scope",
+                    Some("source_root_disabled".to_string()),
+                );
+            }
+
+            {
+                let root = library
+                    .source_roots
+                    .get_mut(source_root_id)
+                    .ok_or_else(|| ApiError::not_found("Source root was not found."))?;
+
+                if let Some(root_path) = request.root_path.as_ref() {
+                    root.root_path = normalize_source_root_path(root_path)?;
+                    root.pending_watch_paths.clear();
+                    root.pending_watch_deadline_ms = None;
+                }
+                if let Some(enabled) = request.enabled {
+                    root.enabled = enabled;
+                }
+                if let Some(rules) = request.rules {
+                    root.rules = normalize_source_root_rules(rules);
+                }
+
+                let scan = if root.enabled {
+                    scan_source_root_directory(&root.root_path)
+                } else {
+                    SourceRootScanResult::disabled()
+                };
+                root.status = source_root_status_from_scan(root.enabled, &scan);
+                root.watch_state = source_root_watch_state(root.enabled, &scan, false);
+                root.pending_watch_error = scan.error.clone();
+                root.observed_entries = scan.observed_entries;
+                root.coverage_summary.observed_file_count = root.observed_entries.len();
+                root.coverage_summary.matched_file_count =
+                    count_matched_observed_entries(&root.observed_entries, &root.rules);
+            }
+
+            let (active_source_count, inactive_source_count) =
+                count_sources_for_root(library, source_root_id);
+            let root = library
+                .source_roots
+                .get_mut(source_root_id)
+                .ok_or_else(|| ApiError::not_found("Source root was not found."))?;
+            root.coverage_summary.active_source_count = active_source_count;
+            root.coverage_summary.inactive_source_count = inactive_source_count;
+
+            Ok(Self::source_root_snapshot(root))
+        })
+    }
+
+    fn delete_source_root(
+        &mut self,
+        library_id: &str,
+        source_root_id: &str,
+    ) -> Result<SourceRootSnapshot, ApiError> {
+        self.commit_durable_api(|state| {
+            let library = state
+                .libraries
+                .get_mut(library_id)
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+            if !library.source_roots.contains_key(source_root_id) {
+                return Err(ApiError::not_found("Source root was not found."));
+            }
+
+            mark_source_root_sources_state(
+                library,
+                source_root_id,
+                "out_of_scope",
+                Some("source_root_deleted".to_string()),
+            );
+
+            let root = library
+                .source_roots
+                .remove(source_root_id)
+                .ok_or_else(|| ApiError::not_found("Source root was not found."))?;
+            library
+                .source_root_order
+                .retain(|candidate| candidate != source_root_id);
+            Ok(Self::source_root_snapshot(&root))
+        })
+    }
+
+    fn list_sources(
+        &self,
+        library_id: &str,
+        query: SourcesQuery,
+    ) -> Result<SourcesListData, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        let sources = library
+            .source_order
+            .iter()
+            .filter_map(|source_id| library.sources.get(source_id))
+            .filter(|source| {
+                query
+                    .source_root_id
+                    .as_ref()
+                    .map(|expected| source.source_root_id.as_ref() == Some(expected))
+                    .unwrap_or(true)
+                    && query
+                        .source_type
+                        .as_ref()
+                        .map(|expected| &source.source_type == expected)
+                        .unwrap_or(true)
+                    && query
+                        .status
+                        .as_ref()
+                        .map(|expected| &source.status == expected)
+                        .unwrap_or(true)
+            })
+            .map(|source| Self::source_inventory_item(library, source))
+            .collect();
+
+        Ok(SourcesListData { sources })
+    }
+
+    fn queue_source_action(
+        &mut self,
+        library_id: &str,
+        scope: SourceActionScope,
+        action: SourceActionKind,
+        trigger: SourceActionTrigger,
+        changed_paths_by_root: BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<(SourceActionData, Option<QueuedSourceAction>), ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        let mut accepted = Vec::new();
+        let mut rejected = Vec::new();
+        let mut accepted_root_ids = Vec::new();
+
+        match &scope {
+            SourceActionScope::Library => {
+                for source_root_id in &library.source_root_order {
+                    let root = library
+                        .source_roots
+                        .get(source_root_id)
+                        .expect("source_root_order should reference a valid source root");
+                    if !root.enabled {
+                        rejected.push(SourceActionRejectedItem {
+                            source_root_id: Some(root.id.clone()),
+                            root_path: Some(root.root_path.clone()),
+                            reason_code: "not_enabled".to_string(),
+                            message: "Source root is disabled.".to_string(),
+                        });
+                        continue;
+                    }
+                    if source_root_action_in_flight(root) {
+                        rejected.push(SourceActionRejectedItem {
+                            source_root_id: Some(root.id.clone()),
+                            root_path: Some(root.root_path.clone()),
+                            reason_code: "job_in_progress".to_string(),
+                            message:
+                                "Source root already has an in-flight source-management action."
+                                    .to_string(),
+                        });
+                        continue;
+                    }
+                    accepted_root_ids.push(root.id.clone());
+                    accepted.push(SourceActionAcceptedItem {
+                        source_root_id: root.id.clone(),
+                        root_path: root.root_path.clone(),
+                        action: action.as_str().to_string(),
+                    });
+                }
+            }
+            SourceActionScope::SourceRoot(source_root_id) => {
+                let root = library
+                    .source_roots
+                    .get(source_root_id)
+                    .ok_or_else(|| ApiError::not_found("Source root was not found."))?;
+                if !root.enabled {
+                    return Ok((
+                        SourceActionData {
+                            accepted,
+                            rejected: vec![SourceActionRejectedItem {
+                                source_root_id: Some(root.id.clone()),
+                                root_path: Some(root.root_path.clone()),
+                                reason_code: "not_enabled".to_string(),
+                                message: "Source root is disabled.".to_string(),
+                            }],
+                            job_handle: None,
+                            job: None,
+                        },
+                        None,
+                    ));
+                }
+                if source_root_action_in_flight(root) {
+                    return Ok((
+                        SourceActionData {
+                            accepted,
+                            rejected: vec![SourceActionRejectedItem {
+                                source_root_id: Some(root.id.clone()),
+                                root_path: Some(root.root_path.clone()),
+                                reason_code: "job_in_progress".to_string(),
+                                message:
+                                    "Source root already has an in-flight source-management action."
+                                        .to_string(),
+                            }],
+                            job_handle: None,
+                            job: None,
+                        },
+                        None,
+                    ));
+                }
+                accepted_root_ids.push(root.id.clone());
+                accepted.push(SourceActionAcceptedItem {
+                    source_root_id: root.id.clone(),
+                    root_path: root.root_path.clone(),
+                    action: action.as_str().to_string(),
+                });
+            }
+        }
+
+        if accepted_root_ids.is_empty() {
+            return Ok((
+                SourceActionData {
+                    accepted,
+                    rejected,
+                    job_handle: None,
+                    job: None,
+                },
+                None,
+            ));
+        }
+
+        let job_id = self.next_job_id();
+        let snapshot = JobSnapshot {
+            job_id: job_id.clone(),
+            library_id: library_id.to_string(),
+            kind: action.as_str().to_string(),
+            status: "queued".to_string(),
+            phase: "intake".to_string(),
+            progress: JobProgress {
+                completed: 0,
+                total: accepted_root_ids.len(),
+                unit: "source_root".to_string(),
+            },
+            cancelable: false,
+            current_attempt: JobAttemptSnapshot {
+                attempt: 1,
+                status: "queued".to_string(),
+                summary: format!(
+                    "Queued {} across {} source root(s) via {} trigger.",
+                    action.as_str(),
+                    accepted_root_ids.len(),
+                    trigger.as_str(),
+                ),
+            },
+        };
+
+        let plan = SourceActionPlan {
+            library_id: library_id.to_string(),
+            action,
+            target_root_ids: accepted_root_ids.clone(),
+            changed_paths_by_root,
+        };
+
+        let library = self
+            .libraries
+            .get_mut(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        for source_root_id in &accepted_root_ids {
+            if let Some(root) = library.source_roots.get_mut(source_root_id) {
+                root.watch_state = queued_watch_state_for_action(action).to_string();
+            }
+        }
+        library.latest_job_id = Some(job_id.clone());
+
+        self.jobs.insert(
+            job_id.clone(),
+            JobRecord {
+                snapshot: snapshot.clone(),
+            },
+        );
+        self.job_order.push(job_id.clone());
+
+        Ok((
+            SourceActionData {
+                accepted,
+                rejected,
+                job_handle: Some(job_id.clone()),
+                job: Some(snapshot),
+            },
+            Some(QueuedSourceAction { job_id, plan }),
+        ))
+    }
+
+    fn poll_source_root_watchers(&mut self) -> Vec<QueuedSourceAction> {
+        let now = current_unix_ms();
+        let library_ids = self.library_order.clone();
+        let mut due_actions = Vec::new();
+
+        for library_id in &library_ids {
+            let Some(library) = self.libraries.get_mut(library_id) else {
+                continue;
+            };
+            let source_root_ids = library.source_root_order.clone();
+
+            for source_root_id in source_root_ids {
+                let Some(root) = library.source_roots.get_mut(&source_root_id) else {
+                    continue;
+                };
+                if !root.enabled {
+                    root.status = "disabled".to_string();
+                    root.watch_state = "disabled".to_string();
+                    continue;
+                }
+                let watcher_refresh_pending = root.watch_state == "queued_refresh"
+                    && root.pending_watch_deadline_ms.is_some()
+                    && !root.pending_watch_paths.is_empty();
+                if source_root_action_in_flight(root) && !watcher_refresh_pending {
+                    continue;
+                }
+
+                let scan = scan_source_root_directory(&root.root_path);
+                let changed_paths =
+                    diff_observed_entries(&root.observed_entries, &scan.observed_entries);
+                if !changed_paths.is_empty() {
+                    root.pending_watch_paths.extend(changed_paths);
+                    if root.pending_watch_deadline_ms.is_none() {
+                        root.pending_watch_deadline_ms =
+                            Some(now.saturating_add(SOURCE_WATCHER_DEBOUNCE_MS));
+                    }
+                }
+                root.observed_entries = scan.observed_entries.clone();
+                root.pending_watch_error = scan.error.clone();
+                root.status = source_root_status_from_scan(true, &scan);
+                root.watch_state = if root.pending_watch_paths.is_empty() {
+                    source_root_watch_state(true, &scan, false)
+                } else {
+                    "queued_refresh".to_string()
+                };
+
+                if root
+                    .pending_watch_deadline_ms
+                    .map(|deadline| now >= deadline)
+                    .unwrap_or(false)
+                    && !root.pending_watch_paths.is_empty()
+                {
+                    root.watch_state = source_root_watch_state(true, &scan, false);
+                    due_actions.push((
+                        library_id.clone(),
+                        source_root_id.clone(),
+                        std::mem::take(&mut root.pending_watch_paths),
+                    ));
+                    root.pending_watch_deadline_ms = None;
+                }
+            }
+        }
+
+        let mut queued = Vec::new();
+        for (library_id, source_root_id, changed_paths) in due_actions {
+            let mut changed_paths_by_root = BTreeMap::new();
+            changed_paths_by_root.insert(source_root_id.clone(), changed_paths);
+            if let Ok((_, Some(queued_action))) = self.queue_source_action(
+                &library_id,
+                SourceActionScope::SourceRoot(source_root_id),
+                SourceActionKind::Refresh,
+                SourceActionTrigger::Watcher,
+                changed_paths_by_root,
+            ) {
+                queued.push(queued_action);
+            }
+        }
+
+        queued
+    }
+
     fn list_video_sources(&self, library_id: &str) -> Result<VideoSourcesData, ApiError> {
         let library = self
             .libraries
@@ -180,7 +1059,7 @@ impl AppState {
             .source_order
             .iter()
             .filter_map(|source_id| library.sources.get(source_id))
-            .filter(|source| source.source_type == "video")
+            .filter(|source| source.source_type == "video" && source.status == "active")
             .map(|source| {
                 Ok(VideoSourceSummary {
                     source_id: source.id.clone(),
@@ -199,51 +1078,52 @@ impl AppState {
         &mut self,
         request: CreateLibraryRequest,
     ) -> Result<LibrarySnapshot, ApiError> {
-        let name = request.name.trim();
-        if name.is_empty() {
-            return Err(ApiError::validation_failed(
-                "Library name must not be empty.",
-                Some(json!({ "field": "name" })),
-            ));
-        }
+        self.commit_durable_api(|state| {
+            let name = request.name.trim();
+            if name.is_empty() {
+                return Err(ApiError::validation_failed(
+                    "Library name must not be empty.",
+                    Some(json!({ "field": "name" })),
+                ));
+            }
 
-        let enabled_index_lines =
-            normalize_index_lines(request.config.map(|config| config.enabled_index_lines));
+            let enabled_index_lines =
+                normalize_index_lines(request.config.map(|config| config.enabled_index_lines));
 
-        if enabled_index_lines != [MULTIVECTOR_INDEX_LINE.to_string()] {
-            return Err(ApiError::validation_failed(
-                "Current 100-text-search implementation requires config.enabled_index_lines to be exactly [\"multivector\"].",
-                Some(json!({
-                    "field": "config.enabled_index_lines",
-                    "expected": [MULTIVECTOR_INDEX_LINE],
-                    "received": enabled_index_lines,
-                })),
-            ));
-        }
+            if enabled_index_lines != [MULTIVECTOR_INDEX_LINE.to_string()] {
+                return Err(ApiError::validation_failed(
+                    "Current 100-text-search implementation requires config.enabled_index_lines to be exactly [\"multivector\"].",
+                    Some(json!({
+                        "field": "config.enabled_index_lines",
+                        "expected": [MULTIVECTOR_INDEX_LINE],
+                        "received": enabled_index_lines,
+                    })),
+                ));
+            }
 
-        let library_id = self.next_library_id();
-        let record = LibraryRecord {
-            id: library_id.clone(),
-            name: name.to_string(),
-            collection_name: format!(
-                "text_search_{}_{}_{}",
-                self.runtime_token, library_id, MULTIVECTOR_INDEX_LINE
-            ),
-            config: LibraryConfigPayload {
-                enabled_index_lines,
-            },
-            sources: BTreeMap::new(),
-            source_order: Vec::new(),
-            visual_units: BTreeMap::new(),
-            visual_unit_order: Vec::new(),
-            latest_job_id: None,
-            active_index_lines: BTreeSet::new(),
-        };
+            let library_id = state.next_library_id();
+            let record = LibraryRecord {
+                id: library_id.clone(),
+                name: name.to_string(),
+                collection_name: stable_collection_name(&library_id, MULTIVECTOR_INDEX_LINE),
+                config: LibraryConfigPayload {
+                    enabled_index_lines,
+                },
+                source_roots: BTreeMap::new(),
+                source_root_order: Vec::new(),
+                sources: BTreeMap::new(),
+                source_order: Vec::new(),
+                visual_units: BTreeMap::new(),
+                visual_unit_order: Vec::new(),
+                latest_job_id: None,
+                active_index_lines: BTreeSet::new(),
+            };
 
-        let snapshot = self.library_snapshot(&record);
-        self.library_order.push(library_id.clone());
-        self.libraries.insert(library_id, record);
-        Ok(snapshot)
+            let snapshot = state.library_snapshot(&record);
+            state.library_order.push(library_id.clone());
+            state.libraries.insert(library_id, record);
+            Ok(snapshot)
+        })
     }
 
     fn prepare_import(
@@ -251,10 +1131,15 @@ impl AppState {
         library_id: &str,
         request: ImportPathsRequest,
     ) -> Result<PreparedImport, ApiError> {
-        let collection_name = self
+        let (collection_name, had_existing_visual_units) = self
             .libraries
             .get(library_id)
-            .map(|library| library.collection_name.clone())
+            .map(|library| {
+                (
+                    library.collection_name.clone(),
+                    !library.visual_units.is_empty(),
+                )
+            })
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
 
         let mut accepted = Vec::new();
@@ -265,8 +1150,11 @@ impl AppState {
         for original in request.paths {
             match self.inspect_import_path(&original) {
                 Ok(classification) => {
-                    let source = self.source_record_from_classification(&classification);
                     let visual_units = self.new_visual_units_from_classification(&classification);
+                    let source = self.source_record_from_classification(
+                        &classification,
+                        visual_units.iter().map(|item| item.id.clone()).collect(),
+                    );
                     let visual_unit_summaries =
                         visual_units.iter().map(VisualUnitRecord::summary).collect();
                     new_sources.push(source);
@@ -298,6 +1186,7 @@ impl AppState {
         Ok(PreparedImport {
             library_id: library_id.to_string(),
             collection_name,
+            had_existing_visual_units,
             accepted,
             rejected,
             sources: new_sources,
@@ -383,6 +1272,14 @@ impl AppState {
         prepared: PreparedImport,
         outcome: ImportJobOutcome,
     ) -> Result<(), String> {
+        if !self.jobs.contains_key(job_id) {
+            return Err("Job was not found.".to_string());
+        }
+        if !self.libraries.contains_key(&prepared.library_id) {
+            return Err("Library was not found.".to_string());
+        }
+
+        let before = self.clone();
         let library = self
             .libraries
             .get_mut(&prepared.library_id)
@@ -404,6 +1301,404 @@ impl AppState {
             library
                 .active_index_lines
                 .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        }
+
+        if let Err(message) = self.persist_durable_state() {
+            *self = before;
+            if let Some(job) = self.jobs.get_mut(job_id) {
+                job.snapshot.status = "failed".to_string();
+                job.snapshot.phase = "failed".to_string();
+                job.snapshot.current_attempt.status = "failed".to_string();
+                job.snapshot.current_attempt.summary =
+                    format!("Persisting durable app state failed: {message}");
+            }
+            return Err(format!("Failed to persist durable app state: {message}"));
+        }
+
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or_else(|| "Job was not found.".to_string())?;
+        job.snapshot.status = outcome.status.to_string();
+        job.snapshot.phase = outcome.phase.to_string();
+        job.snapshot.progress.completed = outcome.completed.min(job.snapshot.progress.total);
+        job.snapshot.current_attempt.status = outcome.status.to_string();
+        job.snapshot.current_attempt.summary = outcome.summary;
+
+        Ok(())
+    }
+
+    fn mark_source_action_running(&mut self, plan: &SourceActionPlan, job_id: &str) {
+        self.update_job_snapshot(
+            job_id,
+            "running",
+            "scan",
+            0,
+            format!(
+                "{} is evaluating {} source root(s).",
+                plan.action.as_str(),
+                plan.target_root_ids.len()
+            ),
+        );
+
+        if let Some(library) = self.libraries.get_mut(&plan.library_id) {
+            for source_root_id in &plan.target_root_ids {
+                if let Some(root) = library.source_roots.get_mut(source_root_id) {
+                    root.watch_state = running_watch_state_for_action(plan.action).to_string();
+                }
+            }
+        }
+    }
+
+    fn prepare_source_action_execution(
+        &mut self,
+        plan: &SourceActionPlan,
+    ) -> Result<PreparedSourceAction, String> {
+        let (collection_name, had_existing_visual_units, can_rebuild_from_scratch) = self
+            .libraries
+            .get(&plan.library_id)
+            .map(|library| {
+                (
+                    library.collection_name.clone(),
+                    !library.visual_units.is_empty(),
+                    plan.action.is_rescan()
+                        && plan.target_root_ids.len() == library.source_root_order.len(),
+                )
+            })
+            .ok_or_else(|| "Library was not found.".to_string())?;
+
+        let mut root_updates = Vec::new();
+        let mut source_mutations = Vec::new();
+        let mut stale_point_ids = Vec::new();
+        let mut visual_units_to_index = Vec::new();
+        let mut summary = SourceActionSummary::default();
+
+        for source_root_id in &plan.target_root_ids {
+            let (root, existing_sources, existing_point_ids_by_source) = {
+                let library = self
+                    .libraries
+                    .get(&plan.library_id)
+                    .ok_or_else(|| "Library was not found.".to_string())?;
+                let root = library
+                    .source_roots
+                    .get(source_root_id)
+                    .cloned()
+                    .ok_or_else(|| format!("Source root {source_root_id} was not found."))?;
+                let existing_sources = library
+                    .sources
+                    .values()
+                    .filter(|source| {
+                        source.source_root_id.as_deref() == Some(source_root_id.as_str())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let existing_point_ids_by_source = existing_sources
+                    .iter()
+                    .map(|source| {
+                        let point_ids = source
+                            .visual_unit_ids
+                            .iter()
+                            .filter_map(|visual_unit_id| {
+                                library
+                                    .visual_units
+                                    .get(visual_unit_id)
+                                    .map(|visual_unit| visual_unit.point_id)
+                            })
+                            .collect::<Vec<_>>();
+                        (source.id.clone(), point_ids)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                (root, existing_sources, existing_point_ids_by_source)
+            };
+
+            let scan = scan_source_root_directory(&root.root_path);
+            let candidate_entries = scan
+                .observed_entries
+                .values()
+                .filter(|entry| observed_entry_is_in_scope(entry, &root.rules))
+                .cloned()
+                .collect::<Vec<_>>();
+            let candidate_by_relative_path = candidate_entries
+                .iter()
+                .map(|entry| (entry.relative_path.clone(), entry.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let existing_by_relative_path = existing_sources
+                .iter()
+                .filter_map(|source| {
+                    source
+                        .relative_path
+                        .as_ref()
+                        .map(|relative_path| (relative_path.clone(), source.clone()))
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            let affected_paths = planned_source_action_paths(
+                plan,
+                &root,
+                &candidate_by_relative_path,
+                &existing_by_relative_path,
+            );
+            let mut root_status_by_source_id = existing_sources
+                .iter()
+                .map(|source| (source.id.clone(), source.status.clone()))
+                .collect::<BTreeMap<_, _>>();
+
+            for relative_path in affected_paths {
+                let current_entry = candidate_by_relative_path.get(&relative_path);
+                let existing_source = existing_by_relative_path.get(&relative_path);
+
+                if let Some(entry) = current_entry {
+                    match self.inspect_import_path(&entry.absolute_path) {
+                        Ok(mut classification) => {
+                            if let Some(existing_source) = existing_source {
+                                classification.source_id = existing_source.id.clone();
+                                stale_point_ids.extend(
+                                    existing_point_ids_by_source
+                                        .get(&existing_source.id)
+                                        .into_iter()
+                                        .flatten()
+                                        .copied(),
+                                );
+                            }
+                            let visual_units =
+                                self.new_visual_units_from_classification(&classification);
+                            let mut source = self.source_record_from_classification(
+                                &classification,
+                                visual_units.iter().map(|item| item.id.clone()).collect(),
+                            );
+                            source.source_root_id = Some(root.id.clone());
+                            source.source_root_path = Some(root.root_path.clone());
+                            source.relative_path = Some(relative_path.clone());
+                            source.status = "active".to_string();
+                            source.status_reason = None;
+                            source.observed_size_bytes = Some(entry.size_bytes);
+                            source.observed_modified_at_ms = entry.modified_at_ms;
+
+                            root_status_by_source_id
+                                .insert(source.id.clone(), source.status.clone());
+                            summary.activated_sources += 1;
+                            summary.indexing_visual_units += visual_units.len();
+                            visual_units_to_index.extend(visual_units.iter().cloned());
+                            source_mutations.push(PreparedSourceMutation {
+                                source,
+                                visual_units,
+                            });
+                        }
+                        Err(rejection) => {
+                            if let Some(existing_source) = existing_source.cloned() {
+                                stale_point_ids.extend(
+                                    existing_point_ids_by_source
+                                        .get(&existing_source.id)
+                                        .into_iter()
+                                        .flatten()
+                                        .copied(),
+                                );
+                                let mutated = invalidated_source_record(
+                                    existing_source,
+                                    "invalidated",
+                                    Some(rejection.reason_code),
+                                    Some(entry.size_bytes),
+                                    entry.modified_at_ms,
+                                );
+                                root_status_by_source_id
+                                    .insert(mutated.id.clone(), mutated.status.clone());
+                                summary.invalidated_sources += 1;
+                                source_mutations.push(PreparedSourceMutation {
+                                    source: mutated,
+                                    visual_units: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let Some(existing_source) = existing_source.cloned() else {
+                    continue;
+                };
+
+                let (status, reason) = match scan.observed_entries.get(&relative_path) {
+                    Some(observed) => out_of_scope_status_reason(observed, &root.rules),
+                    None if scan.error.is_some() => (
+                        "invalidated".to_string(),
+                        Some("source_root_unreachable".to_string()),
+                    ),
+                    None => ("invalidated".to_string(), Some("not_found".to_string())),
+                };
+                if status == "invalidated" {
+                    summary.invalidated_sources += 1;
+                } else {
+                    summary.out_of_scope_sources += 1;
+                }
+                stale_point_ids.extend(
+                    existing_point_ids_by_source
+                        .get(&existing_source.id)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
+                let mutated =
+                    invalidated_source_record(existing_source, &status, reason, None, None);
+                root_status_by_source_id.insert(mutated.id.clone(), mutated.status.clone());
+                source_mutations.push(PreparedSourceMutation {
+                    source: mutated,
+                    visual_units: Vec::new(),
+                });
+            }
+
+            summary.scanned_roots += 1;
+            summary.observed_files += scan.observed_entries.len();
+            summary.matched_files += candidate_entries.len();
+            if scan.status == "degraded" {
+                summary.degraded_roots += 1;
+            }
+
+            let active_source_count = root_status_by_source_id
+                .values()
+                .filter(|status| status.as_str() == "active")
+                .count();
+            root_updates.push(PreparedSourceRootUpdate {
+                source_root_id: root.id.clone(),
+                status: source_root_status_from_scan(root.enabled, &scan),
+                watch_state: source_root_watch_state(root.enabled, &scan, false),
+                coverage_summary: SourceRootCoverageSummary {
+                    observed_file_count: scan.observed_entries.len(),
+                    matched_file_count: candidate_entries.len(),
+                    active_source_count,
+                    inactive_source_count: root_status_by_source_id
+                        .len()
+                        .saturating_sub(active_source_count),
+                    last_scan_at_ms: Some(current_unix_ms()),
+                },
+                observed_entries: scan.observed_entries,
+            });
+        }
+
+        stale_point_ids.sort_unstable();
+        stale_point_ids.dedup();
+
+        Ok(PreparedSourceAction {
+            library_id: plan.library_id.clone(),
+            collection_name,
+            action: plan.action,
+            accepted_root_count: plan.target_root_ids.len(),
+            can_rebuild_from_scratch,
+            had_existing_visual_units,
+            root_updates,
+            source_mutations,
+            stale_point_ids,
+            visual_units_to_index,
+            summary,
+        })
+    }
+
+    fn finalize_source_action_job(
+        &mut self,
+        job_id: &str,
+        prepared: PreparedSourceAction,
+        outcome: SourceActionJobOutcome,
+    ) -> Result<(), String> {
+        if !self.jobs.contains_key(job_id) {
+            return Err("Job was not found.".to_string());
+        }
+        if !self.libraries.contains_key(&prepared.library_id) {
+            return Err("Library was not found.".to_string());
+        }
+
+        if outcome.status == "completed" {
+            let before = self.clone();
+            let library = self
+                .libraries
+                .get_mut(&prepared.library_id)
+                .ok_or_else(|| "Library was not found.".to_string())?;
+
+            for mutation in &prepared.source_mutations {
+                let old_visual_unit_ids = library
+                    .sources
+                    .get(&mutation.source.id)
+                    .map(|source| source.visual_unit_ids.clone())
+                    .unwrap_or_default();
+                if !old_visual_unit_ids.is_empty() {
+                    let stale_ids = old_visual_unit_ids.iter().cloned().collect::<BTreeSet<_>>();
+                    library
+                        .visual_unit_order
+                        .retain(|visual_unit_id| !stale_ids.contains(visual_unit_id));
+                    for visual_unit_id in old_visual_unit_ids {
+                        library.visual_units.remove(&visual_unit_id);
+                    }
+                }
+
+                if !library.sources.contains_key(&mutation.source.id) {
+                    library.source_order.push(mutation.source.id.clone());
+                }
+                library
+                    .sources
+                    .insert(mutation.source.id.clone(), mutation.source.clone());
+
+                for visual_unit in &mutation.visual_units {
+                    library.visual_unit_order.push(visual_unit.id.clone());
+                    library
+                        .visual_units
+                        .insert(visual_unit.id.clone(), visual_unit.clone());
+                }
+            }
+
+            for update in &prepared.root_updates {
+                if let Some(root) = library.source_roots.get_mut(&update.source_root_id) {
+                    root.status = update.status.clone();
+                    root.watch_state = update.watch_state.clone();
+                    root.coverage_summary = update.coverage_summary.clone();
+                    root.observed_entries = update.observed_entries.clone();
+                    root.pending_watch_error = None;
+                }
+            }
+
+            if outcome.activate_index {
+                library
+                    .active_index_lines
+                    .insert(MULTIVECTOR_INDEX_LINE.to_string());
+            }
+
+            if let Err(message) = self.persist_durable_state() {
+                *self = before;
+                if let Some(job) = self.jobs.get_mut(job_id) {
+                    job.snapshot.status = "failed".to_string();
+                    job.snapshot.phase = "failed".to_string();
+                    job.snapshot.current_attempt.status = "failed".to_string();
+                    job.snapshot.current_attempt.summary =
+                        format!("Persisting durable app state failed: {message}");
+                }
+                return Err(format!("Failed to persist durable app state: {message}"));
+            }
+        }
+
+        let library = self
+            .libraries
+            .get_mut(&prepared.library_id)
+            .ok_or_else(|| "Library was not found.".to_string())?;
+
+        for update in &prepared.root_updates {
+            if let Some(root) = library.source_roots.get_mut(&update.source_root_id) {
+                root.watch_state = if outcome.status == "completed" {
+                    update.watch_state.clone()
+                } else {
+                    source_root_watch_state(
+                        root.enabled,
+                        &SourceRootScanResult {
+                            status: root.status.clone(),
+                            observed_entries: root.observed_entries.clone(),
+                            error: root.pending_watch_error.clone(),
+                        },
+                        false,
+                    )
+                };
+                root.last_action = Some(SourceRootLastAction {
+                    action: prepared.action.as_str().to_string(),
+                    status: outcome.status.to_string(),
+                    summary: outcome.summary.clone(),
+                    job_id: Some(job_id.to_string()),
+                });
+            }
         }
 
         let job = self
@@ -468,6 +1763,54 @@ impl AppState {
             .get(job_id)
             .map(|job| job.snapshot.clone())
             .ok_or_else(|| ApiError::not_found("Job was not found."))
+    }
+
+    fn source_root_snapshot(root: &SourceRootRecord) -> SourceRootSnapshot {
+        SourceRootSnapshot {
+            source_root_id: root.id.clone(),
+            root_path: root.root_path.clone(),
+            enabled: root.enabled,
+            status: root.status.clone(),
+            watch_state: root.watch_state.clone(),
+            coverage_summary: root.coverage_summary.clone(),
+            rules: root.rules.clone(),
+            last_action: root.last_action.clone(),
+        }
+    }
+
+    fn source_inventory_item(
+        library: &LibraryRecord,
+        source: &SourceRecord,
+    ) -> SourceInventoryItem {
+        let source_root_path = source
+            .source_root_id
+            .as_ref()
+            .and_then(|source_root_id| {
+                library
+                    .source_roots
+                    .get(source_root_id)
+                    .map(|root| root.root_path.clone())
+            })
+            .or_else(|| source.source_root_path.clone());
+        let source_root_label = match (&source.source_root_id, &source_root_path) {
+            (Some(_), Some(root_path)) => root_path.clone(),
+            (Some(source_root_id), None) => format!("deleted:{source_root_id}"),
+            (None, _) => "manual import".to_string(),
+        };
+
+        SourceInventoryItem {
+            source_id: source.id.clone(),
+            source_path: source.source_path.clone(),
+            source_type: source.source_type.clone(),
+            kind: source.kind.clone(),
+            status: source.status.clone(),
+            status_reason: source.status_reason.clone(),
+            relative_path: source.relative_path.clone(),
+            source_root_id: source.source_root_id.clone(),
+            source_root_path,
+            source_root_label,
+            visual_unit_count: source.visual_unit_ids.len(),
+        }
     }
 
     fn prepare_text_search(&self, request: &TextSearchRequest) -> Result<SearchPlan, ApiError> {
@@ -567,16 +1910,17 @@ impl AppState {
 
         match request.video_input.kind.as_str() {
             "temp_asset" => {
-                let temp_asset_id = request
-                    .video_input
-                    .temp_asset_id
-                    .as_deref()
-                    .ok_or_else(|| {
-                        ApiError::validation_failed(
-                            "video_input.kind=temp_asset requires temp_asset_id.",
-                            Some(json!({ "field": "video_input.temp_asset_id" })),
-                        )
-                    })?;
+                let temp_asset_id =
+                    request
+                        .video_input
+                        .temp_asset_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            ApiError::validation_failed(
+                                "video_input.kind=temp_asset requires temp_asset_id.",
+                                Some(json!({ "field": "video_input.temp_asset_id" })),
+                            )
+                        })?;
                 let asset = self.get_temp_query_video_asset(&plan.library_id, temp_asset_id)?;
                 let locator = resolve_video_query_locator(
                     request.video_input.locator.as_ref(),
@@ -685,16 +2029,17 @@ impl AppState {
 
         match request.document_input.kind.as_str() {
             "temp_asset" => {
-                let temp_asset_id = request
-                    .document_input
-                    .temp_asset_id
-                    .as_deref()
-                    .ok_or_else(|| {
-                        ApiError::validation_failed(
-                            "document_input.kind=temp_asset requires temp_asset_id.",
-                            Some(json!({ "field": "document_input.temp_asset_id" })),
-                        )
-                    })?;
+                let temp_asset_id =
+                    request
+                        .document_input
+                        .temp_asset_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            ApiError::validation_failed(
+                                "document_input.kind=temp_asset requires temp_asset_id.",
+                                Some(json!({ "field": "document_input.temp_asset_id" })),
+                            )
+                        })?;
                 let asset = self.get_temp_query_document_asset(&plan.library_id, temp_asset_id)?;
                 let locator = resolve_document_query_locator(
                     request.document_input.locator.as_ref(),
@@ -710,16 +2055,12 @@ impl AppState {
                 ))
             }
             "library_object" => {
-                let source_id = request
-                    .document_input
-                    .source_id
-                    .as_deref()
-                    .ok_or_else(|| {
-                        ApiError::validation_failed(
-                            "document_input.kind=library_object requires source_id.",
-                            Some(json!({ "field": "document_input.source_id" })),
-                        )
-                    })?;
+                let source_id = request.document_input.source_id.as_deref().ok_or_else(|| {
+                    ApiError::validation_failed(
+                        "document_input.kind=library_object requires source_id.",
+                        Some(json!({ "field": "document_input.source_id" })),
+                    )
+                })?;
                 let source = self.get_library_source(&plan.library_id, source_id)?;
                 if source.source_type != "pdf" {
                     return Err(ApiError::not_supported(
@@ -825,6 +2166,7 @@ impl AppState {
             kind_filter: read_string_filter(filters, "visual_unit.kind")
                 .or_else(|| read_string_filter(filters, "kind")),
             source_type_filter: read_string_filter(filters, "source_type"),
+            active_visual_unit_ids: library.visual_units.keys().cloned().collect(),
             debug: debug.unwrap_or(false),
         })
     }
@@ -1073,6 +2415,20 @@ impl AppState {
             .get(source_id)
             .cloned()
             .ok_or_else(|| ApiError::not_found("Source object was not found."))
+            .and_then(|source| {
+                if source.status == "active" {
+                    Ok(source)
+                } else {
+                    Err(ApiError::not_ready(
+                        "Source object is no longer active for query reuse.",
+                        Some(json!({
+                            "source_id": source.id,
+                            "status": source.status,
+                            "reason": source.status_reason,
+                        })),
+                    ))
+                }
+            })
     }
 
     fn inspect_import_path(
@@ -1164,7 +2520,9 @@ impl AppState {
             _ => Err(ImportRejection {
                 normalized_path: Some(normalized_path),
                 reason_code: "unsupported_type".to_string(),
-                message: "Only PDF, common image files, and mp4/mov video files are accepted right now.".to_string(),
+                message:
+                    "Only PDF, common image files, and mp4/mov video files are accepted right now."
+                        .to_string(),
             }),
         }
     }
@@ -1202,7 +2560,12 @@ impl AppState {
             config: library.config.clone(),
             index_lines,
             counts: LibraryCounts {
-                accepted_items: library.visual_units.len(),
+                accepted_items: library
+                    .sources
+                    .values()
+                    .filter(|source| source.status == "active")
+                    .map(|source| source.visual_unit_ids.len())
+                    .sum(),
                 pending_jobs,
             },
             latest_job_id: library.latest_job_id.clone(),
@@ -1229,18 +2592,36 @@ impl AppState {
         format!("src_{:06}", self.next_source_seq)
     }
 
+    fn next_source_root_id(&mut self) -> String {
+        self.next_source_root_seq += 1;
+        format!("root_{:06}", self.next_source_root_seq)
+    }
+
     fn next_temp_asset_id(&mut self) -> String {
         self.next_temp_asset_seq += 1;
         format!("temp_asset_{:06}", self.next_temp_asset_seq)
     }
 
-    fn source_record_from_classification(&self, classification: &PathClassification) -> SourceRecord {
+    fn source_record_from_classification(
+        &self,
+        classification: &PathClassification,
+        visual_unit_ids: Vec<String>,
+    ) -> SourceRecord {
         SourceRecord {
             id: classification.source_id.clone(),
+            source_root_id: None,
+            source_root_path: None,
             source_path: classification.normalized_path.clone(),
+            relative_path: None,
             source_type: classification.source_type.clone(),
+            kind: classification.kind.clone(),
+            status: "active".to_string(),
+            status_reason: None,
             page_count: classification.page_count,
             duration_ms: classification.duration_ms,
+            observed_size_bytes: None,
+            observed_modified_at_ms: None,
+            visual_unit_ids,
         }
     }
 
@@ -1281,10 +2662,12 @@ impl AppState {
                     let previous = segment_index
                         .checked_sub(1)
                         .and_then(|index| segments.get(index))
-                        .map(|(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }));
-                    let next = segments
-                        .get(segment_index + 1)
-                        .map(|(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }));
+                        .map(
+                            |(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }),
+                        );
+                    let next = segments.get(segment_index + 1).map(
+                        |(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }),
+                    );
                     self.new_visual_unit_record(
                         classification,
                         json!({
@@ -1349,6 +2732,8 @@ struct LibraryRecord {
     name: String,
     collection_name: String,
     config: LibraryConfigPayload,
+    source_roots: BTreeMap<String, SourceRootRecord>,
+    source_root_order: Vec<String>,
     sources: BTreeMap<String, SourceRecord>,
     source_order: Vec<String>,
     visual_units: BTreeMap<String, VisualUnitRecord>,
@@ -1357,16 +2742,78 @@ struct LibraryRecord {
     active_index_lines: BTreeSet<String>,
 }
 
-#[derive(Clone, Debug)]
-struct SourceRecord {
+#[derive(Debug, Deserialize, Serialize)]
+struct DurableAppStateSnapshot {
+    version: u32,
+    library_order: Vec<String>,
+    libraries: BTreeMap<String, DurableLibraryRecord>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DurableLibraryRecord {
     id: String,
-    source_path: String,
-    source_type: String,
-    page_count: Option<usize>,
-    duration_ms: Option<u64>,
+    name: String,
+    config: LibraryConfigPayload,
+    source_roots: BTreeMap<String, DurableSourceRootRecord>,
+    source_root_order: Vec<String>,
+    sources: BTreeMap<String, SourceRecord>,
+    source_order: Vec<String>,
+    visual_units: BTreeMap<String, VisualUnitRecord>,
+    visual_unit_order: Vec<String>,
+    active_index_lines: BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DurableSourceRootRecord {
+    id: String,
+    root_path: String,
+    enabled: bool,
+    rules: SourceRootRulesPayload,
 }
 
 #[derive(Clone, Debug)]
+struct SourceRootRecord {
+    id: String,
+    root_path: String,
+    enabled: bool,
+    status: String,
+    watch_state: String,
+    rules: SourceRootRulesPayload,
+    coverage_summary: SourceRootCoverageSummary,
+    observed_entries: BTreeMap<String, ObservedSourceFile>,
+    pending_watch_paths: BTreeSet<String>,
+    pending_watch_deadline_ms: Option<u128>,
+    pending_watch_error: Option<String>,
+    last_action: Option<SourceRootLastAction>,
+}
+
+#[derive(Clone, Debug)]
+struct ObservedSourceFile {
+    absolute_path: String,
+    relative_path: String,
+    size_bytes: u64,
+    modified_at_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SourceRecord {
+    id: String,
+    source_root_id: Option<String>,
+    source_root_path: Option<String>,
+    source_path: String,
+    relative_path: Option<String>,
+    source_type: String,
+    kind: String,
+    status: String,
+    status_reason: Option<String>,
+    page_count: Option<usize>,
+    duration_ms: Option<u64>,
+    observed_size_bytes: Option<u64>,
+    observed_modified_at_ms: Option<u128>,
+    visual_unit_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct VisualUnitRecord {
     id: String,
     point_id: u64,
@@ -1476,7 +2923,7 @@ pub struct CreateLibraryConfigRequest {
     pub enabled_index_lines: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LibraryConfigPayload {
     pub enabled_index_lines: Vec<String>,
 }
@@ -1507,6 +2954,130 @@ pub struct LibraryIndexLineStatus {
 pub struct LibraryCounts {
     pub accepted_items: usize,
     pub pending_jobs: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSourceRootRequest {
+    pub root_path: String,
+    pub enabled: Option<bool>,
+    pub rules: Option<SourceRootRulesPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSourceRootRequest {
+    pub root_path: Option<String>,
+    pub enabled: Option<bool>,
+    pub rules: Option<SourceRootRulesPayload>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SourceRootRulesPayload {
+    #[serde(default)]
+    pub include_globs: Vec<String>,
+    #[serde(default)]
+    pub exclude_globs: Vec<String>,
+    #[serde(default)]
+    pub include_extensions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SourceRootCoverageSummary {
+    pub observed_file_count: usize,
+    pub matched_file_count: usize,
+    pub active_source_count: usize,
+    pub inactive_source_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scan_at_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceRootLastAction {
+    pub action: String,
+    pub status: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceRootSnapshot {
+    pub source_root_id: String,
+    pub root_path: String,
+    pub enabled: bool,
+    pub status: String,
+    pub watch_state: String,
+    pub coverage_summary: SourceRootCoverageSummary,
+    pub rules: SourceRootRulesPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<SourceRootLastAction>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourceRootsListData {
+    pub source_roots: Vec<SourceRootSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourceRootDetailData {
+    pub source_root: SourceRootSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SourcesQuery {
+    pub source_root_id: Option<String>,
+    pub source_type: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourcesListData {
+    pub sources: Vec<SourceInventoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourceInventoryItem {
+    pub source_id: String,
+    pub source_path: String,
+    pub source_type: String,
+    pub kind: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_root_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_root_path: Option<String>,
+    pub source_root_label: String,
+    pub visual_unit_count: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SourceActionAcceptedItem {
+    pub source_root_id: String,
+    pub root_path: String,
+    pub action: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SourceActionRejectedItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_root_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_path: Option<String>,
+    pub reason_code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourceActionData {
+    pub accepted: Vec<SourceActionAcceptedItem>,
+    pub rejected: Vec<SourceActionRejectedItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobSnapshot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1759,10 +3330,166 @@ pub struct VideoSourceSummary {
 struct PreparedImport {
     library_id: String,
     collection_name: String,
+    had_existing_visual_units: bool,
     accepted: Vec<ImportAcceptedItem>,
     rejected: Vec<ImportRejectedItem>,
     sources: Vec<SourceRecord>,
     visual_units: Vec<VisualUnitRecord>,
+}
+
+#[derive(Clone)]
+struct SourceActionPlan {
+    library_id: String,
+    action: SourceActionKind,
+    target_root_ids: Vec<String>,
+    changed_paths_by_root: BTreeMap<String, BTreeSet<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceActionKind {
+    Refresh,
+    Rescan,
+}
+
+impl SourceActionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::Rescan => "rescan",
+        }
+    }
+
+    fn is_rescan(self) -> bool {
+        matches!(self, Self::Rescan)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum SourceActionScope {
+    Library,
+    SourceRoot(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceActionTrigger {
+    Manual,
+    Watcher,
+}
+
+impl SourceActionTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Watcher => "watcher",
+        }
+    }
+}
+
+struct PreparedSourceAction {
+    library_id: String,
+    collection_name: String,
+    action: SourceActionKind,
+    accepted_root_count: usize,
+    can_rebuild_from_scratch: bool,
+    had_existing_visual_units: bool,
+    root_updates: Vec<PreparedSourceRootUpdate>,
+    source_mutations: Vec<PreparedSourceMutation>,
+    stale_point_ids: Vec<u64>,
+    visual_units_to_index: Vec<VisualUnitRecord>,
+    summary: SourceActionSummary,
+}
+
+struct PreparedSourceRootUpdate {
+    source_root_id: String,
+    status: String,
+    watch_state: String,
+    coverage_summary: SourceRootCoverageSummary,
+    observed_entries: BTreeMap<String, ObservedSourceFile>,
+}
+
+struct PreparedSourceMutation {
+    source: SourceRecord,
+    visual_units: Vec<VisualUnitRecord>,
+}
+
+impl PreparedSourceAction {
+    fn requires_index_update(&self) -> bool {
+        !self.visual_units_to_index.is_empty() || !self.stale_point_ids.is_empty()
+    }
+}
+
+#[derive(Default)]
+struct SourceActionSummary {
+    scanned_roots: usize,
+    observed_files: usize,
+    matched_files: usize,
+    activated_sources: usize,
+    invalidated_sources: usize,
+    out_of_scope_sources: usize,
+    indexing_visual_units: usize,
+    degraded_roots: usize,
+}
+
+struct SourceActionJobOutcome {
+    status: &'static str,
+    phase: &'static str,
+    completed: usize,
+    activate_index: bool,
+    summary: String,
+}
+
+impl SourceActionJobOutcome {
+    fn completed(prepared: &PreparedSourceAction) -> Self {
+        let summary = format!(
+            "{} {} source root(s); observed {} file(s), matched {} file(s), activated {}, invalidated {}, out_of_scope {}, indexed {} visual unit(s).",
+            prepared.action.as_str(),
+            prepared.summary.scanned_roots,
+            prepared.summary.observed_files,
+            prepared.summary.matched_files,
+            prepared.summary.activated_sources,
+            prepared.summary.invalidated_sources,
+            prepared.summary.out_of_scope_sources,
+            prepared.summary.indexing_visual_units,
+        );
+        Self {
+            status: "completed",
+            phase: "activated",
+            completed: prepared.accepted_root_count,
+            activate_index: prepared.summary.indexing_visual_units > 0,
+            summary,
+        }
+    }
+
+    fn failed(action: SourceActionKind, completed: usize, message: String) -> Self {
+        Self {
+            status: "failed",
+            phase: "failed",
+            completed,
+            activate_index: false,
+            summary: format!("{} failed: {message}", action.as_str()),
+        }
+    }
+}
+
+struct QueuedSourceAction {
+    job_id: String,
+    plan: SourceActionPlan,
+}
+
+struct SourceRootScanResult {
+    status: String,
+    observed_entries: BTreeMap<String, ObservedSourceFile>,
+    error: Option<String>,
+}
+
+impl SourceRootScanResult {
+    fn disabled() -> Self {
+        Self {
+            status: "disabled".to_string(),
+            observed_entries: BTreeMap::new(),
+            error: None,
+        }
+    }
 }
 
 struct ImportJobOutcome {
@@ -1802,6 +3529,7 @@ struct SearchPlan {
     top_k: usize,
     kind_filter: Option<BTreeSet<String>>,
     source_type_filter: Option<BTreeSet<String>>,
+    active_visual_unit_ids: BTreeSet<String>,
     debug: bool,
 }
 
@@ -2044,7 +3772,17 @@ async fn root() -> Json<RootPayload> {
             "GET /health",
             "GET /libraries",
             "POST /libraries",
+            "GET /libraries/{library_id}/source-roots",
+            "POST /libraries/{library_id}/source-roots",
+            "GET /libraries/{library_id}/source-roots/{source_root_id}",
+            "PATCH /libraries/{library_id}/source-roots/{source_root_id}",
+            "DELETE /libraries/{library_id}/source-roots/{source_root_id}",
+            "GET /libraries/{library_id}/sources",
             "POST /libraries/{library_id}/imports",
+            "POST /libraries/{library_id}/refresh",
+            "POST /libraries/{library_id}/rescan",
+            "POST /libraries/{library_id}/source-roots/{source_root_id}/refresh",
+            "POST /libraries/{library_id}/source-roots/{source_root_id}/rescan",
             "GET /libraries/{library_id}/video-sources",
             "POST /libraries/{library_id}/query-assets/images",
             "POST /libraries/{library_id}/query-assets/videos",
@@ -2103,6 +3841,166 @@ async fn create_library(
         StatusCode::CREATED,
         Json(SuccessEnvelope { data: snapshot }),
     ))
+}
+
+async fn list_source_roots(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<SourceRootsListData>>, ApiError> {
+    let state = state.read().await;
+    let data = state.list_source_roots(&library_id)?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+async fn get_source_root(
+    State(state): State<SharedState>,
+    Path((library_id, source_root_id)): Path<(String, String)>,
+) -> Result<Json<SuccessEnvelope<SourceRootDetailData>>, ApiError> {
+    let state = state.read().await;
+    let data = state.get_source_root(&library_id, &source_root_id)?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+async fn create_source_root(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    Json(request): Json<CreateSourceRootRequest>,
+) -> Result<(StatusCode, Json<SuccessEnvelope<SourceRootSnapshot>>), ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state.create_source_root(&library_id, request)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SuccessEnvelope { data: snapshot }),
+    ))
+}
+
+async fn update_source_root(
+    State(state): State<SharedState>,
+    Path((library_id, source_root_id)): Path<(String, String)>,
+    Json(request): Json<UpdateSourceRootRequest>,
+) -> Result<Json<SuccessEnvelope<SourceRootSnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state.update_source_root(&library_id, &source_root_id, request)?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn delete_source_root(
+    State(state): State<SharedState>,
+    Path((library_id, source_root_id)): Path<(String, String)>,
+) -> Result<Json<SuccessEnvelope<SourceRootSnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state.delete_source_root(&library_id, &source_root_id)?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn list_sources(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    Query(query): Query<SourcesQuery>,
+) -> Result<Json<SuccessEnvelope<SourcesListData>>, ApiError> {
+    let state = state.read().await;
+    let data = state.list_sources(&library_id, query)?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+async fn refresh_library_sources(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<SourceActionData>>, ApiError> {
+    let (response, queued_action) = {
+        let mut state = state.write().await;
+        state.queue_source_action(
+            &library_id,
+            SourceActionScope::Library,
+            SourceActionKind::Refresh,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )?
+    };
+
+    if let Some(queued_action) = queued_action {
+        let background_state = state.clone();
+        tokio::spawn(async move {
+            run_source_action_job(background_state, queued_action.job_id, queued_action.plan).await;
+        });
+    }
+
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
+async fn rescan_library_sources(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<SourceActionData>>, ApiError> {
+    let (response, queued_action) = {
+        let mut state = state.write().await;
+        state.queue_source_action(
+            &library_id,
+            SourceActionScope::Library,
+            SourceActionKind::Rescan,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )?
+    };
+
+    if let Some(queued_action) = queued_action {
+        let background_state = state.clone();
+        tokio::spawn(async move {
+            run_source_action_job(background_state, queued_action.job_id, queued_action.plan).await;
+        });
+    }
+
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
+async fn refresh_source_root(
+    State(state): State<SharedState>,
+    Path((library_id, source_root_id)): Path<(String, String)>,
+) -> Result<Json<SuccessEnvelope<SourceActionData>>, ApiError> {
+    let (response, queued_action) = {
+        let mut state = state.write().await;
+        state.queue_source_action(
+            &library_id,
+            SourceActionScope::SourceRoot(source_root_id),
+            SourceActionKind::Refresh,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )?
+    };
+
+    if let Some(queued_action) = queued_action {
+        let background_state = state.clone();
+        tokio::spawn(async move {
+            run_source_action_job(background_state, queued_action.job_id, queued_action.plan).await;
+        });
+    }
+
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
+async fn rescan_source_root(
+    State(state): State<SharedState>,
+    Path((library_id, source_root_id)): Path<(String, String)>,
+) -> Result<Json<SuccessEnvelope<SourceActionData>>, ApiError> {
+    let (response, queued_action) = {
+        let mut state = state.write().await;
+        state.queue_source_action(
+            &library_id,
+            SourceActionScope::SourceRoot(source_root_id),
+            SourceActionKind::Rescan,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )?
+    };
+
+    if let Some(queued_action) = queued_action {
+        let background_state = state.clone();
+        tokio::spawn(async move {
+            run_source_action_job(background_state, queued_action.job_id, queued_action.plan).await;
+        });
+    }
+
+    Ok(Json(SuccessEnvelope { data: response }))
 }
 
 async fn import_paths(
@@ -2420,7 +4318,8 @@ async fn search_document(
         state.prepare_document_search(&request)?
     };
 
-    let query_embedding = embed_query_document(query_input.path.as_str(), query_input.locator).await?;
+    let query_embedding =
+        embed_query_document(query_input.path.as_str(), query_input.locator).await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))
@@ -2452,6 +4351,95 @@ async fn run_import_job(state: SharedState, job_id: String, prepared: PreparedIm
     }
 }
 
+async fn run_source_action_job(state: SharedState, job_id: String, plan: SourceActionPlan) {
+    {
+        let mut state = state.write().await;
+        state.mark_source_action_running(&plan, &job_id);
+    }
+
+    let prepared = {
+        let mut state = state.write().await;
+        state.prepare_source_action_execution(&plan)
+    };
+
+    let outcome = match prepared {
+        Ok(prepared) => {
+            if prepared.requires_index_update() {
+                {
+                    let mut state = state.write().await;
+                    state.update_job_snapshot(
+                        &job_id,
+                        "running",
+                        "encode",
+                        0,
+                        format!(
+                            "Encoding {} visual unit(s) for {}.",
+                            prepared.visual_units_to_index.len(),
+                            plan.action.as_str(),
+                        ),
+                    );
+                }
+
+                let indexing =
+                    index_source_action_visual_units(&prepared, state.clone(), &job_id).await;
+                match indexing {
+                    Ok(()) => {
+                        let outcome = SourceActionJobOutcome::completed(&prepared);
+                        let mut state = state.write().await;
+                        if let Err(message) =
+                            state.finalize_source_action_job(&job_id, prepared, outcome)
+                        {
+                            tracing::warn!(
+                                "Failed to finalize source action job {job_id}: {message}"
+                            );
+                        }
+                        return;
+                    }
+                    Err(message) => {
+                        let mut state = state.write().await;
+                        if let Err(finalize_error) = state.finalize_source_action_job(
+                            &job_id,
+                            prepared,
+                            SourceActionJobOutcome::failed(plan.action, 0, message),
+                        ) {
+                            tracing::warn!(
+                                "Failed to finalize failed source action job {job_id}: {finalize_error}"
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+
+            let outcome = SourceActionJobOutcome::completed(&prepared);
+            let mut state = state.write().await;
+            if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
+                tracing::warn!("Failed to finalize source action job {job_id}: {message}");
+            }
+            return;
+        }
+        Err(message) => SourceActionJobOutcome::failed(plan.action, 0, message),
+    };
+
+    let mut state = state.write().await;
+    let prepared = PreparedSourceAction {
+        library_id: plan.library_id,
+        collection_name: String::new(),
+        action: plan.action,
+        accepted_root_count: plan.target_root_ids.len(),
+        can_rebuild_from_scratch: false,
+        had_existing_visual_units: false,
+        root_updates: Vec::new(),
+        source_mutations: Vec::new(),
+        stale_point_ids: Vec::new(),
+        visual_units_to_index: Vec::new(),
+        summary: SourceActionSummary::default(),
+    };
+    if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
+        tracing::warn!("Failed to finalize source action job {job_id}: {message}");
+    }
+}
+
 fn normalize_index_lines(lines: Option<Vec<String>>) -> Vec<String> {
     let mut unique = BTreeSet::new();
     for line in lines.unwrap_or_default() {
@@ -2461,6 +4449,506 @@ fn normalize_index_lines(lines: Option<Vec<String>>) -> Vec<String> {
         }
     }
     unique.into_iter().collect()
+}
+
+fn normalize_source_root_rules(rules: SourceRootRulesPayload) -> SourceRootRulesPayload {
+    SourceRootRulesPayload {
+        include_globs: normalize_rule_globs(rules.include_globs),
+        exclude_globs: normalize_rule_globs(rules.exclude_globs),
+        include_extensions: normalize_rule_extensions(rules.include_extensions),
+    }
+}
+
+fn normalize_rule_globs(globs: Vec<String>) -> Vec<String> {
+    let mut unique = BTreeSet::new();
+    for glob in globs {
+        let normalized = glob.trim().replace('\\', "/");
+        let normalized = normalized.trim_start_matches("./").trim_matches('/');
+        if !normalized.is_empty() {
+            unique.insert(normalized.to_string());
+        }
+    }
+    unique.into_iter().collect()
+}
+
+fn normalize_rule_extensions(extensions: Vec<String>) -> Vec<String> {
+    let mut unique = BTreeSet::new();
+    for extension in extensions {
+        let normalized = extension
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        if !normalized.is_empty() {
+            unique.insert(normalized);
+        }
+    }
+    unique.into_iter().collect()
+}
+
+fn normalize_source_root_path(root_path: &str) -> Result<String, ApiError> {
+    let trimmed = root_path.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::validation_failed(
+            "Source root path must not be empty.",
+            Some(json!({ "field": "root_path" })),
+        ));
+    }
+
+    let path = FsPath::new(trimmed);
+    if path.exists() {
+        let metadata = fs::metadata(path).map_err(|error| {
+            ApiError::validation_failed(
+                format!("Source root metadata could not be read: {error}"),
+                Some(json!({ "field": "root_path", "root_path": trimmed })),
+            )
+        })?;
+        if !metadata.is_dir() {
+            return Err(ApiError::validation_failed(
+                "Current 140-library-source-management implementation only accepts local directory source roots.",
+                Some(json!({ "field": "root_path", "root_path": trimmed })),
+            ));
+        }
+        return Ok(fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn source_root_status_from_scan(enabled: bool, scan: &SourceRootScanResult) -> String {
+    if !enabled {
+        "disabled".to_string()
+    } else if scan.status == "degraded" {
+        "degraded".to_string()
+    } else {
+        "ready".to_string()
+    }
+}
+
+fn source_root_watch_state(enabled: bool, scan: &SourceRootScanResult, queued: bool) -> String {
+    if !enabled {
+        "disabled".to_string()
+    } else if queued {
+        "queued_refresh".to_string()
+    } else if scan.status == "degraded" {
+        "error".to_string()
+    } else {
+        "watching".to_string()
+    }
+}
+
+fn queued_watch_state_for_action(action: SourceActionKind) -> &'static str {
+    match action {
+        SourceActionKind::Refresh => "queued_refresh",
+        SourceActionKind::Rescan => "queued_rescan",
+    }
+}
+
+fn running_watch_state_for_action(action: SourceActionKind) -> &'static str {
+    match action {
+        SourceActionKind::Refresh => "refreshing",
+        SourceActionKind::Rescan => "rescanning",
+    }
+}
+
+fn source_root_action_in_flight(root: &SourceRootRecord) -> bool {
+    matches!(
+        root.watch_state.as_str(),
+        "queued_refresh" | "queued_rescan" | "refreshing" | "rescanning"
+    )
+}
+
+fn count_sources_for_root(library: &LibraryRecord, source_root_id: &str) -> (usize, usize) {
+    library
+        .sources
+        .values()
+        .filter(|source| source.source_root_id.as_deref() == Some(source_root_id))
+        .fold((0usize, 0usize), |(active, inactive), source| {
+            if source.status == "active" {
+                (active + 1, inactive)
+            } else {
+                (active, inactive + 1)
+            }
+        })
+}
+
+fn mark_source_root_sources_state(
+    library: &mut LibraryRecord,
+    source_root_id: &str,
+    status: &str,
+    reason: Option<String>,
+) {
+    let affected_source_ids = library
+        .source_order
+        .iter()
+        .filter_map(|source_id| {
+            library
+                .sources
+                .get(source_id)
+                .filter(|source| source.source_root_id.as_deref() == Some(source_root_id))
+                .map(|source| source.id.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut removed_visual_unit_ids = BTreeSet::new();
+
+    for source_id in affected_source_ids {
+        if let Some(source) = library.sources.get_mut(&source_id) {
+            removed_visual_unit_ids.extend(source.visual_unit_ids.iter().cloned());
+            source.status = status.to_string();
+            source.status_reason = reason.clone();
+            source.visual_unit_ids.clear();
+            source.observed_size_bytes = None;
+            source.observed_modified_at_ms = None;
+        }
+    }
+
+    if !removed_visual_unit_ids.is_empty() {
+        library
+            .visual_unit_order
+            .retain(|visual_unit_id| !removed_visual_unit_ids.contains(visual_unit_id));
+        for visual_unit_id in removed_visual_unit_ids {
+            library.visual_units.remove(&visual_unit_id);
+        }
+    }
+}
+
+fn diff_observed_entries(
+    previous: &BTreeMap<String, ObservedSourceFile>,
+    current: &BTreeMap<String, ObservedSourceFile>,
+) -> BTreeSet<String> {
+    let mut changed = BTreeSet::new();
+    for relative_path in previous.keys().chain(current.keys()) {
+        let before = previous.get(relative_path);
+        let after = current.get(relative_path);
+        if before.map(observed_signature) != after.map(observed_signature) {
+            changed.insert(relative_path.clone());
+        }
+    }
+    changed
+}
+
+fn observed_signature(entry: &ObservedSourceFile) -> (u64, Option<u128>) {
+    (entry.size_bytes, entry.modified_at_ms)
+}
+
+fn count_matched_observed_entries(
+    observed_entries: &BTreeMap<String, ObservedSourceFile>,
+    rules: &SourceRootRulesPayload,
+) -> usize {
+    observed_entries
+        .values()
+        .filter(|entry| observed_entry_is_in_scope(entry, rules))
+        .count()
+}
+
+fn observed_entry_is_in_scope(entry: &ObservedSourceFile, rules: &SourceRootRulesPayload) -> bool {
+    source_root_rules_allow_path(&entry.relative_path, rules)
+        && observed_entry_extension_allowed(entry, rules)
+}
+
+fn observed_entry_extension_allowed(
+    entry: &ObservedSourceFile,
+    rules: &SourceRootRulesPayload,
+) -> bool {
+    let extension = FsPath::new(&entry.absolute_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let Some(extension) = extension else {
+        return false;
+    };
+    if !is_supported_source_extension(&extension) {
+        return false;
+    }
+    rules.include_extensions.is_empty() || rules.include_extensions.contains(&extension)
+}
+
+fn source_root_rules_allow_path(relative_path: &str, rules: &SourceRootRulesPayload) -> bool {
+    let normalized_path = relative_path.replace('\\', "/");
+    let included = rules.include_globs.is_empty()
+        || rules
+            .include_globs
+            .iter()
+            .any(|pattern| glob_pattern_matches(pattern, &normalized_path));
+    if !included {
+        return false;
+    }
+
+    !rules
+        .exclude_globs
+        .iter()
+        .any(|pattern| glob_pattern_matches(pattern, &normalized_path))
+}
+
+fn glob_pattern_matches(pattern: &str, relative_path: &str) -> bool {
+    let pattern_segments = pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let path_segments = relative_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    glob_segments_match(&pattern_segments, &path_segments)
+}
+
+fn glob_segments_match(pattern_segments: &[&str], path_segments: &[&str]) -> bool {
+    if pattern_segments.is_empty() {
+        return path_segments.is_empty();
+    }
+    if pattern_segments[0] == "**" {
+        return glob_segments_match(&pattern_segments[1..], path_segments)
+            || (!path_segments.is_empty()
+                && glob_segments_match(pattern_segments, &path_segments[1..]));
+    }
+    !path_segments.is_empty()
+        && wildcard_segment_matches(pattern_segments[0], path_segments[0])
+        && glob_segments_match(&pattern_segments[1..], &path_segments[1..])
+}
+
+fn wildcard_segment_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let value = value.chars().collect::<Vec<_>>();
+    let mut dp = vec![vec![false; value.len() + 1]; pattern.len() + 1];
+    dp[0][0] = true;
+
+    for pattern_index in 0..pattern.len() {
+        match pattern[pattern_index] {
+            '*' => {
+                for value_index in 0..=value.len() {
+                    if dp[pattern_index][value_index] {
+                        dp[pattern_index + 1][value_index] = true;
+                        if value_index < value.len() {
+                            dp[pattern_index][value_index + 1] = true;
+                        }
+                    }
+                }
+            }
+            '?' => {
+                for value_index in 0..value.len() {
+                    if dp[pattern_index][value_index] {
+                        dp[pattern_index + 1][value_index + 1] = true;
+                    }
+                }
+            }
+            expected => {
+                for value_index in 0..value.len() {
+                    if dp[pattern_index][value_index] && value[value_index] == expected {
+                        dp[pattern_index + 1][value_index + 1] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    dp[pattern.len()][value.len()]
+}
+
+fn planned_source_action_paths(
+    plan: &SourceActionPlan,
+    root: &SourceRootRecord,
+    candidate_by_relative_path: &BTreeMap<String, ObservedSourceFile>,
+    existing_by_relative_path: &BTreeMap<String, SourceRecord>,
+) -> BTreeSet<String> {
+    if plan.action.is_rescan() {
+        return candidate_by_relative_path
+            .keys()
+            .chain(existing_by_relative_path.keys())
+            .cloned()
+            .collect();
+    }
+
+    if let Some(paths) = plan.changed_paths_by_root.get(&root.id) {
+        return paths.clone();
+    }
+
+    let mut affected = BTreeSet::new();
+    for (relative_path, entry) in candidate_by_relative_path {
+        let current_source = existing_by_relative_path.get(relative_path);
+        let unchanged = current_source
+            .map(|source| {
+                source.status == "active"
+                    && source.observed_size_bytes == Some(entry.size_bytes)
+                    && source.observed_modified_at_ms == entry.modified_at_ms
+            })
+            .unwrap_or(false);
+        if !unchanged {
+            affected.insert(relative_path.clone());
+        }
+    }
+
+    for relative_path in existing_by_relative_path.keys() {
+        if !candidate_by_relative_path.contains_key(relative_path) {
+            affected.insert(relative_path.clone());
+        }
+    }
+
+    affected
+}
+
+fn invalidated_source_record(
+    mut source: SourceRecord,
+    status: &str,
+    reason: Option<String>,
+    observed_size_bytes: Option<u64>,
+    observed_modified_at_ms: Option<u128>,
+) -> SourceRecord {
+    source.status = status.to_string();
+    source.status_reason = reason;
+    source.visual_unit_ids.clear();
+    source.observed_size_bytes = observed_size_bytes;
+    source.observed_modified_at_ms = observed_modified_at_ms;
+    source
+}
+
+fn out_of_scope_status_reason(
+    observed: &ObservedSourceFile,
+    rules: &SourceRootRulesPayload,
+) -> (String, Option<String>) {
+    if !source_root_rules_allow_path(&observed.relative_path, rules) {
+        return (
+            "out_of_scope".to_string(),
+            Some("rule_excluded".to_string()),
+        );
+    }
+
+    let extension = FsPath::new(&observed.absolute_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let Some(extension) = extension else {
+        return (
+            "out_of_scope".to_string(),
+            Some("unsupported_type".to_string()),
+        );
+    };
+    if !is_supported_source_extension(&extension) {
+        return (
+            "out_of_scope".to_string(),
+            Some("unsupported_type".to_string()),
+        );
+    }
+    if !rules.include_extensions.is_empty() && !rules.include_extensions.contains(&extension) {
+        return (
+            "out_of_scope".to_string(),
+            Some("extension_filtered".to_string()),
+        );
+    }
+
+    (
+        "out_of_scope".to_string(),
+        Some("outside_coverage".to_string()),
+    )
+}
+
+fn is_supported_source_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "pdf" | "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "mp4" | "mov" | "m4v"
+    )
+}
+
+fn scan_source_root_directory(root_path: &str) -> SourceRootScanResult {
+    let trimmed = root_path.trim();
+    if trimmed.is_empty() {
+        return SourceRootScanResult {
+            status: "degraded".to_string(),
+            observed_entries: BTreeMap::new(),
+            error: Some("Source root path must not be empty.".to_string()),
+        };
+    }
+
+    let root = FsPath::new(trimmed);
+    let metadata = match fs::metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return SourceRootScanResult {
+                status: "degraded".to_string(),
+                observed_entries: BTreeMap::new(),
+                error: Some(format!("Source root metadata could not be read: {error}")),
+            }
+        }
+    };
+    if !metadata.is_dir() {
+        return SourceRootScanResult {
+            status: "degraded".to_string(),
+            observed_entries: BTreeMap::new(),
+            error: Some("Source root path is not a directory.".to_string()),
+        };
+    }
+
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut observed_entries = BTreeMap::new();
+    match collect_source_root_files(&canonical_root, &canonical_root, &mut observed_entries) {
+        Ok(()) => SourceRootScanResult {
+            status: "ready".to_string(),
+            observed_entries,
+            error: None,
+        },
+        Err(error) => SourceRootScanResult {
+            status: "degraded".to_string(),
+            observed_entries: BTreeMap::new(),
+            error: Some(error),
+        },
+    }
+}
+
+fn collect_source_root_files(
+    root: &FsPath,
+    current: &FsPath,
+    observed_entries: &mut BTreeMap<String, ObservedSourceFile>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(current)
+        .map_err(|error| format!("Source root directory could not be read: {error}"))?;
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Source root entry could not be read: {error}"))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Source root entry type could not be read: {error}"))?;
+
+        if file_type.is_dir() {
+            collect_source_root_files(root, &path, observed_entries)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("Source root file metadata could not be read: {error}"))?;
+        let relative_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        observed_entries.insert(
+            relative_path.clone(),
+            ObservedSourceFile {
+                absolute_path: fs::canonicalize(&path)
+                    .unwrap_or(path.clone())
+                    .to_string_lossy()
+                    .to_string(),
+                relative_path,
+                size_bytes: metadata.len(),
+                modified_at_ms: metadata.modified().ok().and_then(system_time_to_unix_ms),
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn system_time_to_unix_ms(value: SystemTime) -> Option<u128> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis())
 }
 
 fn read_string_filter(filters: Option<&Value>, key: &str) -> Option<BTreeSet<String>> {
@@ -2786,10 +5274,7 @@ fn persist_query_video_asset(
 
     let duration_ms = video_duration_ms(&path).map_err(|message| {
         remove_temp_query_asset_file(path.to_string_lossy().as_ref());
-        ApiError::validation_failed(
-            message,
-            Some(json!({ "field": "file" })),
-        )
+        ApiError::validation_failed(message, Some(json!({ "field": "file" })))
     })?;
 
     Ok(StagedQueryAsset {
@@ -2806,7 +5291,9 @@ fn persist_query_document_asset(
     upload: IncomingQueryDocumentUpload,
 ) -> Result<StagedQueryAsset, ApiError> {
     let runtime_dir = read_required_env("APP_RUNTIME_DIR")?;
-    let target_dir = FsPath::new(&runtime_dir).join("temp-assets").join("documents");
+    let target_dir = FsPath::new(&runtime_dir)
+        .join("temp-assets")
+        .join("documents");
     fs::create_dir_all(&target_dir).map_err(|error| {
         ApiError::runtime_unavailable(
             format!("Query document asset directory could not be created: {error}"),
@@ -2882,7 +5369,9 @@ fn video_duration_ms(path: &FsPath) -> Result<u64, String> {
 fn build_video_segment_ranges(duration_ms: u64) -> Vec<(u64, u64)> {
     let duration_ms = duration_ms.max(1);
     let mut ranges = Vec::new();
-    let step_ms = VIDEO_SEGMENT_WINDOW_MS.saturating_sub(VIDEO_SEGMENT_OVERLAP_MS).max(1);
+    let step_ms = VIDEO_SEGMENT_WINDOW_MS
+        .saturating_sub(VIDEO_SEGMENT_OVERLAP_MS)
+        .max(1);
     let mut start_ms = 0;
 
     loop {
@@ -2912,18 +5401,24 @@ fn resolve_video_query_locator(
     let Some(locator) = locator else {
         return Ok(None);
     };
-    let start_ms = locator.get("start_ms").and_then(Value::as_u64).ok_or_else(|| {
-        ApiError::validation_failed(
-            "Video locator must include integer start_ms.",
-            Some(json!({ "field": format!("{field_name}.start_ms") })),
-        )
-    })?;
-    let end_ms = locator.get("end_ms").and_then(Value::as_u64).ok_or_else(|| {
-        ApiError::validation_failed(
-            "Video locator must include integer end_ms.",
-            Some(json!({ "field": format!("{field_name}.end_ms") })),
-        )
-    })?;
+    let start_ms = locator
+        .get("start_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            ApiError::validation_failed(
+                "Video locator must include integer start_ms.",
+                Some(json!({ "field": format!("{field_name}.start_ms") })),
+            )
+        })?;
+    let end_ms = locator
+        .get("end_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            ApiError::validation_failed(
+                "Video locator must include integer end_ms.",
+                Some(json!({ "field": format!("{field_name}.end_ms") })),
+            )
+        })?;
     if start_ms >= end_ms || end_ms > duration_ms {
         return Err(ApiError::validation_failed(
             "Video locator must satisfy 0 <= start_ms < end_ms <= duration_ms.",
@@ -2968,12 +5463,15 @@ fn resolve_document_query_locator(
                 Some(json!({ "field": format!("{field_name}.start_page") })),
             )
         })?;
-    let end_page = locator.get("end_page").and_then(Value::as_u64).ok_or_else(|| {
-        ApiError::validation_failed(
-            "Document locator must include integer end_page.",
-            Some(json!({ "field": format!("{field_name}.end_page") })),
-        )
-    })?;
+    let end_page = locator
+        .get("end_page")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            ApiError::validation_failed(
+                "Document locator must include integer end_page.",
+                Some(json!({ "field": format!("{field_name}.end_page") })),
+            )
+        })?;
     if start_page < 1 || end_page < start_page || end_page > page_count as u64 {
         return Err(ApiError::validation_failed(
             "Document locator must satisfy 1 <= start_page <= end_page <= page_count.",
@@ -2998,45 +5496,361 @@ async fn index_visual_units(
     state: SharedState,
     job_id: &str,
 ) -> Result<String, IndexingError> {
-    let embeddings = embed_documents(&prepared.visual_units).await?;
-    {
-        let mut state = state.write().await;
-        state.update_job_snapshot(
-            job_id,
-            "running",
-            "stage_write",
-            0,
-            format!(
-                "Writing {} visual unit(s) into the active multivector collection.",
-                prepared.visual_units.len()
-            ),
-        );
-    }
-
-    ensure_qdrant_collection(&prepared.collection_name, embeddings[0].vectors[0].len())
-        .await
-        .map_err(|message| IndexingError {
-            phase: "stage_write",
-            message,
-            completed: prepared.accepted.len(),
-        })?;
-    upsert_qdrant_points(
+    let batch_items = index_embed_batch_items();
+    let total_batches = batch_count(prepared.visual_units.len(), batch_items);
+    let stage_collection_name =
+        staging_collection_name(&prepared.library_id, MULTIVECTOR_INDEX_LINE, job_id);
+    let write_plan = resolve_qdrant_namespace_write_plan(
         &prepared.collection_name,
-        &prepared.visual_units,
-        &embeddings,
+        &stage_collection_name,
+        !prepared.had_existing_visual_units,
     )
     .await
     .map_err(|message| IndexingError {
         phase: "stage_write",
         message,
-        completed: prepared.accepted.len(),
+        completed: 0,
     })?;
+    let mut stage_initialized = false;
+
+    if matches!(
+        write_plan.stage_strategy,
+        StageCollectionStrategy::CloneFromActive { .. }
+    ) {
+        create_qdrant_stage_collection(&write_plan, None)
+            .await
+            .map_err(|message| IndexingError {
+                phase: "stage_write",
+                message,
+                completed: 0,
+            })?;
+        stage_initialized = true;
+    }
+
+    for (batch_index, visual_unit_batch) in prepared.visual_units.chunks(batch_items).enumerate() {
+        {
+            let mut state = state.write().await;
+            state.update_job_snapshot(
+                job_id,
+                "running",
+                "encode",
+                0,
+                format!(
+                    "Encoding batch {}/{} ({} visual unit(s)) for staged multivector indexing.",
+                    batch_index + 1,
+                    total_batches,
+                    visual_unit_batch.len()
+                ),
+            );
+        }
+
+        let embeddings = match embed_documents(visual_unit_batch).await {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                if stage_initialized {
+                    best_effort_delete_qdrant_collection(&stage_collection_name).await;
+                }
+                return Err(error);
+            }
+        };
+
+        {
+            let mut state = state.write().await;
+            state.update_job_snapshot(
+                job_id,
+                "running",
+                "stage_write",
+                0,
+                format!(
+                    "Writing batch {}/{} ({} visual unit(s)) into staged multivector storage.",
+                    batch_index + 1,
+                    total_batches,
+                    visual_unit_batch.len()
+                ),
+            );
+        }
+
+        if !stage_initialized {
+            let vector_size = embeddings
+                .first()
+                .and_then(|embedding| embedding.vectors.first())
+                .map(Vec::len)
+                .unwrap_or_default();
+            if let Err(message) =
+                create_qdrant_stage_collection(&write_plan, Some(vector_size)).await
+            {
+                return Err(IndexingError {
+                    phase: "stage_write",
+                    message,
+                    completed: 0,
+                });
+            }
+            stage_initialized = true;
+        }
+
+        if let Err(message) =
+            upsert_qdrant_points(&stage_collection_name, visual_unit_batch, &embeddings).await
+        {
+            best_effort_delete_qdrant_collection(&stage_collection_name).await;
+            return Err(IndexingError {
+                phase: "stage_write",
+                message,
+                completed: 0,
+            });
+        }
+    }
+
+    if !stage_initialized {
+        return Err(IndexingError {
+            phase: "stage_write",
+            message: "No staged Qdrant collection was created for the import job.".to_string(),
+            completed: 0,
+        });
+    }
+
+    if let Err(message) = validate_qdrant_collection(&stage_collection_name).await {
+        best_effort_delete_qdrant_collection(&stage_collection_name).await;
+        return Err(IndexingError {
+            phase: "stage_write",
+            message,
+            completed: 0,
+        });
+    }
+
+    if let Err(message) = switch_qdrant_active_alias(&write_plan).await {
+        best_effort_delete_qdrant_collection(&stage_collection_name).await;
+        return Err(IndexingError {
+            phase: "activated",
+            message,
+            completed: prepared.accepted.len(),
+        });
+    }
+    best_effort_cleanup_retired_stage_collections(&write_plan).await;
 
     Ok(format!(
-        "Accepted {} path(s); indexed {} visual unit(s) into the active multivector collection.",
+        "Accepted {} path(s); indexed {} visual unit(s) into staged multivector storage and atomically activated the active namespace.",
         prepared.accepted.len(),
         prepared.visual_units.len()
     ))
+}
+
+async fn index_source_action_visual_units(
+    prepared: &PreparedSourceAction,
+    state: SharedState,
+    job_id: &str,
+) -> Result<(), String> {
+    let batch_items = index_embed_batch_items();
+    let total_batches = batch_count(prepared.visual_units_to_index.len(), batch_items);
+    let stage_collection_name =
+        staging_collection_name(&prepared.library_id, MULTIVECTOR_INDEX_LINE, job_id);
+    let write_plan = resolve_qdrant_namespace_write_plan(
+        &prepared.collection_name,
+        &stage_collection_name,
+        !prepared.had_existing_visual_units || prepared.can_rebuild_from_scratch,
+    )
+    .await?;
+    let mut stage_initialized = false;
+
+    if matches!(
+        write_plan.stage_strategy,
+        StageCollectionStrategy::CloneFromActive { .. }
+    ) {
+        create_qdrant_stage_collection(&write_plan, None).await?;
+        stage_initialized = true;
+    }
+
+    if stage_initialized && !prepared.stale_point_ids.is_empty() {
+        {
+            let mut state = state.write().await;
+            state.update_job_snapshot(
+                job_id,
+                "running",
+                "stage_write",
+                0,
+                format!(
+                    "Deleting {} stale point(s) from staged multivector storage.",
+                    prepared.stale_point_ids.len()
+                ),
+            );
+        }
+        if let Err(message) =
+            delete_qdrant_points(&stage_collection_name, &prepared.stale_point_ids).await
+        {
+            best_effort_delete_qdrant_collection(&stage_collection_name).await;
+            return Err(message);
+        }
+    }
+
+    for (batch_index, visual_unit_batch) in prepared
+        .visual_units_to_index
+        .chunks(batch_items)
+        .enumerate()
+    {
+        {
+            let mut state = state.write().await;
+            state.update_job_snapshot(
+                job_id,
+                "running",
+                "encode",
+                0,
+                format!(
+                    "Encoding batch {}/{} ({} visual unit(s)) for {}.",
+                    batch_index + 1,
+                    total_batches,
+                    visual_unit_batch.len(),
+                    prepared.action.as_str(),
+                ),
+            );
+        }
+
+        let embeddings = match embed_documents(visual_unit_batch).await {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                if stage_initialized {
+                    best_effort_delete_qdrant_collection(&stage_collection_name).await;
+                }
+                return Err(error.message);
+            }
+        };
+
+        {
+            let mut state = state.write().await;
+            state.update_job_snapshot(
+                job_id,
+                "running",
+                "stage_write",
+                0,
+                format!(
+                    "Writing batch {}/{} ({} visual unit(s)) into staged multivector storage.",
+                    batch_index + 1,
+                    total_batches,
+                    visual_unit_batch.len()
+                ),
+            );
+        }
+
+        if !stage_initialized {
+            let vector_size = embeddings
+                .first()
+                .and_then(|embedding| embedding.vectors.first())
+                .map(Vec::len)
+                .unwrap_or_default();
+            create_qdrant_stage_collection(&write_plan, Some(vector_size)).await?;
+            stage_initialized = true;
+        }
+
+        if let Err(message) =
+            upsert_qdrant_points(&stage_collection_name, visual_unit_batch, &embeddings).await
+        {
+            best_effort_delete_qdrant_collection(&stage_collection_name).await;
+            return Err(message);
+        }
+    }
+
+    if !stage_initialized {
+        return Ok(());
+    }
+
+    validate_qdrant_collection(&stage_collection_name).await?;
+    if let Err(message) = switch_qdrant_active_alias(&write_plan).await {
+        best_effort_delete_qdrant_collection(&stage_collection_name).await;
+        return Err(message);
+    }
+    best_effort_cleanup_retired_stage_collections(&write_plan).await;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StageCollectionStrategy {
+    Fresh,
+    CloneFromActive { target_collection: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QdrantNamespaceWritePlan {
+    alias_name: String,
+    alias_exists: bool,
+    previous_target_collection: Option<String>,
+    stage_collection_name: String,
+    stage_strategy: StageCollectionStrategy,
+}
+
+fn index_embed_batch_items() -> usize {
+    read_optional_usize_env("INDEX_EMBED_BATCH_ITEMS", DEFAULT_INDEX_EMBED_BATCH_ITEMS).max(1)
+}
+
+fn qdrant_max_upsert_body_bytes() -> usize {
+    read_optional_usize_env(
+        "INDEX_QDRANT_UPSERT_BODY_BYTES",
+        DEFAULT_QDRANT_MAX_UPSERT_BODY_BYTES,
+    )
+}
+
+fn read_optional_usize_env(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn batch_count(total_items: usize, batch_items: usize) -> usize {
+    if total_items == 0 {
+        0
+    } else {
+        ((total_items - 1) / batch_items) + 1
+    }
+}
+
+fn staging_collection_name(library_id: &str, index_line: &str, job_id: &str) -> String {
+    format!("index_stage_{library_id}_{index_line}_{job_id}")
+}
+
+async fn resolve_qdrant_namespace_write_plan(
+    alias_name: &str,
+    stage_collection_name: &str,
+    allow_fresh_without_active: bool,
+) -> Result<QdrantNamespaceWritePlan, String> {
+    match probe_active_qdrant_namespace(alias_name).await? {
+        ActiveNamespaceProbeResult::Ready { target_collection } => Ok(QdrantNamespaceWritePlan {
+            alias_name: alias_name.to_string(),
+            alias_exists: true,
+            previous_target_collection: Some(target_collection.clone()),
+            stage_collection_name: stage_collection_name.to_string(),
+            stage_strategy: StageCollectionStrategy::CloneFromActive { target_collection },
+        }),
+        ActiveNamespaceProbeResult::Missing => {
+            if !allow_fresh_without_active {
+                return Err(
+                    "The active multivector namespace is missing. Run a full library rescan to rebuild the index before applying incremental updates."
+                        .to_string(),
+                );
+            }
+            Ok(QdrantNamespaceWritePlan {
+                alias_name: alias_name.to_string(),
+                alias_exists: false,
+                previous_target_collection: None,
+                stage_collection_name: stage_collection_name.to_string(),
+                stage_strategy: StageCollectionStrategy::Fresh,
+            })
+        }
+        ActiveNamespaceProbeResult::MissingTarget { target_collection } => {
+            if !allow_fresh_without_active {
+                return Err(format!(
+                    "The active multivector namespace alias points to missing collection {target_collection}. Run a full library rescan to rebuild the index before applying incremental updates."
+                ));
+            }
+            Ok(QdrantNamespaceWritePlan {
+                alias_name: alias_name.to_string(),
+                alias_exists: true,
+                previous_target_collection: Some(target_collection),
+                stage_collection_name: stage_collection_name.to_string(),
+                stage_strategy: StageCollectionStrategy::Fresh,
+            })
+        }
+        ActiveNamespaceProbeResult::LegacyDirectCollection => Err(format!(
+            "Legacy direct Qdrant collection {alias_name} blocks the active alias namespace. Remove the old physical index_* collection manually, then retry."
+        )),
+    }
 }
 
 async fn embed_documents(
@@ -3436,41 +6250,39 @@ async fn embed_query_document(
     })
 }
 
-async fn ensure_qdrant_collection(collection_name: &str, vector_size: usize) -> Result<(), String> {
-    let base_url = qdrant_base_url().map_err(|error| error.payload.message)?;
-    let client = qdrant_client();
-    let collection_url = format!("{}/collections/{}", base_url, collection_name);
-    let response = client
-        .get(&collection_url)
-        .send()
-        .await
-        .map_err(|error| format!("Qdrant collection probe failed: {error}"))?;
-
-    if response.status().is_success() {
-        return Ok(());
-    }
-    if response.status() != StatusCode::NOT_FOUND {
-        return Err(format!(
-            "Qdrant collection probe for {collection_name} failed with {}.",
-            response.status()
-        ));
-    }
-
-    let payload = json!({
+fn build_qdrant_collection_create_payload(vector_size: usize, init_from: Option<&str>) -> Value {
+    let mut payload = json!({
         "vectors": {
             "mv": {
                 "size": vector_size,
                 "distance": "Cosine",
+                "on_disk": true,
                 "multivector_config": {
                     "comparator": "max_sim"
                 }
             },
             "prefetch_dense": {
                 "size": vector_size,
-                "distance": "Cosine"
+                "distance": "Cosine",
+                "on_disk": true
             }
         }
     });
+    if let Some(source_collection) = init_from {
+        payload["init_from"] = json!({ "collection": source_collection });
+    }
+    payload
+}
+
+async fn create_qdrant_collection(
+    collection_name: &str,
+    vector_size: usize,
+    init_from: Option<&str>,
+) -> Result<(), String> {
+    let base_url = qdrant_base_url().map_err(|error| error.payload.message)?;
+    let client = qdrant_client();
+    let collection_url = format!("{}/collections/{}", base_url, collection_name);
+    let payload = build_qdrant_collection_create_payload(vector_size, init_from);
     let create_response = client
         .put(&collection_url)
         .json(&payload)
@@ -3481,10 +6293,352 @@ async fn ensure_qdrant_collection(collection_name: &str, vector_size: usize) -> 
     if create_response.status().is_success() {
         Ok(())
     } else {
+        let status = create_response.status();
+        let body = create_response.text().await.unwrap_or_default();
         Err(format!(
-            "Qdrant collection creation for {collection_name} failed with {}.",
-            create_response.status()
+            "Qdrant collection creation for {collection_name} failed with {}: {}.",
+            status,
+            qdrant_error_detail(&body)
         ))
+    }
+}
+
+async fn create_qdrant_stage_collection(
+    write_plan: &QdrantNamespaceWritePlan,
+    vector_size: Option<usize>,
+) -> Result<(), String> {
+    match &write_plan.stage_strategy {
+        StageCollectionStrategy::Fresh => {
+            create_qdrant_collection(
+                &write_plan.stage_collection_name,
+                vector_size.ok_or_else(|| {
+                    format!(
+                        "Qdrant stage {} requires a known vector size before creation.",
+                        write_plan.stage_collection_name
+                    )
+                })?,
+                None,
+            )
+            .await
+        }
+        StageCollectionStrategy::CloneFromActive { target_collection } => {
+            let vector_size = match vector_size {
+                Some(vector_size) => vector_size,
+                None => qdrant_collection_vector_size(target_collection).await?,
+            };
+            create_qdrant_collection(
+                &write_plan.stage_collection_name,
+                vector_size,
+                Some(target_collection),
+            )
+            .await
+        }
+    }
+}
+
+async fn qdrant_collection_exists(collection_name: &str) -> Result<bool, String> {
+    let collection_url = format!(
+        "{}/collections/{}",
+        qdrant_base_url().map_err(|error| error.payload.message)?,
+        collection_name
+    );
+    let response = qdrant_client()
+        .get(&collection_url)
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant collection probe failed: {error}"))?;
+
+    if response.status().is_success() {
+        Ok(true)
+    } else if response.status() == StatusCode::NOT_FOUND {
+        Ok(false)
+    } else {
+        Err(format!(
+            "Qdrant collection probe for {collection_name} failed with {}.",
+            response.status()
+        ))
+    }
+}
+
+async fn validate_qdrant_collection(collection_name: &str) -> Result<(), String> {
+    match qdrant_collection_exists(collection_name).await? {
+        true => Ok(()),
+        false => Err(format!(
+            "Qdrant staged collection {collection_name} was not found after write completion."
+        )),
+    }
+}
+
+async fn qdrant_collection_vector_size(collection_name: &str) -> Result<usize, String> {
+    let response = qdrant_client()
+        .get(format!(
+            "{}/collections/{}",
+            qdrant_base_url().map_err(|error| error.payload.message)?,
+            collection_name
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant collection info probe failed: {error}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "Qdrant collection info probe for {collection_name} failed with {}: {}.",
+            status,
+            qdrant_error_detail(&body)
+        ));
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Qdrant collection info response was invalid JSON: {error}"))?;
+
+    payload
+        .pointer("/result/config/params/vectors/mv/size")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            payload
+                .pointer("/result/config/params/vectors/size")
+                .and_then(Value::as_u64)
+        })
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            format!(
+                "Qdrant collection info for {collection_name} did not expose a usable vector size."
+            )
+        })
+}
+
+async fn list_qdrant_aliases() -> Result<Vec<Value>, String> {
+    let response = qdrant_client()
+        .get(format!(
+            "{}/aliases",
+            qdrant_base_url().map_err(|error| error.payload.message)?
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant alias listing failed: {error}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "Qdrant alias listing failed with {}: {}.",
+            status,
+            qdrant_error_detail(&body)
+        ));
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Qdrant alias listing response was invalid JSON: {error}"))?;
+    Ok(payload
+        .pointer("/result/aliases")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+async fn list_qdrant_collections() -> Result<Vec<String>, String> {
+    let response = qdrant_client()
+        .get(format!(
+            "{}/collections",
+            qdrant_base_url().map_err(|error| error.payload.message)?
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant collection listing failed: {error}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "Qdrant collection listing failed with {}: {}.",
+            status,
+            qdrant_error_detail(&body)
+        ));
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Qdrant collection listing response was invalid JSON: {error}"))?;
+    Ok(payload
+        .pointer("/result/collections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect())
+}
+
+async fn qdrant_alias_target(alias_name: &str) -> Result<Option<String>, String> {
+    for alias in list_qdrant_aliases().await? {
+        let matches = alias
+            .get("alias_name")
+            .and_then(Value::as_str)
+            .map(|value| value == alias_name)
+            .unwrap_or(false);
+        if matches {
+            return Ok(alias
+                .get("collection_name")
+                .and_then(Value::as_str)
+                .map(str::to_string));
+        }
+    }
+    Ok(None)
+}
+
+async fn probe_active_qdrant_namespace(
+    alias_name: &str,
+) -> Result<ActiveNamespaceProbeResult, String> {
+    if let Some(target_collection) = qdrant_alias_target(alias_name).await? {
+        return match qdrant_collection_exists(&target_collection).await? {
+            true => Ok(ActiveNamespaceProbeResult::Ready { target_collection }),
+            false => Ok(ActiveNamespaceProbeResult::MissingTarget { target_collection }),
+        };
+    }
+
+    if qdrant_collection_exists(alias_name).await? {
+        Ok(ActiveNamespaceProbeResult::LegacyDirectCollection)
+    } else {
+        Ok(ActiveNamespaceProbeResult::Missing)
+    }
+}
+
+async fn switch_qdrant_active_alias(write_plan: &QdrantNamespaceWritePlan) -> Result<(), String> {
+    let mut actions = Vec::new();
+    if write_plan.alias_exists {
+        actions.push(json!({
+            "delete_alias": {
+                "alias_name": write_plan.alias_name,
+            }
+        }));
+    }
+    actions.push(json!({
+        "create_alias": {
+            "collection_name": write_plan.stage_collection_name,
+            "alias_name": write_plan.alias_name,
+        }
+    }));
+    let response = qdrant_client()
+        .post(format!(
+            "{}/collections/aliases",
+            qdrant_base_url().map_err(|error| error.payload.message)?
+        ))
+        .json(&json!({ "actions": actions }))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant alias activation failed: {error}"))?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(format!(
+            "Qdrant alias activation for {} failed with {}: {}.",
+            write_plan.alias_name,
+            status,
+            qdrant_error_detail(&body)
+        ))
+    }
+}
+
+async fn delete_qdrant_points(collection_name: &str, point_ids: &[u64]) -> Result<(), String> {
+    if point_ids.is_empty() {
+        return Ok(());
+    }
+
+    let response = qdrant_client()
+        .post(format!(
+            "{}/collections/{}/points/delete?wait=true",
+            qdrant_base_url().map_err(|error| error.payload.message)?,
+            collection_name
+        ))
+        .json(&json!({ "points": point_ids }))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant delete request failed: {error}"))?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(format!(
+            "Qdrant delete request for {collection_name} failed with {}: {}.",
+            status,
+            qdrant_error_detail(&body)
+        ))
+    }
+}
+
+async fn delete_qdrant_collection(collection_name: &str) -> Result<(), String> {
+    let response = qdrant_client()
+        .delete(format!(
+            "{}/collections/{}",
+            qdrant_base_url().map_err(|error| error.payload.message)?,
+            collection_name
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant collection deletion failed: {error}"))?;
+
+    if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(format!(
+            "Qdrant collection deletion for {collection_name} failed with {}: {}.",
+            status,
+            qdrant_error_detail(&body)
+        ))
+    }
+}
+
+async fn best_effort_delete_qdrant_collection(collection_name: &str) {
+    if let Err(error) = delete_qdrant_collection(collection_name).await {
+        tracing::warn!(
+            collection_name = %collection_name,
+            "Failed to delete staged Qdrant collection during cleanup: {error}"
+        );
+    }
+}
+
+async fn best_effort_cleanup_retired_stage_collections(write_plan: &QdrantNamespaceWritePlan) {
+    let mut keep = BTreeSet::from([write_plan.stage_collection_name.clone()]);
+    if let Some(previous_target_collection) = write_plan.previous_target_collection.clone() {
+        keep.insert(previous_target_collection);
+    }
+
+    let Some(namespace_tail) = write_plan.alias_name.strip_prefix("index_") else {
+        return;
+    };
+    let prefix = format!("index_stage_{namespace_tail}_");
+    let collections = match list_qdrant_collections().await {
+        Ok(collections) => collections,
+        Err(error) => {
+            tracing::warn!("Failed to list Qdrant collections for staging cleanup: {error}");
+            return;
+        }
+    };
+
+    for collection_name in collections {
+        if !collection_name.starts_with(&prefix) || keep.contains(&collection_name) {
+            continue;
+        }
+        if let Err(error) = delete_qdrant_collection(&collection_name).await {
+            tracing::warn!(
+                collection_name = %collection_name,
+                "Failed to delete retired staged Qdrant collection: {error}"
+            );
+        }
     }
 }
 
@@ -3493,44 +6647,71 @@ async fn upsert_qdrant_points(
     visual_units: &[VisualUnitRecord],
     embeddings: &[SidecarEmbeddingItem],
 ) -> Result<(), String> {
-    let points: Vec<_> = visual_units
-        .iter()
-        .zip(embeddings.iter())
-        .map(build_qdrant_point)
-        .collect();
-    let point_chunks = chunk_qdrant_points(points, QDRANT_MAX_UPSERT_BODY_BYTES)?;
-    let total_chunks = point_chunks.len();
+    let max_body_bytes = qdrant_max_upsert_body_bytes();
+    if max_body_bytes <= QDRANT_UPSERT_BODY_OVERHEAD_BYTES {
+        return Err(
+            "Qdrant upsert body limit must be larger than the request envelope.".to_string(),
+        );
+    }
 
-    for (chunk_index, points_chunk) in point_chunks.into_iter().enumerate() {
-        let response = qdrant_client()
-            .put(format!(
-                "{}/collections/{}/points?wait=true",
-                qdrant_base_url().map_err(|error| error.payload.message)?,
-                collection_name
-            ))
-            .json(&json!({ "points": points_chunk }))
-            .send()
-            .await
-            .map_err(|error| {
-                format!(
-                    "Qdrant upsert request for {collection_name} chunk {}/{} failed: {error}",
-                    chunk_index + 1,
-                    total_chunks
-                )
-            })?;
+    let mut chunk_index = 0usize;
+    let mut current_chunk = Vec::new();
+    let mut current_size = QDRANT_UPSERT_BODY_OVERHEAD_BYTES;
+    for (visual_unit, embedding) in visual_units.iter().zip(embeddings.iter()) {
+        let point = build_qdrant_point((visual_unit, embedding));
+        let point_size = serde_json::to_vec(&point)
+            .map_err(|error| format!("Failed to serialize Qdrant point payload: {error}"))?
+            .len();
+        let separator_size = usize::from(!current_chunk.is_empty());
+        let next_size = current_size + separator_size + point_size;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let detail = qdrant_error_detail(&body);
-            return Err(format!(
-                "Qdrant upsert for {collection_name} chunk {}/{} failed with {}: {}.",
-                chunk_index + 1,
-                total_chunks,
-                status,
-                detail
-            ));
+        if !current_chunk.is_empty() && next_size > max_body_bytes {
+            chunk_index += 1;
+            send_qdrant_point_chunk(collection_name, chunk_index, &current_chunk).await?;
+            current_chunk.clear();
+            current_size = QDRANT_UPSERT_BODY_OVERHEAD_BYTES;
         }
+
+        current_size += usize::from(!current_chunk.is_empty()) + point_size;
+        current_chunk.push(point);
+    }
+
+    if !current_chunk.is_empty() {
+        chunk_index += 1;
+        send_qdrant_point_chunk(collection_name, chunk_index, &current_chunk).await?;
+    }
+
+    Ok(())
+}
+
+async fn send_qdrant_point_chunk(
+    collection_name: &str,
+    chunk_index: usize,
+    points_chunk: &[Value],
+) -> Result<(), String> {
+    let response = qdrant_client()
+        .put(format!(
+            "{}/collections/{}/points?wait=true",
+            qdrant_base_url().map_err(|error| error.payload.message)?,
+            collection_name
+        ))
+        .json(&json!({ "points": points_chunk }))
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "Qdrant upsert request for {collection_name} chunk {chunk_index} failed: {error}"
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let detail = qdrant_error_detail(&body);
+        return Err(format!(
+            "Qdrant upsert for {collection_name} chunk {chunk_index} failed with {}: {}.",
+            status, detail
+        ));
     }
 
     Ok(())
@@ -3556,6 +6737,7 @@ fn build_qdrant_point(
     })
 }
 
+#[allow(dead_code)]
 fn chunk_qdrant_points(
     points: Vec<Value>,
     max_body_bytes: usize,
@@ -3672,10 +6854,13 @@ fn build_search_response(
         .into_iter()
         .filter_map(|point| point.payload.map(|payload| (point.score, payload)))
         .filter(|(_, payload)| {
-            plan.kind_filter
-                .as_ref()
-                .map(|expected| expected.contains(&payload.kind))
-                .unwrap_or(true)
+            plan.active_visual_unit_ids
+                .contains(&payload.visual_unit_id)
+                && plan
+                    .kind_filter
+                    .as_ref()
+                    .map(|expected| expected.contains(&payload.kind))
+                    .unwrap_or(true)
                 && plan
                     .source_type_filter
                     .as_ref()
@@ -3752,16 +6937,10 @@ fn visual_unit_preview_reference(
         let page = locator.get("page").and_then(Value::as_u64).unwrap_or(1);
         format!("{base}#page={page}&view=FitH")
     } else if kind == "video_segment" {
-        let start_seconds = locator
-            .get("start_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as f64
-            / 1000.0;
-        let end_seconds = locator
-            .get("end_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as f64
-            / 1000.0;
+        let start_seconds =
+            locator.get("start_ms").and_then(Value::as_u64).unwrap_or(0) as f64 / 1000.0;
+        let end_seconds =
+            locator.get("end_ms").and_then(Value::as_u64).unwrap_or(0) as f64 / 1000.0;
         format!("{base}#t={start_seconds:.3},{end_seconds:.3}")
     } else {
         base
@@ -3875,11 +7054,142 @@ fn runtime_token() -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
+fn stable_collection_name(library_id: &str, index_line: &str) -> String {
+    format!("index_{library_id}_{index_line}")
+}
+
+fn parse_id_seq(id: &str, prefix: &str) -> u64 {
+    id.strip_prefix(prefix)
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn max_id_seq<'a>(ids: impl Iterator<Item = &'a String>, prefix: &str) -> u64 {
+    ids.map(|id| parse_id_seq(id, prefix)).max().unwrap_or(0)
+}
+
 fn current_unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+fn load_durable_state_snapshot(
+    path: &FsPath,
+) -> Result<Option<DurableAppStateSnapshot>, io::Error> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let connection = Connection::open(path).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Failed to open durable state store {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    initialize_durable_state_store(&connection).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Failed to initialize durable state store {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+
+    let payload = connection
+        .query_row(
+            "SELECT payload_json FROM durable_state_snapshots WHERE id = ?1",
+            params![STATE_SNAPSHOT_ROW_ID],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "Failed to read durable state snapshot {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+
+    payload
+        .map(|payload| {
+            serde_json::from_str::<DurableAppStateSnapshot>(&payload).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Failed to decode durable state snapshot {}: {error}",
+                        path.display()
+                    ),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn write_durable_state_snapshot(
+    path: &FsPath,
+    snapshot: &DurableAppStateSnapshot,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create durable state store directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut connection = Connection::open(path).map_err(|error| {
+        format!(
+            "Failed to open durable state store {}: {error}",
+            path.display()
+        )
+    })?;
+    initialize_durable_state_store(&connection).map_err(|error| {
+        format!(
+            "Failed to initialize durable state store {}: {error}",
+            path.display()
+        )
+    })?;
+
+    let payload = serde_json::to_string(snapshot)
+        .map_err(|error| format!("Failed to encode durable state snapshot: {error}"))?;
+    let updated_at_ms = i64::try_from(current_unix_ms()).unwrap_or(i64::MAX);
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("Failed to begin durable state transaction: {error}"))?;
+    transaction
+        .execute("DELETE FROM durable_state_snapshots", [])
+        .map_err(|error| format!("Failed to clear durable state snapshot: {error}"))?;
+    transaction
+        .execute(
+            "INSERT INTO durable_state_snapshots (id, payload_json, updated_at_ms) VALUES (?1, ?2, ?3)",
+            params![STATE_SNAPSHOT_ROW_ID, payload, updated_at_ms],
+        )
+        .map_err(|error| format!("Failed to write durable state snapshot: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit durable state snapshot: {error}"))?;
+    Ok(())
+}
+
+fn initialize_durable_state_store(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS durable_state_snapshots (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payload_json TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    Ok(())
 }
 
 fn remove_temp_query_asset_file(path: &str) {
@@ -3978,6 +7288,709 @@ mod tests {
 
         assert_eq!(snapshot.id, "lib_000001");
         assert_eq!(snapshot.index_lines[0].status, "not_ready");
+    }
+
+    #[test]
+    fn durable_state_roundtrip_restores_library_source_roots_sources_visual_units_and_active_index()
+    {
+        let store_path = unique_test_file_path("durable-roundtrip.sqlite");
+        let root_dir = unique_test_dir_path("durable-roundtrip");
+        fs::create_dir_all(&root_dir).unwrap();
+        fs::write(root_dir.join("chart.png"), b"png").unwrap();
+        write_test_pdf(&root_dir.join("report.pdf"), 2);
+
+        let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "durable-roundtrip".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        let source_root = state
+            .create_source_root(
+                &library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(true),
+                    rules: Some(SourceRootRulesPayload {
+                        include_globs: Vec::new(),
+                        exclude_globs: Vec::new(),
+                        include_extensions: vec!["png".to_string(), "pdf".to_string()],
+                    }),
+                },
+            )
+            .unwrap();
+        let (_, queued) = state
+            .queue_source_action(
+                &library.id,
+                SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+                SourceActionKind::Refresh,
+                SourceActionTrigger::Manual,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let queued = queued.unwrap();
+        let prepared = state.prepare_source_action_execution(&queued.plan).unwrap();
+        let outcome = SourceActionJobOutcome::completed(&prepared);
+        state
+            .finalize_source_action_job(&queued.job_id, prepared, outcome)
+            .unwrap();
+
+        let active_alias = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
+        let active_target =
+            staging_collection_name(&library.id, MULTIVECTOR_INDEX_LINE, "job_000001");
+        let loaded = load_state_with_qdrant_namespaces(
+            &store_path,
+            &[(active_alias, active_target.clone())],
+            &[active_target],
+        );
+        let loaded_library = loaded.libraries.get(&library.id).unwrap();
+        let loaded_root = loaded_library
+            .source_roots
+            .get(&source_root.source_root_id)
+            .unwrap();
+
+        assert_eq!(loaded.library_order, vec![library.id.clone()]);
+        assert_eq!(
+            loaded_library.source_root_order,
+            vec![source_root.source_root_id]
+        );
+        assert_eq!(loaded_library.sources.len(), 2);
+        assert_eq!(loaded_library.visual_units.len(), 3);
+        assert!(loaded_library
+            .active_index_lines
+            .contains(MULTIVECTOR_INDEX_LINE));
+        assert_eq!(
+            loaded_root.rules.include_extensions,
+            vec!["pdf".to_string(), "png".to_string()]
+        );
+        assert_eq!(loaded_root.watch_state, "watching");
+        assert!(loaded.jobs.is_empty());
+        assert!(loaded.job_order.is_empty());
+        assert_eq!(loaded_library.latest_job_id, None);
+
+        let _ = fs::remove_file(&store_path);
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn restart_load_continues_id_sequences_and_clears_jobs() {
+        let store_path = unique_test_file_path("restart-sequences.sqlite");
+        let first_image = unique_test_file_path("restart-sequences-first.png");
+        let second_image = unique_test_file_path("restart-sequences-second.png");
+        fs::write(&first_image, b"png").unwrap();
+        fs::write(&second_image, b"png").unwrap();
+        let root_dir = unique_test_dir_path("restart-sequences-root");
+        fs::create_dir_all(&root_dir).unwrap();
+
+        let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "restart-sequences".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        let root = state
+            .create_source_root(
+                &library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(true),
+                    rules: Some(SourceRootRulesPayload::default()),
+                },
+            )
+            .unwrap();
+        let prepared = state
+            .prepare_import(
+                &library.id,
+                ImportPathsRequest {
+                    paths: vec![first_image.to_string_lossy().to_string()],
+                },
+            )
+            .unwrap();
+        let import_data = state.queue_import(&prepared).unwrap();
+        let job_id = import_data.job_handle.clone().unwrap();
+        state
+            .finalize_import_job(
+                &job_id,
+                prepared,
+                ImportJobOutcome::completed("indexed first image".to_string(), 1),
+            )
+            .unwrap();
+
+        let active_alias = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
+        let active_target =
+            staging_collection_name(&library.id, MULTIVECTOR_INDEX_LINE, "job_000001");
+        let mut loaded = load_state_with_qdrant_namespaces(
+            &store_path,
+            &[(active_alias, active_target.clone())],
+            &[active_target],
+        );
+        let loaded_library = loaded.libraries.get(&library.id).unwrap();
+        assert!(loaded.jobs.is_empty());
+        assert!(loaded.job_order.is_empty());
+        assert_eq!(loaded_library.latest_job_id, None);
+
+        let second_library = loaded
+            .create_library(CreateLibraryRequest {
+                name: "restart-sequences-2".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        assert_eq!(second_library.id, "lib_000002");
+
+        let second_root = loaded
+            .create_source_root(
+                &second_library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(false),
+                    rules: Some(SourceRootRulesPayload::default()),
+                },
+            )
+            .unwrap();
+        assert_eq!(root.source_root_id, "root_000001");
+        assert_eq!(second_root.source_root_id, "root_000002");
+
+        let prepared = loaded
+            .prepare_import(
+                &second_library.id,
+                ImportPathsRequest {
+                    paths: vec![second_image.to_string_lossy().to_string()],
+                },
+            )
+            .unwrap();
+        assert_eq!(prepared.sources[0].id, "src_000002");
+        assert_eq!(prepared.visual_units[0].id, "vu_000002");
+
+        let _ = fs::remove_file(&store_path);
+        let _ = fs::remove_file(first_image);
+        let _ = fs::remove_file(second_image);
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn restart_load_missing_collection_marks_index_not_ready() {
+        let store_path = unique_test_file_path("restart-missing-collection.sqlite");
+        let image_path = unique_test_file_path("restart-missing-collection.png");
+        fs::write(&image_path, b"png").unwrap();
+
+        let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "restart-missing-collection".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        let prepared = state
+            .prepare_import(
+                &library.id,
+                ImportPathsRequest {
+                    paths: vec![image_path.to_string_lossy().to_string()],
+                },
+            )
+            .unwrap();
+        let import_data = state.queue_import(&prepared).unwrap();
+        let job_id = import_data.job_handle.clone().unwrap();
+        state
+            .finalize_import_job(
+                &job_id,
+                prepared,
+                ImportJobOutcome::completed("indexed first image".to_string(), 1),
+            )
+            .unwrap();
+
+        let loaded = load_state_with_qdrant_namespaces(&store_path, &[], &[]);
+        let loaded_library = loaded.libraries.get(&library.id).unwrap();
+        assert!(!loaded_library
+            .active_index_lines
+            .contains(MULTIVECTOR_INDEX_LINE));
+
+        let error = loaded
+            .prepare_text_search(&TextSearchRequest {
+                library_id: library.id.clone(),
+                text: "chart".to_string(),
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap_err();
+        assert_eq!(error.payload.code, "not_ready");
+
+        let active_alias = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
+        let active_target =
+            staging_collection_name(&library.id, MULTIVECTOR_INDEX_LINE, "job_000001");
+        let reloaded = load_state_with_qdrant_namespaces(
+            &store_path,
+            &[(active_alias, active_target.clone())],
+            &[active_target],
+        );
+        assert!(!reloaded
+            .libraries
+            .get(&library.id)
+            .unwrap()
+            .active_index_lines
+            .contains(MULTIVECTOR_INDEX_LINE));
+
+        let _ = fs::remove_file(&store_path);
+        let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn restart_load_legacy_direct_collection_marks_index_not_ready() {
+        let store_path = unique_test_file_path("restart-legacy-direct.sqlite");
+        let image_path = unique_test_file_path("restart-legacy-direct.png");
+        fs::write(&image_path, b"png").unwrap();
+
+        let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "restart-legacy-direct".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        let prepared = state
+            .prepare_import(
+                &library.id,
+                ImportPathsRequest {
+                    paths: vec![image_path.to_string_lossy().to_string()],
+                },
+            )
+            .unwrap();
+        let import_data = state.queue_import(&prepared).unwrap();
+        let job_id = import_data.job_handle.clone().unwrap();
+        state
+            .finalize_import_job(
+                &job_id,
+                prepared,
+                ImportJobOutcome::completed("indexed first image".to_string(), 1),
+            )
+            .unwrap();
+
+        let legacy_direct_collection = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
+        let loaded =
+            load_state_with_qdrant_namespaces(&store_path, &[], &[legacy_direct_collection]);
+        assert!(!loaded
+            .libraries
+            .get(&library.id)
+            .unwrap()
+            .active_index_lines
+            .contains(MULTIVECTOR_INDEX_LINE));
+
+        let _ = fs::remove_file(&store_path);
+        let _ = fs::remove_file(image_path);
+    }
+
+    #[test]
+    fn restart_load_reseeds_watcher_runtime_fields_without_auto_queueing_jobs() {
+        let store_path = unique_test_file_path("restart-watcher.sqlite");
+        let root_dir = unique_test_dir_path("restart-watcher-root");
+        fs::create_dir_all(&root_dir).unwrap();
+        fs::write(root_dir.join("watch.png"), b"png").unwrap();
+
+        let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "restart-watcher".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+        let source_root = state
+            .create_source_root(
+                &library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(true),
+                    rules: Some(SourceRootRulesPayload::default()),
+                },
+            )
+            .unwrap();
+
+        {
+            let root = state
+                .libraries
+                .get_mut(&library.id)
+                .unwrap()
+                .source_roots
+                .get_mut(&source_root.source_root_id)
+                .unwrap();
+            root.watch_state = "queued_refresh".to_string();
+            root.pending_watch_paths.insert("watch.png".to_string());
+            root.pending_watch_deadline_ms = Some(0);
+            root.pending_watch_error = Some("stale watcher error".to_string());
+            root.last_action = Some(SourceRootLastAction {
+                action: "refresh".to_string(),
+                status: "completed".to_string(),
+                summary: "stale".to_string(),
+                job_id: Some("job_999999".to_string()),
+            });
+        }
+        state.persist_durable_state().unwrap();
+
+        let loaded = load_state_with_qdrant_namespaces(&store_path, &[], &[]);
+        let loaded_root = loaded
+            .libraries
+            .get(&library.id)
+            .unwrap()
+            .source_roots
+            .get(&source_root.source_root_id)
+            .unwrap();
+        assert_eq!(loaded_root.watch_state, "watching");
+        assert!(loaded_root.pending_watch_paths.is_empty());
+        assert_eq!(loaded_root.pending_watch_deadline_ms, None);
+        assert_eq!(loaded_root.pending_watch_error, None);
+        assert!(loaded_root.last_action.is_none());
+        assert!(loaded.jobs.is_empty());
+        assert!(loaded.job_order.is_empty());
+
+        let _ = fs::remove_file(&store_path);
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn source_root_refresh_activates_files_and_rule_update_moves_sources_out_of_scope() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "source-root-refresh".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let root_dir = unique_test_dir_path("source-root-refresh");
+        fs::create_dir_all(&root_dir).unwrap();
+        let image_path = root_dir.join("chart.png");
+        let pdf_path = root_dir.join("report.pdf");
+        fs::write(&image_path, b"png").unwrap();
+        write_test_pdf(&pdf_path, 2);
+
+        let source_root = state
+            .create_source_root(
+                &library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(true),
+                    rules: Some(SourceRootRulesPayload::default()),
+                },
+            )
+            .unwrap();
+
+        let (action, queued) = state
+            .queue_source_action(
+                &library.id,
+                SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+                SourceActionKind::Refresh,
+                SourceActionTrigger::Manual,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(action.accepted.len(), 1);
+        let queued = queued.unwrap();
+        let prepared = state.prepare_source_action_execution(&queued.plan).unwrap();
+        assert_eq!(prepared.summary.activated_sources, 2);
+        assert_eq!(prepared.summary.indexing_visual_units, 3);
+        let outcome = SourceActionJobOutcome::completed(&prepared);
+        state
+            .finalize_source_action_job(&queued.job_id, prepared, outcome)
+            .unwrap();
+
+        let sources = state
+            .list_sources(
+                &library.id,
+                SourcesQuery {
+                    source_root_id: Some(source_root.source_root_id.clone()),
+                    source_type: None,
+                    status: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(sources.sources.len(), 2);
+        assert!(sources
+            .sources
+            .iter()
+            .all(|source| source.status == "active"));
+
+        state
+            .update_source_root(
+                &library.id,
+                &source_root.source_root_id,
+                UpdateSourceRootRequest {
+                    root_path: None,
+                    enabled: None,
+                    rules: Some(SourceRootRulesPayload {
+                        include_globs: Vec::new(),
+                        exclude_globs: vec!["chart.png".to_string()],
+                        include_extensions: Vec::new(),
+                    }),
+                },
+            )
+            .unwrap();
+
+        let (action, queued) = state
+            .queue_source_action(
+                &library.id,
+                SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+                SourceActionKind::Refresh,
+                SourceActionTrigger::Manual,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(action.accepted.len(), 1);
+        let queued = queued.unwrap();
+        let prepared = state.prepare_source_action_execution(&queued.plan).unwrap();
+        assert_eq!(prepared.summary.out_of_scope_sources, 1);
+        let outcome = SourceActionJobOutcome::completed(&prepared);
+        state
+            .finalize_source_action_job(&queued.job_id, prepared, outcome)
+            .unwrap();
+
+        let active_sources = state
+            .list_sources(
+                &library.id,
+                SourcesQuery {
+                    source_root_id: Some(source_root.source_root_id.clone()),
+                    source_type: None,
+                    status: Some("active".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(active_sources.sources.len(), 1);
+        assert_eq!(active_sources.sources[0].source_type, "pdf");
+
+        let out_of_scope_sources = state
+            .list_sources(
+                &library.id,
+                SourcesQuery {
+                    source_root_id: Some(source_root.source_root_id),
+                    source_type: None,
+                    status: Some("out_of_scope".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(out_of_scope_sources.sources.len(), 1);
+        assert_eq!(out_of_scope_sources.sources[0].source_type, "image");
+
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn source_root_refresh_marks_deleted_files_invalidated() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "source-root-invalidation".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let root_dir = unique_test_dir_path("source-root-invalidation");
+        fs::create_dir_all(&root_dir).unwrap();
+        let image_path = root_dir.join("chart.png");
+        fs::write(&image_path, b"png").unwrap();
+
+        let source_root = state
+            .create_source_root(
+                &library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(true),
+                    rules: Some(SourceRootRulesPayload::default()),
+                },
+            )
+            .unwrap();
+
+        let (_, queued) = state
+            .queue_source_action(
+                &library.id,
+                SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+                SourceActionKind::Refresh,
+                SourceActionTrigger::Manual,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let queued = queued.unwrap();
+        let prepared = state.prepare_source_action_execution(&queued.plan).unwrap();
+        let outcome = SourceActionJobOutcome::completed(&prepared);
+        state
+            .finalize_source_action_job(&queued.job_id, prepared, outcome)
+            .unwrap();
+
+        fs::remove_file(&image_path).unwrap();
+
+        let (_, queued) = state
+            .queue_source_action(
+                &library.id,
+                SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+                SourceActionKind::Refresh,
+                SourceActionTrigger::Manual,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let queued = queued.unwrap();
+        let prepared = state.prepare_source_action_execution(&queued.plan).unwrap();
+        assert_eq!(prepared.summary.invalidated_sources, 1);
+        let outcome = SourceActionJobOutcome::completed(&prepared);
+        state
+            .finalize_source_action_job(&queued.job_id, prepared, outcome)
+            .unwrap();
+
+        let invalidated_sources = state
+            .list_sources(
+                &library.id,
+                SourcesQuery {
+                    source_root_id: Some(source_root.source_root_id.clone()),
+                    source_type: None,
+                    status: Some("invalidated".to_string()),
+                },
+            )
+            .unwrap();
+        assert_eq!(invalidated_sources.sources.len(), 1);
+        assert_eq!(
+            invalidated_sources.sources[0].status_reason.as_deref(),
+            Some("not_found")
+        );
+
+        let search_plan = state
+            .prepare_text_search(&TextSearchRequest {
+                library_id: library.id.clone(),
+                text: "chart".to_string(),
+                filters: None,
+                top_k: Some(5),
+                cursor: None,
+                debug: Some(false),
+                target_index_lines: None,
+            })
+            .unwrap();
+        assert!(search_plan.active_visual_unit_ids.is_empty());
+
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn watcher_poll_debounces_into_incremental_refresh_queue() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "watcher-refresh".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let root_dir = unique_test_dir_path("watcher-refresh");
+        fs::create_dir_all(&root_dir).unwrap();
+        let image_path = root_dir.join("watch.png");
+
+        let source_root = state
+            .create_source_root(
+                &library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(true),
+                    rules: Some(SourceRootRulesPayload::default()),
+                },
+            )
+            .unwrap();
+
+        fs::write(&image_path, b"png").unwrap();
+
+        let queued = state.poll_source_root_watchers();
+        assert!(queued.is_empty());
+        let root = state
+            .libraries
+            .get_mut(&library.id)
+            .unwrap()
+            .source_roots
+            .get_mut(&source_root.source_root_id)
+            .unwrap();
+        assert_eq!(root.watch_state, "queued_refresh");
+        root.pending_watch_deadline_ms = Some(0);
+
+        let queued = state.poll_source_root_watchers();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].plan.action.as_str(), "refresh");
+        assert_eq!(
+            queued[0].plan.target_root_ids,
+            vec![source_root.source_root_id]
+        );
+
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn disabled_source_root_skips_watcher_and_rejects_manual_refresh() {
+        let mut state = AppState::default();
+        let library = state
+            .create_library(CreateLibraryRequest {
+                name: "disabled-source-root".to_string(),
+                config: Some(CreateLibraryConfigRequest {
+                    enabled_index_lines: vec!["multivector".to_string()],
+                }),
+            })
+            .unwrap();
+
+        let root_dir = unique_test_dir_path("disabled-source-root");
+        fs::create_dir_all(&root_dir).unwrap();
+        fs::write(root_dir.join("disabled.png"), b"png").unwrap();
+
+        let source_root = state
+            .create_source_root(
+                &library.id,
+                CreateSourceRootRequest {
+                    root_path: root_dir.to_string_lossy().to_string(),
+                    enabled: Some(false),
+                    rules: Some(SourceRootRulesPayload::default()),
+                },
+            )
+            .unwrap();
+
+        let queued = state.poll_source_root_watchers();
+        assert!(queued.is_empty());
+
+        let root = state
+            .libraries
+            .get(&library.id)
+            .unwrap()
+            .source_roots
+            .get(&source_root.source_root_id)
+            .unwrap();
+        assert_eq!(root.status, "disabled");
+        assert_eq!(root.watch_state, "disabled");
+
+        let (action, queued) = state
+            .queue_source_action(
+                &library.id,
+                SourceActionScope::SourceRoot(source_root.source_root_id),
+                SourceActionKind::Refresh,
+                SourceActionTrigger::Manual,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(queued.is_none());
+        assert!(action.accepted.is_empty());
+        assert_eq!(action.rejected.len(), 1);
+        assert_eq!(action.rejected[0].reason_code, "not_enabled");
+
+        let _ = fs::remove_dir_all(root_dir);
     }
 
     #[test]
@@ -4679,8 +8692,14 @@ mod tests {
         assert_eq!(prepared.accepted[0].visual_units.len(), 1);
         assert_eq!(prepared.accepted[0].visual_units[0].source_id, "src_000001");
         assert_eq!(prepared.accepted[0].visual_units[0].locator["start_ms"], 0);
-        assert_eq!(prepared.accepted[0].visual_units[0].locator["duration_ms"], 2500);
-        assert_eq!(prepared.accepted[0].source_id.as_deref(), Some("src_000001"));
+        assert_eq!(
+            prepared.accepted[0].visual_units[0].locator["duration_ms"],
+            2500
+        );
+        assert_eq!(
+            prepared.accepted[0].source_id.as_deref(),
+            Some("src_000001")
+        );
 
         let _ = fs::remove_file(video_path);
     }
@@ -4741,7 +8760,7 @@ mod tests {
         let classification = state
             .inspect_import_path(&video_path.to_string_lossy())
             .unwrap();
-        let source = state.source_record_from_classification(&classification);
+        let source = state.source_record_from_classification(&classification, Vec::new());
         state
             .libraries
             .get_mut(&library.id)
@@ -4919,10 +8938,19 @@ mod tests {
                 "src_image_000001".to_string(),
                 SourceRecord {
                     id: "src_image_000001".to_string(),
+                    source_root_id: None,
+                    source_root_path: None,
                     source_path: "/tmp/example.png".to_string(),
+                    relative_path: None,
                     source_type: "image".to_string(),
+                    kind: "image".to_string(),
+                    status: "active".to_string(),
+                    status_reason: None,
                     page_count: None,
                     duration_ms: None,
+                    observed_size_bytes: None,
+                    observed_modified_at_ms: None,
+                    visual_unit_ids: Vec::new(),
                 },
             );
 
@@ -5123,8 +9151,10 @@ mod tests {
         assert_eq!(temp_input.path, pdf_path.to_string_lossy());
         assert!(temp_input.locator.is_none());
 
-        let classification = state.inspect_import_path(&pdf_path.to_string_lossy()).unwrap();
-        let source = state.source_record_from_classification(&classification);
+        let classification = state
+            .inspect_import_path(&pdf_path.to_string_lossy())
+            .unwrap();
+        let source = state.source_record_from_classification(&classification, Vec::new());
         state
             .libraries
             .get_mut(&library.id)
@@ -5300,10 +9330,19 @@ mod tests {
                 "src_image_000002".to_string(),
                 SourceRecord {
                     id: "src_image_000002".to_string(),
+                    source_root_id: None,
+                    source_root_path: None,
                     source_path: "/tmp/example.png".to_string(),
+                    relative_path: None,
                     source_type: "image".to_string(),
+                    kind: "image".to_string(),
+                    status: "active".to_string(),
+                    status_reason: None,
                     page_count: None,
                     duration_ms: None,
+                    observed_size_bytes: None,
+                    observed_modified_at_ms: None,
+                    visual_unit_ids: Vec::new(),
                 },
             );
 
@@ -5367,12 +9406,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_qdrant_collection_create_payload_sets_on_disk_and_init_from() {
+        let payload = build_qdrant_collection_create_payload(96, Some("index_stage_src"));
+
+        assert_eq!(payload["vectors"]["mv"]["size"], 96);
+        assert_eq!(payload["vectors"]["mv"]["on_disk"], true);
+        assert_eq!(payload["vectors"]["prefetch_dense"]["size"], 96);
+        assert_eq!(payload["vectors"]["prefetch_dense"]["on_disk"], true);
+        assert_eq!(payload["init_from"]["collection"], "index_stage_src");
+    }
+
     fn unique_test_file_path(name: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("fauni-search-{stamp}-{name}"))
+    }
+
+    fn unique_test_dir_path(name: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("fauni-search-{stamp}-{name}"))
+    }
+
+    fn simulated_active_namespace_probe(
+        alias_name: &str,
+        alias_targets: &BTreeMap<String, String>,
+        existing_collections: &BTreeSet<String>,
+    ) -> ActiveNamespaceProbeResult {
+        if let Some(target_collection) = alias_targets.get(alias_name) {
+            if existing_collections.contains(target_collection) {
+                return ActiveNamespaceProbeResult::Ready {
+                    target_collection: target_collection.clone(),
+                };
+            }
+            return ActiveNamespaceProbeResult::MissingTarget {
+                target_collection: target_collection.clone(),
+            };
+        }
+        if existing_collections.contains(alias_name) {
+            ActiveNamespaceProbeResult::LegacyDirectCollection
+        } else {
+            ActiveNamespaceProbeResult::Missing
+        }
+    }
+
+    fn load_state_with_qdrant_namespaces(
+        store_path: &std::path::Path,
+        alias_targets: &[(String, String)],
+        existing_collections: &[String],
+    ) -> AppState {
+        let alias_targets = alias_targets.iter().cloned().collect::<BTreeMap<_, _>>();
+        let existing_collections = existing_collections
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(AppState::load_from_durable_store_path_with_probe(
+                Some(store_path.to_path_buf()),
+                move |collection_name| {
+                    let probe = simulated_active_namespace_probe(
+                        collection_name,
+                        &alias_targets,
+                        &existing_collections,
+                    );
+                    async move { Ok(probe) }
+                },
+            ))
+            .unwrap()
     }
 
     fn write_test_pdf(path: &std::path::Path, page_count: usize) {

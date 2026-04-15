@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let host = required_env("APP_HOST")?;
     let port = required_env("APP_PORT")?;
     let bind = format!("{host}:{port}");
-    let state = new_state();
+    let state = new_state().await?;
     spawn_runtime_maintenance(state.clone());
     let app = build_app(state);
 

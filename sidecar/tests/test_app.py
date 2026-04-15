@@ -317,6 +317,33 @@ def test_embed_returns_document_vectors() -> None:
     assert payload["debug"]["elapsed_ms"] == 2.34
 
 
+def test_embed_rejects_document_batches_over_runtime_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INDEX_EMBED_BATCH_ITEMS", "1")
+    routes = build_route_map(FakeRuntime())
+    request = EmbedRequest.model_validate(
+        {
+            "operation_kind": "document_embedding",
+            "inputs": {
+                "documents": [
+                    {"path": "/tmp/example-a.pdf"},
+                    {"path": "/tmp/example-b.pdf"},
+                ]
+            },
+        }
+    )
+
+    with pytest.raises(SidecarApiError) as excinfo:
+        routes["/embed"](request)
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.code == "validation_failed"
+    assert excinfo.value.details == {
+        "field": "inputs.documents",
+        "limit": 1,
+        "received": 2,
+    }
+
+
 def test_embed_returns_document_query_vectors() -> None:
     routes = build_route_map(FakeRuntime())
     request = EmbedRequest.model_validate(
