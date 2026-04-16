@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-04-16
+### Changed
+- Added the external demo capability guide, clarified query-mode terminology, and rewrote `README.md` into a newcomer-first entry that points detailed operator guidance to the docs set.
+- Split the UI into dedicated `Search` and `Inventory` workspaces, with focused spec and Playwright coverage for inventory filtering and narrow-screen behavior.
+- Refactored the Rust crate out of the monolithic `src/lib.rs` and expanded black-box router-level integration coverage for restart persistence, source management, imports, search, and job observation.
+
 ## 2026-04-15
 ### Added
 - Added the first restart-persistence slice for libraries and active indexes, backed by `${APP_RUNTIME_DIR}/state.sqlite`, with Rust coverage for snapshot roundtrip, restart-time id continuation, missing-index downgrade, and watcher reseeding.
