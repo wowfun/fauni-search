@@ -29,6 +29,7 @@
 
 - 工作区连续性（Workspace Continuity）：搜索输入、结果浏览与详情浏览应在同一工作区内连续完成，而不是频繁跳转独立页面
 - 当前库上下文显式（Visible Library Context）：搜索工作区必须始终让用户知道当前查询作用于哪个库
+- 搜索首屏优先（Search Above Management）：搜索入口应作为搜索工作区中心区域的首屏主体；来源清单等管理观察面不应再以内嵌大列表压在搜索入口之前
 - 统一入口、单次单输入（Unified Entry, Single Query Input）：工作区可以承接统一搜索入口与查询模式切换，但单次公开搜索请求只应发出一种查询输入
 - 非文本模式可复用（Reusable Non-Text Modes）：`Image`、`Video` 等非文本查询模式应共享稳定的查询输入交互，而不是在每个能力专题中各自发明一套独立工作区体验
 - 最小结果优先（Minimal Result First）：结果列表默认呈现最小结果卡片；更完整的信息通过详情面板继续展开
@@ -41,6 +42,7 @@
   - 查询输入区与结果列表处于同一连续工作流中
   - 结果详情在同一工作区内展开，而不是强制跳转独立详情页
   - 嵌入式任务观察面可以与搜索工作区共存，用于表达导入、索引或相关后台动作的进度与失败摘要
+- 来源清单若已提升为独立工作区，则搜索工作区最多保留来源管理摘要、状态提示与跳转入口，不应继续承载完整库级来源列表
 - 搜索工作区可以内嵌导入或查询前置动作入口，但这些入口不应改写搜索能力专题本身的输入语义
 
 ## 查询入口与模式切换
@@ -83,6 +85,7 @@
 ## 关联主题
 
 - [spec.md](./spec.md) 定义搜索工作区在全应用壳层中的位置与导航关系
+- [source-inventory-workspace.md](./source-inventory-workspace.md) 定义来源清单工作区的共享骨架，以及与搜索工作区之间的切换关系
 - [004-search](../004-search/spec.md) 定义搜索查询、结果语义与单次单输入约束
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务、阶段推进与失败观察语义
 - [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义搜索、详情、预览与相关动作接口的请求 / 响应编码

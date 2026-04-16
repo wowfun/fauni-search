@@ -52,6 +52,16 @@ async function createLibrary(page, suffix) {
   return libraryName;
 }
 
+async function openInventoryWorkspace(page) {
+  await page.getByTestId("workspace-tab-inventory").click();
+  await expect(page.getByTestId("inventory-panel")).toBeVisible();
+}
+
+async function openSearchWorkspace(page) {
+  await page.getByTestId("workspace-tab-search").click();
+  await expect(page.getByTestId("search-panel")).toBeVisible();
+}
+
 async function waitForFirstJobCompleted(page) {
   const firstJob = page.getByTestId("job-card").first();
   await expect(firstJob).toBeVisible({ timeout: 30_000 });
@@ -322,6 +332,44 @@ test("search before import shows not_ready instead of an empty result", async ({
   await expect(page.getByTestId("search-error-notice")).toBeVisible();
   await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
   await expect(page.getByTestId("search-error-message")).toContainText("active index");
+});
+
+test("default workspace keeps search first and moves inventory out of the center flow", async ({ page }) => {
+  await createLibrary(page, "workspace-default");
+
+  await expect(page.getByTestId("workspace-tab-search")).toBeVisible();
+  await expect(page.getByTestId("workspace-tab-inventory")).toBeVisible();
+  await expect(page.getByTestId("search-panel")).toBeVisible();
+  await expect(page.getByTestId("inventory-panel")).toHaveCount(0);
+  await expect(page.getByTestId("inventory-bridge-button")).toBeVisible();
+});
+
+test("switching between search and inventory preserves search drafts results and detail selection", async ({ page }) => {
+  await createLibrary(page, "workspace-switch-preserve");
+  await page.getByTestId("run-demo-button").click();
+  await waitForFirstJobCompleted(page);
+
+  const firstResult = page.getByTestId("result-card").first();
+  await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+  const visualUnitId = await firstResult.getAttribute("data-visual-unit-id");
+  await firstResult.locator(".result-select").click();
+  await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+  await expect(page.getByTestId("search-text-input")).toHaveValue(
+    "What is the percentage change in the net cash provided from operating activities?"
+  );
+
+  await openInventoryWorkspace(page);
+  await expect(page.getByTestId("inventory-summary")).toBeVisible();
+  await expect(page.getByTestId("library-source-card").first()).toBeVisible();
+
+  await openSearchWorkspace(page);
+  await expect(page.getByTestId("search-text-input")).toHaveValue(
+    "What is the percentage change in the net cash provided from operating activities?"
+  );
+  await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+  await expect(
+    page.locator(`[data-testid="result-card"][data-visual-unit-id="${visualUnitId}"]`)
+  ).toHaveClass(/active/);
 });
 
 test("workspace refresh preserves focused editable inputs and drafts", async ({ page }) => {
@@ -816,11 +864,14 @@ test("source management can create edit toggle refresh rescan and filter invento
     await waitForNewLatestJobCompleted(page, previousJobId);
     await expect(rootCard).toContainText("Last action: refresh");
 
+    await openInventoryWorkspace(page);
+    await expect(page.getByTestId("inventory-summary")).toBeVisible();
+
     const imageCard = librarySourceCard(page, "chart.png");
     const pdfCard = librarySourceCard(page, "report.pdf");
     await expect(page.getByTestId("library-source-card")).toHaveCount(2);
-    await expect(imageCard).toContainText("visual units: 1");
-    await expect(pdfCard).toContainText("visual units: 2");
+    await expect(imageCard).toContainText("visual units 1");
+    await expect(pdfCard).toContainText("visual units 2");
 
     previousJobId = await latestJobId(page);
     await rootCard.locator("[data-source-root-rescan-id]").click();
@@ -903,22 +954,24 @@ test("source management watcher updates inventory for add modify and delete", as
     await rootCard.locator("[data-source-root-refresh-id]").click();
     await waitForNewLatestJobCompleted(page, previousJobId);
 
+    await openInventoryWorkspace(page);
+
     const pdfCard = librarySourceCard(page, "report.pdf");
     const addedImageCard = librarySourceCard(page, "new-chart.png");
     await expect(page.getByTestId("library-source-card")).toHaveCount(2);
-    await expect(pdfCard).toContainText("visual units: 2");
+    await expect(pdfCard).toContainText("visual units 2");
 
     previousJobId = await latestJobId(page);
     fs.copyFileSync(fixtureImagePath, fixtures.addedImagePath);
     await waitForNewLatestJobCompleted(page, previousJobId);
     await expect(rootCard).toContainText("Last action: refresh");
     await expect(page.getByTestId("library-source-card")).toHaveCount(3);
-    await expect(addedImageCard).toContainText("visual units: 1");
+    await expect(addedImageCard).toContainText("visual units 1");
 
     previousJobId = await latestJobId(page);
     writeSourceManagementPdf(fixtures.pdfPath, 1);
     await waitForNewLatestJobCompleted(page, previousJobId);
-    await expect(pdfCard).toContainText("visual units: 1");
+    await expect(pdfCard).toContainText("visual units 1");
 
     previousJobId = await latestJobId(page);
     fs.rmSync(fixtures.addedImagePath, { force: true });
@@ -927,6 +980,33 @@ test("source management watcher updates inventory for add modify and delete", as
     await page.getByTestId("source-filter-status").selectOption("invalidated");
     await expect(page.getByTestId("library-source-card")).toHaveCount(1);
     await expect(addedImageCard).toContainText("not_found");
+  } finally {
+    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+  }
+});
+
+test("inventory workspace stays usable on narrow screens", async ({ page }) => {
+  const fixtures = createTempSourceManagementFixtures();
+  try {
+    await page.setViewportSize({ width: 820, height: 1280 });
+    await createLibrary(page, "inventory-narrow");
+
+    await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
+    await page.getByTestId("source-root-submit-button").click();
+
+    const rootCard = sourceRootCard(page, fixtures.tempDir);
+    await expect(rootCard).toBeVisible();
+
+    const previousJobId = await latestJobId(page);
+    await rootCard.locator("[data-source-root-refresh-id]").click();
+    await waitForNewLatestJobCompleted(page, previousJobId);
+
+    await openInventoryWorkspace(page);
+    await expect(page.getByTestId("inventory-summary")).toBeVisible();
+    await expect(page.getByTestId("library-source-card").first()).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }

@@ -10,6 +10,7 @@
 - 库管理流（Library Management Flow）
 - 来源根管理流（Source Root Management Flow）
 - 来源清单视图（Source Inventory View）
+- 来源清单工作区（Source Inventory Workspace）
 - 设置界面（Settings Surface）
 - 任务中心（Task Center）
 - 运行时健康界面（Runtime Health Surface）
@@ -22,6 +23,7 @@
 - 非搜索管理体验与对应的非搜索控制面接口族
 - 库、来源根、来源清单、配置、任务、健康、收藏与搜索历史的应用入口与操作流
 - 搜索工作区在应用中的位置、导航关系与壳层承载方式
+- 来源清单工作区在应用中的位置、导航关系与壳层承载方式
 
 范围外：
 - 搜索请求、搜索结果、过滤分页与搜索结果交互语义
@@ -38,6 +40,7 @@
 
 - 应用优先于页面（Application Before Screens）：先定义应用级工作区与导航结构，再定义单页或单表单体验
 - 搜索与管理分治（Search and Management Separation）：搜索工作台属于应用体验的一部分，但搜索行为规则继续由搜索专题承接
+- 搜索优先、管理旁路（Search First, Management Adjacent）：搜索主工作流默认承接查询、结果与详情；来源管理与来源清单观察不应挤占搜索入口的首屏位置
 - 入口统一（Unified Entry Points）：所有非搜索管理动作都应通过统一的应用入口和控制面接口进入系统，而不是散落为隐式旁路
 - 观察语义复用（Reuse Runtime Semantics）：任务、取消、恢复与健康的底层语义复用运行时专题；本专题只定义它们如何进入应用体验
 - 最小管理闭环（Minimum Management Loop）：凡是进入应用长期状态的库、来源根、收藏或搜索历史，都应至少具备最小查看与管理入口
@@ -56,6 +59,7 @@
   - 收藏与搜索历史工作区
 - 搜索工作区可以是默认主工作区，但其搜索语义、结果语义、分页规则与调试输出继续由 [004-search](../004-search/spec.md) 定义；具体请求 / 响应契约由 [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义
 - 搜索工作区内部的共享布局、查询模式切换、结果 / 详情关系、共享状态反馈，以及非文本查询模式的共享输入交互，由 [search-workspace.md](./search-workspace.md) 作为本专题下的正式事实源定义
+- 来源清单工作区是正式非搜索管理工作区之一；其共享布局、摘要、过滤、列表观察与与搜索工作区的入口关系，由 [source-inventory-workspace.md](./source-inventory-workspace.md) 作为本专题下的正式事实源定义
 - 工作区切换必须保持当前库上下文可见，并允许用户明确知道当前操作作用于哪个库
 - 应用壳层可以承载全局反馈，例如后台任务状态、运行时降级提醒与维护动作结果，但这些反馈不应改写对应专题中的底层语义
 - 应用壳层中的后台轮询、异步刷新或状态同步不得抢走当前可编辑控件的焦点，也不得清空用户尚未提交的本地输入草稿
@@ -66,6 +70,7 @@
 - 库管理流至少应覆盖：创建、删除、重命名、归档或等价生命周期操作
 - 来源根管理流至少应覆盖：查看、创建、编辑、启用、停用、删除，以及规则的最小管理能力
 - 来源清单视图至少应覆盖：库级聚合来源列表、按来源根 / 来源类型 / 状态筛选，以及最小状态摘要展示
+- 来源清单工作区可以作为搜索工作区之外的独立管理入口；当采用独立工作区时，搜索工作区最多保留来源管理摘要与跳转入口，不应继续以内嵌大列表挤占搜索入口
 - 设置界面至少应覆盖：库配置、启用索引线、提供方绑定、刷新策略与相关默认值的管理流
 - 应用必须提供导入、刷新、重扫、重建、清理与维护动作的明确用户入口，并能向用户表达动作已进入后台执行系统
 - 当前阶段来源管理至少应同时支持库级与来源根级 `refresh` / `rescan` 入口
@@ -92,6 +97,7 @@
 ## 关联主题
 
 - [search-workspace.md](./search-workspace.md) 定义搜索工作区内部的共享界面与体验约束，以及 `Image` / `Video` 等非文本查询模式的共享交互
+- [source-inventory-workspace.md](./source-inventory-workspace.md) 定义来源清单工作区的共享界面与体验约束，以及与搜索工作区之间的切换关系
 - [001-architecture](../001-architecture/spec.md) 定义应用壳层所依赖的系统边界、编排中心与组件交互路径
 - [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义库、配置、来源根、任务、收藏与搜索历史的状态模型与事实源归属
 - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义刷新、重扫、重建与启用索引线切换所依赖的摄取 / 索引语义

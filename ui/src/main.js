@@ -29,6 +29,18 @@ const state = {
   jobs: [],
   videoSources: [],
   sourceRoots: [],
+  activeWorkspace: "search",
+  inventoryFilters: {
+    sourceRootId: "",
+    sourceType: "",
+    sourceStatus: "",
+  },
+  inventorySummary: {
+    total: 0,
+    active: 0,
+    invalidated: 0,
+    out_of_scope: 0,
+  },
   librarySources: [],
   libraryNameDraft: "",
   selectedLibraryId: "",
@@ -38,9 +50,6 @@ const state = {
   sourceRootIncludeGlobsDraft: "",
   sourceRootExcludeGlobsDraft: "",
   sourceRootIncludeExtensionsDraft: "",
-  sourceFilterRootId: "",
-  sourceFilterType: "",
-  sourceFilterStatus: "",
   importPathsDraft: "",
   searchMode: "text",
   searchTextDraft: "",
@@ -181,6 +190,43 @@ function selectedLibrary() {
   return state.libraries.find((library) => library.id === state.selectedLibraryId) ?? null;
 }
 
+function emptyInventorySummary() {
+  return {
+    total: 0,
+    active: 0,
+    invalidated: 0,
+    out_of_scope: 0,
+  };
+}
+
+function resetInventoryFilters() {
+  state.inventoryFilters = {
+    sourceRootId: "",
+    sourceType: "",
+    sourceStatus: "",
+  };
+}
+
+function resetInventoryState() {
+  state.librarySources = [];
+  state.inventorySummary = emptyInventorySummary();
+}
+
+function summarizeInventorySources(sources) {
+  const summary = emptyInventorySummary();
+  summary.total = sources.length;
+  for (const source of sources) {
+    if (source.status === "active") {
+      summary.active += 1;
+    } else if (source.status === "invalidated") {
+      summary.invalidated += 1;
+    } else if (source.status === "out_of_scope") {
+      summary.out_of_scope += 1;
+    }
+  }
+  return summary;
+}
+
 function resetSourceRootEditor() {
   state.editingSourceRootId = "";
   state.sourceRootPathDraft = "";
@@ -231,6 +277,26 @@ function sourceRootDisplayName(sourceRootId) {
   }
   const sourceRoot = state.sourceRoots.find((item) => item.source_root_id === sourceRootId);
   return sourceRoot?.root_path ?? sourceRootId;
+}
+
+function sourceRootInventoryLabel(source) {
+  return source.source_root_label || source.source_root_id || "manual import";
+}
+
+function currentWorkspaceMeta() {
+  if (state.activeWorkspace === "inventory") {
+    return {
+      title: "Inventory workspace",
+      summary:
+        "来源清单、状态过滤与 coverage 核对集中到独立 Inventory 工作区；Search 回到查询、结果与详情的连续主任务流。",
+    };
+  }
+
+  return {
+    title: "Search workspace",
+    summary:
+      "查询入口、结果浏览与详情保持在同一搜索工作区连续完成；来源清单与状态过滤已移到独立 Inventory 工作区。",
+  };
 }
 
 function sleep(ms) {
@@ -1085,20 +1151,114 @@ function renderSourceRootsPanel(library) {
   `;
 }
 
+function renderWorkspaceSwitcher() {
+  return `
+    <div class="workspace-switch" data-testid="workspace-switch">
+      <button
+        type="button"
+        class="${state.activeWorkspace === "search" ? "" : "secondary-button"}"
+        data-testid="workspace-tab-search"
+        data-workspace="search"
+      >
+        Search
+      </button>
+      <button
+        type="button"
+        class="${state.activeWorkspace === "inventory" ? "" : "secondary-button"}"
+        data-testid="workspace-tab-inventory"
+        data-workspace="inventory"
+      >
+        Inventory
+      </button>
+    </div>
+  `;
+}
+
+function renderInventoryBridge(library) {
+  if (!library) {
+    return "";
+  }
+
+  const summaryText =
+    state.activeWorkspace === "inventory" && state.inventorySummary.total
+      ? `当前库共有 ${state.inventorySummary.total} 条来源记录，active ${state.inventorySummary.active}，invalidated ${state.inventorySummary.invalidated}，out_of_scope ${state.inventorySummary.out_of_scope}。`
+      : "来源清单、状态过滤与来源级观察已移到独立 Inventory 工作区。";
+
+  return `
+    <div class="workspace-bridge" data-testid="inventory-bridge">
+      <p class="eyebrow">Inventory</p>
+      <p class="helper" data-testid="inventory-bridge-summary">${escapeHtml(summaryText)}</p>
+      <div class="inline-actions">
+        ${
+          state.activeWorkspace === "inventory"
+            ? '<span class="pill ready" data-testid="inventory-bridge-state">Inventory active</span>'
+            : `<button
+                type="button"
+                class="secondary-button"
+                data-testid="inventory-bridge-button"
+                data-workspace="inventory"
+              >
+                查看 Inventory
+              </button>`
+        }
+      </div>
+    </div>
+  `;
+}
+
+function renderInventorySummaryBar() {
+  const summaryItems = [
+    { label: "Total", value: state.inventorySummary.total, testId: "inventory-summary-total" },
+    { label: "Active", value: state.inventorySummary.active, testId: "inventory-summary-active" },
+    {
+      label: "Invalidated",
+      value: state.inventorySummary.invalidated,
+      testId: "inventory-summary-invalidated",
+    },
+    {
+      label: "Out of scope",
+      value: state.inventorySummary.out_of_scope,
+      testId: "inventory-summary-out-of-scope",
+    },
+  ];
+
+  return `
+    <div class="inventory-summary-bar" data-testid="inventory-summary">
+      ${summaryItems
+        .map(
+          (item) => `
+            <article class="inventory-summary-card" data-testid="${item.testId}">
+              <span class="inventory-summary-label">${escapeHtml(item.label)}</span>
+              <strong class="inventory-summary-value">${escapeHtml(item.value)}</strong>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function renderLibrarySourcesPanel(library) {
   const list = state.librarySources.length
     ? `
-        <ul class="data-list source-list" data-testid="library-source-list">
+        <ul class="inventory-source-list" data-testid="library-source-list">
           ${state.librarySources
             .map(
               (source) => `
-                <li class="source-card" data-testid="library-source-card" data-source-id="${escapeHtml(source.source_id)}">
-                  <div class="list-head">
-                    <strong>${escapeHtml(source.source_path)}</strong>
-                    <span class="pill ${sourceStatusPillClass(source.status)}">${escapeHtml(source.status)}</span>
+                <li class="inventory-source-row" data-testid="library-source-card" data-source-id="${escapeHtml(source.source_id)}">
+                  <div class="inventory-source-main">
+                    <strong class="inventory-source-path">${escapeHtml(source.source_path)}</strong>
+                    <p class="helper">${escapeHtml(sourceRootInventoryLabel(source))} · ${escapeHtml(source.source_type)} · ${escapeHtml(source.kind)}</p>
                   </div>
-                  <p class="helper">${escapeHtml(source.source_type)} · ${escapeHtml(source.kind)} · ${escapeHtml(source.source_root_label)}</p>
-                  <p class="helper">visual units: ${escapeHtml(source.visual_unit_count)}${source.status_reason ? ` · ${escapeHtml(source.status_reason)}` : ""}</p>
+                  <div class="inventory-source-meta">
+                    <span class="pill ${sourceStatusPillClass(source.status)}">${escapeHtml(source.status)}</span>
+                    <span class="pill muted">visual units ${escapeHtml(source.visual_unit_count)}</span>
+                    ${
+                      source.status_reason
+                        ? `<span class="helper inventory-source-reason">${escapeHtml(source.status_reason)}</span>`
+                        : ""
+                    }
+                  </div>
                 </li>
               `
             )
@@ -1108,50 +1268,55 @@ function renderLibrarySourcesPanel(library) {
     : '<p class="empty" data-testid="library-source-empty">当前筛选条件下没有来源内容。</p>';
 
   return `
-    <section class="panel">
+    <section class="panel inventory-panel" data-testid="inventory-panel">
       <div class="panel-head">
         <div>
           <p class="eyebrow">Inventory</p>
-          <h2>库级来源清单</h2>
+          <h2>来源观察工作区</h2>
         </div>
       </div>
-      <div class="filter-grid">
-        <label>
-          <span>来源根</span>
-          <select id="source-filter-root" data-testid="source-filter-root" ${library ? "" : "disabled"}>
-            <option value="">全部来源根</option>
-            <option value="manual" ${state.sourceFilterRootId === "manual" ? "selected" : ""}>manual import</option>
-            ${state.sourceRoots
-              .map(
-                (sourceRoot) => `
-                  <option value="${escapeHtml(sourceRoot.source_root_id)}" ${state.sourceFilterRootId === sourceRoot.source_root_id ? "selected" : ""}>
-                    ${escapeHtml(sourceRoot.root_path)}
-                  </option>
-                `
-              )
-              .join("")}
-          </select>
-        </label>
-        <label>
-          <span>来源类型</span>
-          <select id="source-filter-type" data-testid="source-filter-type" ${library ? "" : "disabled"}>
-            <option value="">全部类型</option>
-            <option value="image" ${state.sourceFilterType === "image" ? "selected" : ""}>image</option>
-            <option value="pdf" ${state.sourceFilterType === "pdf" ? "selected" : ""}>pdf</option>
-            <option value="video" ${state.sourceFilterType === "video" ? "selected" : ""}>video</option>
-          </select>
-        </label>
-        <label>
-          <span>来源状态</span>
-          <select id="source-filter-status" data-testid="source-filter-status" ${library ? "" : "disabled"}>
-            <option value="">全部状态</option>
-            <option value="active" ${state.sourceFilterStatus === "active" ? "selected" : ""}>active</option>
-            <option value="invalidated" ${state.sourceFilterStatus === "invalidated" ? "selected" : ""}>invalidated</option>
-            <option value="out_of_scope" ${state.sourceFilterStatus === "out_of_scope" ? "selected" : ""}>out_of_scope</option>
-          </select>
-        </label>
+      ${renderInventorySummaryBar()}
+      <div class="inventory-filter-dock">
+        <div class="filter-grid inventory-filter-grid">
+          <label>
+            <span>来源根</span>
+            <select id="source-filter-root" data-testid="source-filter-root" ${library ? "" : "disabled"}>
+              <option value="">全部来源根</option>
+              <option value="manual" ${state.inventoryFilters.sourceRootId === "manual" ? "selected" : ""}>manual import</option>
+              ${state.sourceRoots
+                .map(
+                  (sourceRoot) => `
+                    <option value="${escapeHtml(sourceRoot.source_root_id)}" ${state.inventoryFilters.sourceRootId === sourceRoot.source_root_id ? "selected" : ""}>
+                      ${escapeHtml(sourceRoot.root_path)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            <span>来源类型</span>
+            <select id="source-filter-type" data-testid="source-filter-type" ${library ? "" : "disabled"}>
+              <option value="">全部类型</option>
+              <option value="image" ${state.inventoryFilters.sourceType === "image" ? "selected" : ""}>image</option>
+              <option value="pdf" ${state.inventoryFilters.sourceType === "pdf" ? "selected" : ""}>pdf</option>
+              <option value="video" ${state.inventoryFilters.sourceType === "video" ? "selected" : ""}>video</option>
+            </select>
+          </label>
+          <label>
+            <span>来源状态</span>
+            <select id="source-filter-status" data-testid="source-filter-status" ${library ? "" : "disabled"}>
+              <option value="">全部状态</option>
+              <option value="active" ${state.inventoryFilters.sourceStatus === "active" ? "selected" : ""}>active</option>
+              <option value="invalidated" ${state.inventoryFilters.sourceStatus === "invalidated" ? "selected" : ""}>invalidated</option>
+              <option value="out_of_scope" ${state.inventoryFilters.sourceStatus === "out_of_scope" ? "selected" : ""}>out_of_scope</option>
+            </select>
+          </label>
+        </div>
+        <p class="helper" data-testid="inventory-filter-summary">
+          当前显示 ${state.librarySources.length} / ${state.inventorySummary.total} 条来源记录。
+        </p>
       </div>
-      <p class="helper">当前显示 ${state.librarySources.length} 条来源记录。</p>
       ${list}
     </section>
   `;
@@ -1819,10 +1984,13 @@ function bindClickListeners(selector, handler, skipWithin = null) {
 
 function renderWorkspace() {
   const library = selectedLibrary();
+  const workspaceMeta = currentWorkspaceMeta();
+  const isSearchWorkspace = state.activeWorkspace === "search";
   const focusedEditableState = captureFocusedEditableState();
   const detailSignature = selectedVisualUnitDetailSignature();
   const previousDetailPanel = root?.querySelector('[data-testid="detail-panel"]') ?? null;
   const shouldPreserveDetailPanel =
+    isSearchWorkspace &&
     previousDetailPanel instanceof HTMLElement &&
     detailSignature !== null &&
     detailSignature === lastRenderedDetailSignature;
@@ -1831,10 +1999,11 @@ function renderWorkspace() {
     <main class="shell" data-testid="workspace-shell">
       <section class="hero">
         <p class="eyebrow">FauniSearch</p>
-        <h1>Search workspace</h1>
+        <h1>${escapeHtml(workspaceMeta.title)}</h1>
         <p class="summary">
-          当前工作台已经接通真实的 ColQwen + Qdrant multivector 导入与检索链路，并开始承接 140 库来源管理：左侧管理库和来源根，中间查看库级来源清单并执行搜索，右侧查看预览和对象详情。
+          ${escapeHtml(workspaceMeta.summary)}
         </p>
+        ${renderWorkspaceSwitcher()}
         <div class="service-strip">
           <a href="${endpoints.uiRoot}" target="_blank" rel="noreferrer">UI</a>
           <a href="${endpoints.appHealth}" target="_blank" rel="noreferrer">App health</a>
@@ -1845,7 +2014,7 @@ function renderWorkspace() {
 
       ${renderStatusNotices()}
 
-      <section class="workspace-desk">
+      <section class="workspace-desk ${isSearchWorkspace ? "workspace-desk-search" : "workspace-desk-inventory"}">
         <aside class="workspace-column workspace-left">
           <section class="panel panel-tight">
             <div class="panel-head">
@@ -1900,6 +2069,7 @@ function renderWorkspace() {
                       <div><dt>Pending jobs</dt><dd>${library.counts.pending_jobs}</dd></div>
                       <div><dt>Latest job</dt><dd>${escapeHtml(library.latest_job_id ?? "none")}</dd></div>
                     </dl>
+                    ${renderInventoryBridge(library)}
                   `
                   : `<p class="empty">先创建一个库，再进入导入和搜索步骤。</p>`
               }
@@ -1953,29 +2123,40 @@ function renderWorkspace() {
         </aside>
 
         <section class="workspace-column workspace-center">
-          ${renderLibrarySourcesPanel(library)}
-          <section class="panel search-panel">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Search</p>
-                <h2>统一搜索入口</h2>
-              </div>
-            </div>
-            ${renderSearchControls(library)}
-            ${renderSearchOutcome()}
-          </section>
+          ${
+            isSearchWorkspace
+              ? `
+                <section class="panel search-panel" data-testid="search-panel">
+                  <div class="panel-head">
+                    <div>
+                      <p class="eyebrow">Search</p>
+                      <h2>统一搜索入口</h2>
+                    </div>
+                  </div>
+                  ${renderSearchControls(library)}
+                  ${renderSearchOutcome()}
+                </section>
+              `
+              : renderLibrarySourcesPanel(library)
+          }
         </section>
 
-        <aside class="workspace-column workspace-right">
-          <section class="panel detail-panel" data-testid="detail-panel">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Detail</p>
-                <h2>详情侧栏</h2>
-              </div>
-            </div>
-            ${renderVisualUnitDetail()}
-          </section>
+        <aside class="workspace-column workspace-right ${isSearchWorkspace ? "" : "workspace-right-hidden"}">
+          ${
+            isSearchWorkspace
+              ? `
+                <section class="panel detail-panel" data-testid="detail-panel">
+                  <div class="panel-head">
+                    <div>
+                      <p class="eyebrow">Detail</p>
+                      <h2>详情侧栏</h2>
+                    </div>
+                  </div>
+                  ${renderVisualUnitDetail()}
+                </section>
+              `
+              : ""
+          }
         </aside>
       </section>
     </main>
@@ -1989,6 +2170,9 @@ function renderWorkspace() {
     root.innerHTML = nextMarkup;
   }
 
+  document.querySelectorAll("[data-workspace]").forEach((button) => {
+    button.addEventListener("click", onSelectWorkspace);
+  });
   document.querySelector("#create-library-form")?.addEventListener("submit", onCreateLibrary);
   document.querySelector("#library-name")?.addEventListener("input", onLibraryNameInput);
   document.querySelector("#library-select")?.addEventListener("change", onSelectLibrary);
@@ -2196,27 +2380,35 @@ async function refreshSourceRoots() {
 
 async function refreshLibrarySources() {
   if (!state.selectedLibraryId) {
-    state.librarySources = [];
+    resetInventoryState();
     return;
   }
 
+  const unfilteredData = await apiRequest(
+    `/libraries/${encodeURIComponent(state.selectedLibraryId)}/sources`
+  );
+  state.inventorySummary = summarizeInventorySources(unfilteredData.sources);
+
   const params = new URLSearchParams();
-  if (state.sourceFilterRootId && state.sourceFilterRootId !== "manual") {
-    params.set("source_root_id", state.sourceFilterRootId);
+  if (state.inventoryFilters.sourceRootId && state.inventoryFilters.sourceRootId !== "manual") {
+    params.set("source_root_id", state.inventoryFilters.sourceRootId);
   }
-  if (state.sourceFilterType) {
-    params.set("source_type", state.sourceFilterType);
+  if (state.inventoryFilters.sourceType) {
+    params.set("source_type", state.inventoryFilters.sourceType);
   }
-  if (state.sourceFilterStatus) {
-    params.set("status", state.sourceFilterStatus);
+  if (state.inventoryFilters.sourceStatus) {
+    params.set("status", state.inventoryFilters.sourceStatus);
   }
 
   const query = params.toString();
-  const data = await apiRequest(
-    `/libraries/${encodeURIComponent(state.selectedLibraryId)}/sources${query ? `?${query}` : ""}`
-  );
+  const data =
+    query.length > 0
+      ? await apiRequest(
+          `/libraries/${encodeURIComponent(state.selectedLibraryId)}/sources?${query}`
+        )
+      : unfilteredData;
   state.librarySources =
-    state.sourceFilterRootId === "manual"
+    state.inventoryFilters.sourceRootId === "manual"
       ? data.sources.filter((source) => !source.source_root_id)
       : data.sources;
 }
@@ -2265,7 +2457,9 @@ async function refreshJob(jobId) {
 async function refreshWorkspace(options) {
   await refreshLibraries(options);
   await refreshSourceRoots();
-  await refreshLibrarySources();
+  if (state.activeWorkspace === "inventory") {
+    await refreshLibrarySources();
+  }
   await refreshJobs();
   await refreshVideoSources();
   renderWorkspace();
@@ -2289,9 +2483,8 @@ async function onCreateLibrary(event) {
     });
     state.selectedLibraryId = library.id;
     resetSourceRootEditor();
-    state.sourceFilterRootId = "";
-    state.sourceFilterType = "";
-    state.sourceFilterStatus = "";
+    resetInventoryFilters();
+    resetInventoryState();
     state.importPathsDraft = "";
     state.searchTextDraft = "";
     state.libraryNameDraft = "";
@@ -2316,9 +2509,8 @@ function onLibraryNameInput(event) {
 async function onSelectLibrary(event) {
   state.selectedLibraryId = event.target.value;
   resetSourceRootEditor();
-  state.sourceFilterRootId = "";
-  state.sourceFilterType = "";
-  state.sourceFilterStatus = "";
+  resetInventoryFilters();
+  resetInventoryState();
   clearQueryImageState();
   clearQueryVideoState();
   clearQueryDocumentState();
@@ -2359,7 +2551,7 @@ function onSourceRootIncludeExtensionsInput(event) {
 }
 
 function onSourceFilterRootChange(event) {
-  state.sourceFilterRootId = event.target.value;
+  state.inventoryFilters.sourceRootId = event.target.value;
   refreshWorkspace({ keepSelection: true }).catch((error) => {
     state.globalError = error;
     renderWorkspace();
@@ -2367,7 +2559,7 @@ function onSourceFilterRootChange(event) {
 }
 
 function onSourceFilterTypeChange(event) {
-  state.sourceFilterType = event.target.value;
+  state.inventoryFilters.sourceType = event.target.value;
   refreshWorkspace({ keepSelection: true }).catch((error) => {
     state.globalError = error;
     renderWorkspace();
@@ -2375,7 +2567,7 @@ function onSourceFilterTypeChange(event) {
 }
 
 function onSourceFilterStatusChange(event) {
-  state.sourceFilterStatus = event.target.value;
+  state.inventoryFilters.sourceStatus = event.target.value;
   refreshWorkspace({ keepSelection: true }).catch((error) => {
     state.globalError = error;
     renderWorkspace();
@@ -2990,6 +3182,7 @@ async function searchDocument(documentInput) {
 
 function onFillDemo() {
   setDemoDrafts();
+  state.activeWorkspace = "search";
   state.searchMode = "text";
   state.globalError = null;
   state.statusMessage = null;
@@ -3003,6 +3196,7 @@ async function onRunDemo() {
 
   try {
     setDemoDrafts();
+    state.activeWorkspace = "search";
     state.globalError = null;
     state.statusMessage = "正在导入 demo fixture，并写入 Qdrant...";
     renderWorkspace();
@@ -3015,6 +3209,27 @@ async function onRunDemo() {
   } catch (error) {
     state.globalError = error;
     state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onSelectWorkspace(event) {
+  const nextWorkspace = event.currentTarget.dataset.workspace;
+  if (!nextWorkspace || nextWorkspace === state.activeWorkspace) {
+    return;
+  }
+
+  state.activeWorkspace = nextWorkspace;
+  state.globalError = null;
+  state.statusMessage = null;
+
+  try {
+    if (nextWorkspace === "inventory") {
+      await refreshLibrarySources();
+    }
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = error;
     renderWorkspace();
   }
 }
