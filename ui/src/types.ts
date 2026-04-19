@@ -13,6 +13,14 @@ export interface InventoryFilters {
   sourceStatus: string;
 }
 
+export interface SearchFilters {
+  visualUnitKind: string;
+  sourceType: string;
+  pathPrefix: string;
+  timeRangeStartMsDraft: string;
+  timeRangeEndMsDraft: string;
+}
+
 export interface InventorySummary {
   total: number;
   active: number;
@@ -168,6 +176,11 @@ export interface SearchOutcomeState {
   error?: ApiErrorPayload;
 }
 
+export interface SearchRequestSnapshot {
+  endpoint: "/search/text" | "/search/image" | "/search/video" | "/search/document";
+  body: Record<string, unknown>;
+}
+
 export interface QueryAssetData {
   temp_asset_id: string;
   preview: PreviewReference;
@@ -270,6 +283,7 @@ export interface AppState {
   sourceRoots: SourceRootSnapshot[];
   activeWorkspace: WorkspaceKind;
   inventoryFilters: InventoryFilters;
+  searchFilters: SearchFilters;
   inventorySummary: InventorySummary;
   librarySources: SourceInventoryItem[];
   libraryNameDraft: string;
@@ -304,6 +318,7 @@ export interface AppState {
   importReceipt: ImportPathsData | null;
   selectedVisualUnit: VisualUnitDetailData | null;
   searchOutcome: SearchOutcomeState | null;
+  lastSearchRequest: SearchRequestSnapshot | null;
   globalError: ApiErrorPayload | null;
   statusMessage: string | null;
 }

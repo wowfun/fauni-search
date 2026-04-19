@@ -144,6 +144,25 @@ first_page.save(pdf_path, "PDF", save_all=True, append_images=[second_page])
   return { tempDir, imagePath, pdfPath };
 }
 
+function createMockSearchResult(index, sourcePath) {
+  return {
+    visual_unit_id: `vu_mock_${index}`,
+    source_id: `src_mock_${index}`,
+    preview: {
+      url: `http://127.0.0.1:54210/mock-preview/${index}.png`,
+    },
+    source_path: sourcePath,
+    source_type: "pdf",
+    kind: "document_page",
+    locator: {
+      page: index + 1,
+      page_label: String(index + 1),
+    },
+    cursor: `search:v1:${index + 1}`,
+    score: 100 - index,
+  };
+}
+
 function createTempVideoSearchFixtures() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "fauni-search-video-search-"));
   const framePath = path.join(tempDir, "report-frame.png");
@@ -451,6 +470,130 @@ test("workspace refresh preserves the open PDF detail preview element", async ({
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
+});
+
+test("search workspace supports shared filters and load more pagination", async ({ page }) => {
+  const searchRequests = [];
+  let searchCallCount = 0;
+  const sourcePathPrefix = "/tmp/search-fixtures/set-a";
+
+  await page.route("**/api/search/text", async (route) => {
+    const payload = route.request().postDataJSON();
+    searchRequests.push(payload);
+    searchCallCount += 1;
+
+    if (searchCallCount === 1) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            results: Array.from({ length: 5 }, (_, index) =>
+              createMockSearchResult(index, `${sourcePathPrefix}/report-${index + 1}.pdf`)
+            ),
+            next_cursor: "search:v1:5",
+            debug: {
+              backend: "qdrant",
+            },
+          },
+        }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          results: Array.from({ length: 2 }, (_, index) =>
+            createMockSearchResult(index + 5, `${sourcePathPrefix}/report-${index + 6}.pdf`)
+          ),
+          next_cursor: null,
+          debug: {
+            backend: "qdrant",
+          },
+        },
+      }),
+    });
+  });
+
+  await page.route("**/api/libraries/*/visual-units/*", async (route) => {
+    const visualUnitId = route.request().url().split("/").pop();
+    const index = Number(String(visualUnitId).replace("vu_mock_", "")) || 0;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          visual_unit: {
+            visual_unit_id: `vu_mock_${index}`,
+            source_id: `src_mock_${index}`,
+            source_path: `${sourcePathPrefix}/report-${index + 1}.pdf`,
+            source_type: "pdf",
+            kind: "document_page",
+            locator: {
+              page: index + 1,
+              page_label: String(index + 1),
+            },
+          },
+          preview: {
+            url: `http://127.0.0.1:54210/mock-preview/${index}.png`,
+          },
+          neighbor_context: null,
+        },
+      }),
+    });
+  });
+
+  await createLibrary(page, "search-controls");
+
+  await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+  await page.getByTestId("search-filter-kind").selectOption("document_page");
+  await page.getByTestId("search-filter-source-type").selectOption("pdf");
+  await page.getByTestId("search-filter-path-prefix").fill(sourcePathPrefix);
+  await page.getByTestId("search-submit-button").click();
+
+  await expect(page.getByTestId("result-card")).toHaveCount(5);
+  await expect(page.getByTestId("search-load-more-button")).toBeVisible();
+  await expect(page.getByTestId("search-results-summary")).toContainText("更多结果");
+
+  await page.getByTestId("search-load-more-button").click();
+  await expect(page.getByTestId("result-card")).toHaveCount(7);
+  await expect(page.getByTestId("search-load-more-button")).toHaveCount(0);
+
+  expect(searchRequests).toHaveLength(2);
+  expect(searchRequests[0]).toMatchObject({
+    text: "Revenue 46 percent",
+    top_k: 5,
+    filters: {
+      "visual_unit.kind": "document_page",
+      source_type: "pdf",
+      path_prefix: sourcePathPrefix,
+    },
+  });
+  expect(searchRequests[1]).toMatchObject({
+    text: "Revenue 46 percent",
+    cursor: "search:v1:5",
+    filters: {
+      "visual_unit.kind": "document_page",
+      source_type: "pdf",
+      path_prefix: sourcePathPrefix,
+    },
+  });
+});
+
+test("search workspace rejects invalid time range filters before sending the request", async ({ page }) => {
+  await createLibrary(page, "search-invalid-time-range");
+
+  await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+  await page.getByTestId("search-filter-time-range-start").fill("1000");
+  await page.getByTestId("search-filter-time-range-end").fill("1000");
+  await page.getByTestId("search-submit-button").click();
+
+  await expect(page.getByTestId("search-error-notice")).toBeVisible();
+  await expect(page.getByTestId("search-error-code")).toHaveText("validation_failed");
+  await expect(page.getByTestId("search-error-message")).toContainText("时间范围过滤器");
 });
 
 test("invalid import paths show explicit rejection feedback", async ({ page }) => {

@@ -1,13 +1,13 @@
 use crate::{
     api::{ApiError, SearchResultItem, TextSearchData},
-    model::{PreparedImport, PreparedSourceAction, SearchPlan},
+    model::{PreparedImport, PreparedSourceAction, SearchPlan, SearchTimeRangeFilter},
     qdrant::*,
     query_assets::visual_unit_preview_reference,
     sidecar::{embed_documents, IndexingError, QueryEmbeddingResult},
     state::SharedState,
     DEFAULT_INDEX_EMBED_BATCH_ITEMS, MULTIVECTOR_INDEX_LINE,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::env;
 
 pub(crate) async fn index_visual_units(
@@ -305,25 +305,28 @@ pub(crate) fn build_search_response(
 ) -> Result<TextSearchData, ApiError> {
     let result_count = candidates.len();
     let top_score = candidates.first().map(|point| point.score);
-    let results = candidates
+    let filtered_candidates = candidates
         .into_iter()
         .filter_map(|point| point.payload.map(|payload| (point.score, payload)))
-        .filter(|(_, payload)| {
-            plan.active_visual_unit_ids
-                .contains(&payload.visual_unit_id)
-                && plan
-                    .kind_filter
-                    .as_ref()
-                    .map(|expected| expected.contains(&payload.kind))
-                    .unwrap_or(true)
-                && plan
-                    .source_type_filter
-                    .as_ref()
-                    .map(|expected| expected.contains(&payload.source_type))
-                    .unwrap_or(true)
-        })
-        .take(plan.top_k)
+        .filter(|(_, payload)| search_payload_matches_filters(&plan, payload))
+        .collect::<Vec<_>>();
+    let filtered_result_count = filtered_candidates.len();
+    let page_start = plan.cursor_offset.min(filtered_result_count);
+    let raw_scores = filtered_candidates
+        .iter()
         .map(|(score, payload)| {
+            json!({
+                "visual_unit_id": payload.visual_unit_id,
+                "score": score,
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = filtered_candidates
+        .iter()
+        .skip(page_start)
+        .take(plan.top_k)
+        .enumerate()
+        .map(|(page_index, (score, payload))| {
             let preview = visual_unit_preview_reference(
                 &plan.library_id,
                 &payload.visual_unit_id,
@@ -332,27 +335,89 @@ pub(crate) fn build_search_response(
             )?;
             Ok(SearchResultItem {
                 visual_unit_id: payload.visual_unit_id.clone(),
-                source_id: payload.source_id,
+                source_id: payload.source_id.clone(),
                 preview,
-                source_path: payload.source_path,
-                source_type: payload.source_type,
-                kind: payload.kind,
-                locator: payload.locator,
-                cursor: format!("cursor:{}", payload.visual_unit_id),
-                score: Some(score),
+                source_path: payload.source_path.clone(),
+                source_type: payload.source_type.clone(),
+                kind: payload.kind.clone(),
+                locator: payload.locator.clone(),
+                cursor: encode_search_cursor(page_start + page_index + 1),
+                score: Some(*score),
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+    let returned_result_count = results.len();
+    let next_offset = page_start + returned_result_count;
+    let next_cursor = (next_offset < filtered_result_count).then(|| encode_search_cursor(next_offset));
+    let index_lines_debug = plan
+        .target_index_lines
+        .iter()
+        .map(|index_line| {
+            json!({
+                "index_line": index_line,
+                "raw_scores": raw_scores.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok(TextSearchData {
         results,
-        next_cursor: None,
+        next_cursor,
         debug: plan.debug.then_some(json!({
             "backend": "qdrant",
             "repr_kind": "multivector",
+            "provider": {
+                "model_profile": "local_python",
+                "retrieval_backend": "qdrant",
+            },
+            "index_lines": index_lines_debug,
             "query_vector_count": embedding.vectors.len(),
             "retrieved_points": result_count,
+            "filtered_results": filtered_result_count,
+            "returned_results": returned_result_count,
             "top_score": top_score,
         })),
     })
+}
+
+fn encode_search_cursor(offset: usize) -> String {
+    format!("search:v1:{offset}")
+}
+
+fn search_payload_matches_filters(plan: &SearchPlan, payload: &QdrantPointPayload) -> bool {
+    plan.active_visual_unit_ids.contains(&payload.visual_unit_id)
+        && plan
+            .kind_filter
+            .as_ref()
+            .map(|expected| expected.contains(&payload.kind))
+            .unwrap_or(true)
+        && plan
+            .source_type_filter
+            .as_ref()
+            .map(|expected| expected.contains(&payload.source_type))
+            .unwrap_or(true)
+        && plan
+            .path_prefix_filter
+            .as_ref()
+            .map(|prefixes| {
+                prefixes
+                    .iter()
+                    .any(|prefix| payload.source_path.starts_with(prefix))
+            })
+            .unwrap_or(true)
+        && plan
+            .time_range_filter
+            .map(|filter| payload_overlaps_time_range(&payload.locator, filter))
+            .unwrap_or(true)
+}
+
+fn payload_overlaps_time_range(locator: &Value, filter: SearchTimeRangeFilter) -> bool {
+    let Some(start_ms) = locator.get("start_ms").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(end_ms) = locator.get("end_ms").and_then(Value::as_u64) else {
+        return false;
+    };
+
+    start_ms <= filter.end_ms && end_ms >= filter.start_ms
 }

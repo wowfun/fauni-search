@@ -20,7 +20,7 @@ pub(crate) struct QdrantQueryResult {
     pub(crate) points: Vec<QdrantScoredPoint>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct QdrantScoredPoint {
     pub(crate) score: f32,
     pub(crate) payload: Option<QdrantPointPayload>,
@@ -662,7 +662,11 @@ pub(crate) async fn query_qdrant(
     plan: &SearchPlan,
     embedding: &QueryEmbeddingResult,
 ) -> Result<Vec<QdrantScoredPoint>, ApiError> {
-    let prefetch_limit = (plan.top_k.saturating_mul(10)).max(20);
+    let prefetch_limit = plan
+        .active_visual_unit_ids
+        .len()
+        .max(plan.cursor_offset.saturating_add(plan.top_k))
+        .max(20);
     let payload = json!({
         "prefetch": {
             "query": embedding.pooled_vector,

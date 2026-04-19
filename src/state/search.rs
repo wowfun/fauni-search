@@ -45,6 +45,7 @@ impl AppState {
             request.library_id.trim(),
             request.filters.as_ref(),
             request.top_k,
+            request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
         )
@@ -58,6 +59,7 @@ impl AppState {
             request.library_id.trim(),
             request.filters.as_ref(),
             request.top_k,
+            request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
         )?;
@@ -125,6 +127,7 @@ impl AppState {
             request.library_id.trim(),
             request.filters.as_ref(),
             request.top_k,
+            request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
         )?;
@@ -244,6 +247,7 @@ impl AppState {
             request.library_id.trim(),
             request.filters.as_ref(),
             request.top_k,
+            request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
         )?;
@@ -322,6 +326,7 @@ impl AppState {
         library_id: &str,
         filters: Option<&Value>,
         top_k: Option<usize>,
+        cursor: Option<&str>,
         debug: Option<bool>,
         target_index_lines: Option<&Vec<String>>,
     ) -> Result<SearchPlan, ApiError> {
@@ -380,13 +385,20 @@ impl AppState {
             ));
         }
 
+        let cursor_offset = decode_search_cursor_offset(cursor)?;
+        let time_range_filter = resolve_time_range_filter(filters)?;
+
         Ok(SearchPlan {
             library_id: library.id.clone(),
             collection_name: library.collection_name.clone(),
             top_k: top_k.unwrap_or(10).max(1),
+            cursor_offset,
             kind_filter: read_string_filter(filters, "visual_unit.kind")
                 .or_else(|| read_string_filter(filters, "kind")),
+            path_prefix_filter: read_string_filter(filters, "path_prefix"),
             source_type_filter: read_string_filter(filters, "source_type"),
+            time_range_filter,
+            target_index_lines: target_index_lines.clone(),
             active_visual_unit_ids: library.visual_units.keys().cloned().collect(),
             debug: debug.unwrap_or(false),
         })
@@ -651,4 +663,59 @@ impl AppState {
                 }
             })
     }
+}
+
+fn decode_search_cursor_offset(cursor: Option<&str>) -> Result<usize, ApiError> {
+    let Some(cursor) = cursor.map(str::trim).filter(|cursor| !cursor.is_empty()) else {
+        return Ok(0);
+    };
+
+    let encoded_offset = cursor
+        .strip_prefix("search:v1:")
+        .ok_or_else(|| invalid_search_cursor(cursor))?;
+
+    encoded_offset
+        .parse::<usize>()
+        .map_err(|_| invalid_search_cursor(cursor))
+}
+
+fn invalid_search_cursor(cursor: &str) -> ApiError {
+    ApiError::validation_failed(
+        "cursor is not a valid search pagination token.",
+        Some(json!({
+            "field": "cursor",
+            "cursor": cursor,
+        })),
+    )
+}
+
+fn resolve_time_range_filter(filters: Option<&Value>) -> Result<Option<SearchTimeRangeFilter>, ApiError> {
+    let Some(value) = filters.and_then(|filters| filters.get("time_range")) else {
+        return Ok(None);
+    };
+
+    let start_ms = value
+        .get("start_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_time_range_filter(value))?;
+    let end_ms = value
+        .get("end_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_time_range_filter(value))?;
+
+    if start_ms >= end_ms {
+        return Err(invalid_time_range_filter(value));
+    }
+
+    Ok(Some(SearchTimeRangeFilter { start_ms, end_ms }))
+}
+
+fn invalid_time_range_filter(value: &Value) -> ApiError {
+    ApiError::validation_failed(
+        "filters.time_range must provide both start_ms and end_ms, and start_ms must be smaller than end_ms.",
+        Some(json!({
+            "field": "filters.time_range",
+            "value": value,
+        })),
+    )
 }

@@ -367,15 +367,25 @@ impl ImportJobOutcome {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct SearchPlan {
     pub(crate) library_id: String,
     pub(crate) collection_name: String,
     pub(crate) top_k: usize,
+    pub(crate) cursor_offset: usize,
     pub(crate) kind_filter: Option<BTreeSet<String>>,
+    pub(crate) path_prefix_filter: Option<BTreeSet<String>>,
     pub(crate) source_type_filter: Option<BTreeSet<String>>,
+    pub(crate) time_range_filter: Option<SearchTimeRangeFilter>,
+    pub(crate) target_index_lines: Vec<String>,
     pub(crate) active_visual_unit_ids: BTreeSet<String>,
     pub(crate) debug: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SearchTimeRangeFilter {
+    pub(crate) start_ms: u64,
+    pub(crate) end_ms: u64,
 }
 
 pub(crate) struct StagedQueryAsset {

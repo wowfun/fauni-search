@@ -13,6 +13,7 @@ import type {
   LibrarySnapshot,
   PreviewReference,
   QueryAssetData,
+  SearchRequestSnapshot,
   SearchOutcomeState,
   SourceInventoryItem,
   SourceRootRulesPayload,
@@ -77,6 +78,7 @@ const demoFixture: DemoFixture = {
 const JOB_POLL_INTERVAL_MS = 1000;
 const JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKSPACE_POLL_INTERVAL_MS = 3000;
+const SEARCH_PAGE_SIZE = 5;
 
 const state: AppState = {
   libraries: [],
@@ -88,6 +90,13 @@ const state: AppState = {
     sourceRootId: "",
     sourceType: "",
     sourceStatus: "",
+  },
+  searchFilters: {
+    visualUnitKind: "",
+    sourceType: "",
+    pathPrefix: "",
+    timeRangeStartMsDraft: "",
+    timeRangeEndMsDraft: "",
   },
   inventorySummary: {
     total: 0,
@@ -128,6 +137,7 @@ const state: AppState = {
   importReceipt: null,
   selectedVisualUnit: null,
   searchOutcome: null,
+  lastSearchRequest: null,
   globalError: null,
   statusMessage: null,
 };
@@ -293,9 +303,104 @@ function resetInventoryFilters() {
   };
 }
 
+function resetSearchFilters() {
+  state.searchFilters = {
+    visualUnitKind: "",
+    sourceType: "",
+    pathPrefix: "",
+    timeRangeStartMsDraft: "",
+    timeRangeEndMsDraft: "",
+  };
+}
+
 function resetInventoryState() {
   state.librarySources = [];
   state.inventorySummary = emptyInventorySummary();
+}
+
+function searchHasMoreResults() {
+  return Boolean(state.searchOutcome?.next_cursor && state.lastSearchRequest);
+}
+
+function searchFiltersSummary() {
+  const tokens = [];
+  if (state.searchFilters.visualUnitKind) {
+    tokens.push(`kind=${state.searchFilters.visualUnitKind}`);
+  }
+  if (state.searchFilters.sourceType) {
+    tokens.push(`source_type=${state.searchFilters.sourceType}`);
+  }
+  if (state.searchFilters.pathPrefix.trim()) {
+    tokens.push(`path_prefix=${state.searchFilters.pathPrefix.trim()}`);
+  }
+  if (
+    state.searchFilters.timeRangeStartMsDraft.trim() ||
+    state.searchFilters.timeRangeEndMsDraft.trim()
+  ) {
+    tokens.push(
+      `time_range=${state.searchFilters.timeRangeStartMsDraft.trim() || "?"}→${state.searchFilters.timeRangeEndMsDraft.trim() || "?"}`
+    );
+  }
+  return tokens.length ? tokens.join(" · ") : "未启用额外过滤器";
+}
+
+function parseNonNegativeIntegerDraft(value: string, field: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (!/^\d+$/.test(trimmed)) {
+    throw {
+      code: "validation_failed",
+      message: `${field} 必须是非负整数。`,
+      details: {
+        field,
+      },
+    } satisfies ApiErrorPayload;
+  }
+
+  return Number(trimmed);
+}
+
+function searchFiltersPayload() {
+  const filters: Record<string, unknown> = {};
+  if (state.searchFilters.visualUnitKind) {
+    filters["visual_unit.kind"] = state.searchFilters.visualUnitKind;
+  }
+  if (state.searchFilters.sourceType) {
+    filters.source_type = state.searchFilters.sourceType;
+  }
+  if (state.searchFilters.pathPrefix.trim()) {
+    filters.path_prefix = state.searchFilters.pathPrefix.trim();
+  }
+
+  const timeRangeStartMs = parseNonNegativeIntegerDraft(
+    state.searchFilters.timeRangeStartMsDraft,
+    "filters.time_range.start_ms"
+  );
+  const timeRangeEndMs = parseNonNegativeIntegerDraft(
+    state.searchFilters.timeRangeEndMsDraft,
+    "filters.time_range.end_ms"
+  );
+
+  if (timeRangeStartMs !== null || timeRangeEndMs !== null) {
+    if (timeRangeStartMs === null || timeRangeEndMs === null || timeRangeStartMs >= timeRangeEndMs) {
+      throw {
+        code: "validation_failed",
+        message: "时间范围过滤器必须同时填写开始和结束毫秒，且开始值必须小于结束值。",
+        details: {
+          field: "filters.time_range",
+        },
+      } satisfies ApiErrorPayload;
+    }
+    filters.time_range = {
+      start_ms: timeRangeStartMs,
+      end_ms: timeRangeEndMs,
+    };
+  }
+
+  return Object.keys(filters).length ? filters : undefined;
 }
 
 function summarizeInventorySources(sources: SourceInventoryItem[]): InventorySummary {
@@ -1590,7 +1695,9 @@ function renderSearchOutcome() {
         <p class="eyebrow">Results</p>
         <h3>命中 ${results.length} 条结果</h3>
       </div>
-      <p class="helper">点击结果卡片后，右侧会更新预览和详情。</p>
+      <p class="helper" data-testid="search-results-summary">
+        ${escapeHtml(searchHasMoreResults() ? "当前页后仍有更多结果，可继续追加加载。" : "点击结果卡片后，右侧会更新预览和详情。")}
+      </p>
     </div>
     <ul class="result-list" data-testid="result-list">
       ${results
@@ -1646,6 +1753,22 @@ function renderSearchOutcome() {
         )
         .join("")}
     </ul>
+    ${
+      searchHasMoreResults()
+        ? `
+          <div class="results-footer">
+            <button
+              type="button"
+              class="secondary-button"
+              id="search-load-more-button"
+              data-testid="search-load-more-button"
+            >
+              Load more
+            </button>
+          </div>
+        `
+        : ""
+    }
   `;
 }
 
@@ -1692,6 +1815,82 @@ function renderSearchControls(library) {
       </button>
     </div>
     <form id="search-form" class="stack-form search-form" data-testid="search-form">
+      <div class="search-filter-dock" data-testid="search-filter-dock">
+        <div class="job-meta">
+          <strong>搜索过滤器</strong>
+          <span class="helper" data-testid="search-filter-summary">${escapeHtml(searchFiltersSummary())}</span>
+        </div>
+        <div class="filter-grid search-filter-grid">
+          <label>
+            <span>视觉对象类型</span>
+            <select id="search-filter-kind" data-testid="search-filter-kind" ${library ? "" : "disabled"}>
+              <option value="">全部</option>
+              <option value="image" ${state.searchFilters.visualUnitKind === "image" ? "selected" : ""}>image</option>
+              <option value="document_page" ${state.searchFilters.visualUnitKind === "document_page" ? "selected" : ""}>document_page</option>
+              <option value="video_segment" ${state.searchFilters.visualUnitKind === "video_segment" ? "selected" : ""}>video_segment</option>
+            </select>
+          </label>
+          <label>
+            <span>来源类型</span>
+            <select id="search-filter-source-type" data-testid="search-filter-source-type" ${library ? "" : "disabled"}>
+              <option value="">全部</option>
+              <option value="image" ${state.searchFilters.sourceType === "image" ? "selected" : ""}>image</option>
+              <option value="pdf" ${state.searchFilters.sourceType === "pdf" ? "selected" : ""}>pdf</option>
+              <option value="video" ${state.searchFilters.sourceType === "video" ? "selected" : ""}>video</option>
+            </select>
+          </label>
+          <label>
+            <span>路径前缀</span>
+            <input
+              id="search-filter-path-prefix"
+              data-testid="search-filter-path-prefix"
+              type="text"
+              value="${escapeHtml(state.searchFilters.pathPrefix)}"
+              placeholder="/abs/path/prefix"
+              ${library ? "" : "disabled"}
+            />
+          </label>
+          <label>
+            <span>时间范围开始 ms</span>
+            <input
+              id="search-filter-time-range-start"
+              data-testid="search-filter-time-range-start"
+              type="number"
+              inputmode="numeric"
+              min="0"
+              step="1"
+              value="${escapeHtml(state.searchFilters.timeRangeStartMsDraft)}"
+              placeholder="仅作用于视频时间命中"
+              ${library ? "" : "disabled"}
+            />
+          </label>
+          <label>
+            <span>时间范围结束 ms</span>
+            <input
+              id="search-filter-time-range-end"
+              data-testid="search-filter-time-range-end"
+              type="number"
+              inputmode="numeric"
+              min="0"
+              step="1"
+              value="${escapeHtml(state.searchFilters.timeRangeEndMsDraft)}"
+              placeholder="仅作用于视频时间命中"
+              ${library ? "" : "disabled"}
+            />
+          </label>
+        </div>
+        <div class="inline-actions">
+          <button
+            type="button"
+            id="clear-search-filters-button"
+            data-testid="clear-search-filters-button"
+            class="secondary-button"
+            ${library ? "" : "disabled"}
+          >
+            清除过滤器
+          </button>
+        </div>
+      </div>
       ${
         state.searchMode === "text"
           ? `
@@ -2294,6 +2493,25 @@ function renderWorkspace() {
   document.querySelector("#import-paths")?.addEventListener("input", onImportPathsInput);
   document.querySelector("#search-form")?.addEventListener("submit", onSearchSubmit);
   document.querySelector("#search-text")?.addEventListener("input", onSearchTextInput);
+  document.querySelector("#search-filter-kind")?.addEventListener("change", onSearchFilterKindChange);
+  document
+    .querySelector("#search-filter-source-type")
+    ?.addEventListener("change", onSearchFilterSourceTypeChange);
+  document
+    .querySelector("#search-filter-path-prefix")
+    ?.addEventListener("input", onSearchFilterPathPrefixInput);
+  document
+    .querySelector("#search-filter-time-range-start")
+    ?.addEventListener("input", onSearchFilterTimeRangeStartInput);
+  document
+    .querySelector("#search-filter-time-range-end")
+    ?.addEventListener("input", onSearchFilterTimeRangeEndInput);
+  document
+    .querySelector("#clear-search-filters-button")
+    ?.addEventListener("click", onClearSearchFilters);
+  document
+    .querySelector("#search-load-more-button")
+    ?.addEventListener("click", onLoadMoreSearchResults);
   document.querySelector("#query-image-input")?.addEventListener("change", onQueryImageInput);
   document.querySelector("#clear-query-image-button")?.addEventListener("click", onClearQueryImage);
   document.querySelector("#query-image-paste-target")?.addEventListener("paste", onQueryImagePaste);
@@ -2572,6 +2790,7 @@ async function onCreateLibrary(event) {
     state.selectedLibraryId = library.id;
     resetSourceRootEditor();
     resetInventoryFilters();
+    resetSearchFilters();
     resetInventoryState();
     state.importPathsDraft = "";
     state.searchTextDraft = "";
@@ -2582,6 +2801,7 @@ async function onCreateLibrary(event) {
     state.importReceipt = null;
     state.selectedVisualUnit = null;
     state.searchOutcome = null;
+    state.lastSearchRequest = null;
     state.statusMessage = null;
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
@@ -2598,6 +2818,7 @@ async function onSelectLibrary(event) {
   state.selectedLibraryId = event.target.value;
   resetSourceRootEditor();
   resetInventoryFilters();
+  resetSearchFilters();
   resetInventoryState();
   clearQueryImageState();
   clearQueryVideoState();
@@ -2605,6 +2826,7 @@ async function onSelectLibrary(event) {
   state.importReceipt = null;
   state.selectedVisualUnit = null;
   state.searchOutcome = null;
+  state.lastSearchRequest = null;
   state.globalError = null;
   state.statusMessage = null;
   await refreshWorkspace({ keepSelection: true });
@@ -2616,6 +2838,33 @@ function onImportPathsInput(event) {
 
 function onSearchTextInput(event) {
   state.searchTextDraft = event.target.value;
+}
+
+function onSearchFilterKindChange(event) {
+  state.searchFilters.visualUnitKind = event.target.value;
+}
+
+function onSearchFilterSourceTypeChange(event) {
+  state.searchFilters.sourceType = event.target.value;
+}
+
+function onSearchFilterPathPrefixInput(event) {
+  state.searchFilters.pathPrefix = event.target.value;
+}
+
+function onSearchFilterTimeRangeStartInput(event) {
+  state.searchFilters.timeRangeStartMsDraft = event.target.value;
+}
+
+function onSearchFilterTimeRangeEndInput(event) {
+  state.searchFilters.timeRangeEndMsDraft = event.target.value;
+}
+
+function onClearSearchFilters() {
+  resetSearchFilters();
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
 }
 
 function onSourceRootPathInput(event) {
@@ -2997,6 +3246,65 @@ async function onSearchSubmit(event) {
   }
 }
 
+async function onLoadMoreSearchResults() {
+  if (!state.searchOutcome?.next_cursor || !state.lastSearchRequest) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = "正在加载更多搜索结果...";
+    renderWorkspace();
+    await executeSearchRequest(state.lastSearchRequest, {
+      append: true,
+      cursor: state.searchOutcome.next_cursor,
+    });
+    state.statusMessage = null;
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+function sharedSearchRequestFields() {
+  const filters = searchFiltersPayload();
+  return {
+    library_id: state.selectedLibraryId,
+    top_k: SEARCH_PAGE_SIZE,
+    debug: true,
+    ...(filters ? { filters } : {}),
+  };
+}
+
+async function executeSearchRequest(
+  request: SearchRequestSnapshot,
+  options: { append?: boolean; cursor?: string | null } = {}
+): Promise<SearchOutcomeState> {
+  const requestBody = {
+    ...request.body,
+    ...(options.cursor ? { cursor: options.cursor } : {}),
+  };
+  const data = await apiRequest<SearchOutcomeState>(request.endpoint, {
+    method: "POST",
+    body: JSON.stringify(requestBody),
+  });
+  const mergedResults = options.append
+    ? [...(state.searchOutcome?.results ?? []), ...(data.results ?? [])]
+    : data.results;
+  state.searchOutcome = {
+    ...data,
+    results: mergedResults,
+  };
+  state.lastSearchRequest = request;
+  renderWorkspace();
+  if (!options.append && data.results?.[0]?.visual_unit_id) {
+    await loadVisualUnit(data.results[0].visual_unit_id);
+  }
+  return state.searchOutcome;
+}
+
 async function runTextSearch() {
   const input = document.querySelector<HTMLInputElement>("#search-text");
   state.searchTextDraft = input?.value ?? "";
@@ -3145,21 +3453,13 @@ async function runDocumentSearch() {
 }
 
 async function searchText(text: string): Promise<SearchOutcomeState> {
-  const data = await apiRequest<SearchOutcomeState>("/search/text", {
-    method: "POST",
-    body: JSON.stringify({
-      library_id: state.selectedLibraryId,
+  return executeSearchRequest({
+    endpoint: "/search/text",
+    body: {
+      ...sharedSearchRequestFields(),
       text,
-      top_k: 5,
-      debug: true,
-    }),
+    },
   });
-  state.searchOutcome = data;
-  renderWorkspace();
-  if (data.results?.[0]?.visual_unit_id) {
-    await loadVisualUnit(data.results[0].visual_unit_id);
-  }
-  return data;
 }
 
 async function uploadQueryImage(file: File): Promise<QueryAssetData> {
@@ -3227,57 +3527,33 @@ async function uploadQueryDocument(file: File): Promise<QueryAssetData> {
 }
 
 async function searchImage(imageInput: Record<string, unknown>): Promise<SearchOutcomeState> {
-  const data = await apiRequest<SearchOutcomeState>("/search/image", {
-    method: "POST",
-    body: JSON.stringify({
-      library_id: state.selectedLibraryId,
+  return executeSearchRequest({
+    endpoint: "/search/image",
+    body: {
+      ...sharedSearchRequestFields(),
       image_input: imageInput,
-      top_k: 5,
-      debug: true,
-    }),
+    },
   });
-  state.searchOutcome = data;
-  renderWorkspace();
-  if (data.results?.[0]?.visual_unit_id) {
-    await loadVisualUnit(data.results[0].visual_unit_id);
-  }
-  return data;
 }
 
 async function searchVideo(videoInput: Record<string, unknown>): Promise<SearchOutcomeState> {
-  const data = await apiRequest<SearchOutcomeState>("/search/video", {
-    method: "POST",
-    body: JSON.stringify({
-      library_id: state.selectedLibraryId,
+  return executeSearchRequest({
+    endpoint: "/search/video",
+    body: {
+      ...sharedSearchRequestFields(),
       video_input: videoInput,
-      top_k: 5,
-      debug: true,
-    }),
+    },
   });
-  state.searchOutcome = data;
-  renderWorkspace();
-  if (data.results?.[0]?.visual_unit_id) {
-    await loadVisualUnit(data.results[0].visual_unit_id);
-  }
-  return data;
 }
 
 async function searchDocument(documentInput: Record<string, unknown>): Promise<SearchOutcomeState> {
-  const data = await apiRequest<SearchOutcomeState>("/search/document", {
-    method: "POST",
-    body: JSON.stringify({
-      library_id: state.selectedLibraryId,
+  return executeSearchRequest({
+    endpoint: "/search/document",
+    body: {
+      ...sharedSearchRequestFields(),
       document_input: documentInput,
-      top_k: 5,
-      debug: true,
-    }),
+    },
   });
-  state.searchOutcome = data;
-  renderWorkspace();
-  if (data.results?.[0]?.visual_unit_id) {
-    await loadVisualUnit(data.results[0].visual_unit_id);
-  }
-  return data;
 }
 
 function onFillDemo() {

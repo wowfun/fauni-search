@@ -2,6 +2,11 @@
 
 ## 2026-04-19
 ### Changed
+- Completed the current search-controls slice by adding opaque cursor pagination, `visual_unit.kind` / `path_prefix` / `source_type` / `time_range` filtering, and richer `debug` search diagnostics in the Rust app, while tightening the shared `004/009` specs and adding narrow search-response / search-plan coverage.
+- Extended the shared search workspace with a lightweight search-filter dock, deterministic `Load more` pagination behavior backed by saved search snapshots, and UI coverage for filter payload wiring and local invalid-time-range rejection.
+
+## 2026-04-19
+### Changed
 - Completed the UI TypeScript migration with a real `pnpm --dir ui typecheck` path, added `typescript` to the Vite workspace, tightened the local fast-check contract/docs to include UI typecheck before the existing UI build step, and fixed the remaining narrow DOM/locator typing gaps without changing workspace behavior.
 
 ## 2026-04-17

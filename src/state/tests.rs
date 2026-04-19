@@ -817,14 +817,236 @@ fn build_search_response_returns_qdrant_results_after_import() {
     assert!(response.results.iter().any(|item| item.kind == "image"));
     assert_eq!(response.results[0].score, Some(0.9));
     assert_eq!(response.results[1].score, Some(0.8));
+    assert_eq!(response.results[0].cursor, "search:v1:1");
+    assert_eq!(response.results[1].cursor, "search:v1:2");
+    assert_eq!(response.next_cursor, None);
     assert!(response.results.iter().all(|item| item
         .preview
         .url
         .starts_with("http://127.0.0.1:53210/libraries/")));
     assert_eq!(response.debug.as_ref().unwrap()["repr_kind"], "multivector");
+    assert_eq!(
+        response.debug.as_ref().unwrap()["provider"]["model_profile"],
+        "local_python"
+    );
+    assert_eq!(
+        response.debug.as_ref().unwrap()["index_lines"][0]["index_line"],
+        "multivector"
+    );
 
     let _ = fs::remove_file(pdf_path);
     let _ = fs::remove_file(image_path);
+}
+
+#[test]
+fn build_search_response_supports_cursor_pagination() {
+    set_test_app_env();
+    let plan = SearchPlan {
+        library_id: "lib_000001".to_string(),
+        collection_name: stable_collection_name("lib_000001", MULTIVECTOR_INDEX_LINE),
+        top_k: 1,
+        cursor_offset: 0,
+        kind_filter: None,
+        path_prefix_filter: None,
+        source_type_filter: None,
+        time_range_filter: None,
+        target_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
+        active_visual_unit_ids: BTreeSet::from([
+            "vu_000001".to_string(),
+            "vu_000002".to_string(),
+        ]),
+        debug: true,
+    };
+    let candidates = vec![
+        QdrantScoredPoint {
+            score: 0.9,
+            payload: Some(QdrantPointPayload {
+                visual_unit_id: "vu_000001".to_string(),
+                source_id: "src_000001".to_string(),
+                source_path: "/library/chart.png".to_string(),
+                source_type: "image".to_string(),
+                kind: "image".to_string(),
+                locator: json!({ "path": "/library/chart.png" }),
+            }),
+        },
+        QdrantScoredPoint {
+            score: 0.8,
+            payload: Some(QdrantPointPayload {
+                visual_unit_id: "vu_000002".to_string(),
+                source_id: "src_000002".to_string(),
+                source_path: "/library/report.pdf".to_string(),
+                source_type: "pdf".to_string(),
+                kind: "document_page".to_string(),
+                locator: json!({ "page": 1, "page_label": "1" }),
+            }),
+        },
+    ];
+
+    let first_page = build_search_response(
+        SearchPlan {
+            cursor_offset: 0,
+            ..plan.clone()
+        },
+        QueryEmbeddingResult {
+            vectors: vec![vec![0.1, 0.2, 0.3]],
+            pooled_vector: vec![0.1, 0.2, 0.3],
+        },
+        candidates.clone(),
+    )
+    .unwrap();
+    assert_eq!(first_page.results.len(), 1);
+    assert_eq!(first_page.results[0].visual_unit_id, "vu_000001");
+    assert_eq!(first_page.results[0].cursor, "search:v1:1");
+    assert_eq!(first_page.next_cursor.as_deref(), Some("search:v1:1"));
+
+    let second_page = build_search_response(
+        SearchPlan {
+            cursor_offset: 1,
+            ..plan
+        },
+        QueryEmbeddingResult {
+            vectors: vec![vec![0.1, 0.2, 0.3]],
+            pooled_vector: vec![0.1, 0.2, 0.3],
+        },
+        candidates,
+    )
+    .unwrap();
+    assert_eq!(second_page.results.len(), 1);
+    assert_eq!(second_page.results[0].visual_unit_id, "vu_000002");
+    assert_eq!(second_page.results[0].cursor, "search:v1:2");
+    assert_eq!(second_page.next_cursor, None);
+}
+
+#[test]
+fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_filters() {
+    set_test_app_env();
+    let response = build_search_response(
+        SearchPlan {
+            library_id: "lib_000001".to_string(),
+            collection_name: stable_collection_name("lib_000001", MULTIVECTOR_INDEX_LINE),
+            top_k: 10,
+            cursor_offset: 0,
+            kind_filter: Some(BTreeSet::from(["video_segment".to_string()])),
+            path_prefix_filter: Some(BTreeSet::from(["/library/videos/".to_string()])),
+            source_type_filter: Some(BTreeSet::from(["video".to_string()])),
+            time_range_filter: Some(SearchTimeRangeFilter {
+                start_ms: 600,
+                end_ms: 1400,
+            }),
+            target_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
+            active_visual_unit_ids: BTreeSet::from([
+                "vu_000001".to_string(),
+                "vu_000002".to_string(),
+                "vu_000003".to_string(),
+            ]),
+            debug: false,
+        },
+        QueryEmbeddingResult {
+            vectors: vec![vec![0.1, 0.2, 0.3]],
+            pooled_vector: vec![0.1, 0.2, 0.3],
+        },
+        vec![
+            QdrantScoredPoint {
+                score: 0.9,
+                payload: Some(QdrantPointPayload {
+                    visual_unit_id: "vu_000001".to_string(),
+                    source_id: "src_000001".to_string(),
+                    source_path: "/library/videos/clip.mp4".to_string(),
+                    source_type: "video".to_string(),
+                    kind: "video_segment".to_string(),
+                    locator: json!({ "start_ms": 500, "end_ms": 1500, "duration_ms": 3000 }),
+                }),
+            },
+            QdrantScoredPoint {
+                score: 0.8,
+                payload: Some(QdrantPointPayload {
+                    visual_unit_id: "vu_000002".to_string(),
+                    source_id: "src_000002".to_string(),
+                    source_path: "/library/videos/clip.mp4".to_string(),
+                    source_type: "video".to_string(),
+                    kind: "video_segment".to_string(),
+                    locator: json!({ "start_ms": 1600, "end_ms": 2200, "duration_ms": 3000 }),
+                }),
+            },
+            QdrantScoredPoint {
+                score: 0.7,
+                payload: Some(QdrantPointPayload {
+                    visual_unit_id: "vu_000003".to_string(),
+                    source_id: "src_000003".to_string(),
+                    source_path: "/library/images/chart.png".to_string(),
+                    source_type: "image".to_string(),
+                    kind: "image".to_string(),
+                    locator: json!({ "path": "/library/images/chart.png" }),
+                }),
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].visual_unit_id, "vu_000001");
+    assert_eq!(response.results[0].kind, "video_segment");
+    assert_eq!(response.results[0].source_type, "video");
+    assert_eq!(response.next_cursor, None);
+}
+
+#[test]
+fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
+    set_test_app_env();
+    let mut state = AppState::default();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            name: "search-filter-validation".to_string(),
+            config: Some(CreateLibraryConfigRequest {
+                enabled_index_lines: vec!["multivector".to_string()],
+            }),
+        })
+        .unwrap();
+    state
+        .libraries
+        .get_mut(&library.id)
+        .unwrap()
+        .active_index_lines
+        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+
+    let invalid_cursor = state
+        .prepare_text_search(&TextSearchRequest {
+            library_id: library.id.clone(),
+            text: "report".to_string(),
+            filters: None,
+            top_k: Some(5),
+            cursor: Some("bogus-cursor".to_string()),
+            debug: Some(false),
+            target_index_lines: None,
+        })
+        .unwrap_err();
+    assert_eq!(invalid_cursor.payload.code, "validation_failed");
+    assert_eq!(
+        invalid_cursor.payload.details.as_ref().unwrap()["field"],
+        "cursor"
+    );
+
+    let invalid_time_range = state
+        .prepare_text_search(&TextSearchRequest {
+            library_id: library.id,
+            text: "report".to_string(),
+            filters: Some(json!({
+                "time_range": {
+                    "start_ms": 1000,
+                    "end_ms": 1000,
+                }
+            })),
+            top_k: Some(5),
+            cursor: None,
+            debug: Some(false),
+            target_index_lines: None,
+        })
+        .unwrap_err();
+    assert_eq!(invalid_time_range.payload.code, "validation_failed");
+    assert_eq!(
+        invalid_time_range.payload.details.as_ref().unwrap()["field"],
+        "filters.time_range"
+    );
 }
 
 #[test]

@@ -97,11 +97,24 @@
   - 有序 `results`
   - 可选 `next_cursor`
   - 可选 `debug`
+- 当前切片中，`cursor` 必须编码为来自上一页 `next_cursor` 或上一页最后一个结果项 `cursor` 的不透明字符串；客户端不得依赖其内部格式
+- 当前切片中，若启用了 `filters`，正式稳定编码至少包括：
+  - `filters.visual_unit.kind`：单字符串或字符串数组
+  - `filters.source_type`：单字符串或字符串数组
+  - `filters.path_prefix`：单字符串或字符串数组
+  - `filters.time_range`：`{ "start_ms": number, "end_ms": number }`
+- `filters.time_range` 若出现，必须同时包含可解析的 `start_ms` 与 `end_ms`；否则应通过统一错误载荷返回 `validation_failed`
 - 每个搜索结果项的稳定字段至少包括：`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选 `score`
+- 当前切片中，结果项上的 `cursor` 与响应级 `next_cursor` 共享同一续页令牌语义；若当前页后仍有更多结果，`next_cursor` 应可直接复用最后一个结果项上的 `cursor`
 - `preview` 必须编码为结构化资源引用对象；该对象至少包含一个可直接取用、对客户端保持不透明的 `url`，并可按需附带 `handle`
 - `neighbor_context` 不在搜索结果列表中默认内联返回；对象详情与展开接口负责承接该信息
 - 若搜索结果返回 `score`，该字段必须编码为数值，并且只表达当前查询 / 当前后端返回的相对排序强弱；客户端不得将其视为跨查询、跨索引线或跨后端可直接比较的统一分值
 - `debug` 载荷继续承接更细粒度的后端原始分数与技术诊断；公开 `score` 不能替代这些调试字段
+- 当前切片中，`debug` 载荷的稳定最小结构至少应支持：
+  - `backend`
+  - `repr_kind`
+  - `provider`
+  - `index_lines`
 - 搜索请求若同时携带多种查询输入、显式请求未启用索引线，或命中已启用但未就绪的目标索引线，应通过统一错误载荷返回失败
 - `not_ready` 错误的 `details` 至少应支持按索引线返回结构化条目；每个条目至少可表达 `index_line`，并可附带相关 `job` / `phase` 摘要
 - 搜索结果字段的含义、过滤 / 排序规则、邻近上下文语义与显式拒绝规则由 [004-search](../004-search/spec.md) 定义
