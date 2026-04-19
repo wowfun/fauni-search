@@ -6,6 +6,7 @@
 
 - 提供方配置（Provider Config）
 - 模型目录项（Model Catalog Entry）
+- 向量能力（Embedding Capabilities）
 - 索引线模型选择（Index-Line Model Selection）
 - 已解析模型选择（Resolved Model Selection）
 - 运行时绑定模型（Runtime-Bound Model）
@@ -16,7 +17,7 @@
 - 提供方配置与模型选择的稳定语义边界
 - 全局默认与库级覆盖的最小解析顺序
 - 当前正式索引线的模型配置粒度
-- 运行时可见模型事实与显式失败语义
+- 运行时可见模型事实、工程适配能力与显式失败语义
 
 范围外：
 - 检索后端产品私有配置、collection schema 与向量参数
@@ -29,6 +30,7 @@
 
 - Provider 薄化（Thin Provider）：provider 只承载平台与连接语义，不再隐藏实际模型身份
 - 模型显式化（Model Is Explicit）：系统必须始终能够直接回答“当前实际用的是哪个 exact model_id”
+- 原生事实优先（Embedding Facts First）：Embedding 模型只声明其原生输入与原生向量形态，不承担 query / index 角色语义
 - 按索引线选择（Index-Line Selection）：当前稳定配置粒度收敛到索引线，不再按 query kind 公开分别选模型
 - 运行时事实优先（Runtime Truth Wins）：本地运行时已绑定模型时，应直接暴露运行时返回的 `model_id` / `model_revision`
 - 显式失败（Explicit Failure）：模型不可执行、运行时不可达或当前切片未实现时，必须明确失败，不自动 fallback
@@ -71,8 +73,25 @@ Provider Config 的最小稳定字段包括：
 
 模型目录（Model Catalog）是可展示、可选择的模型清单，而不是 provider 本身：
 - 当前目录至少应能表达“是否兼容当前 `multivector` 检索切片”
+- 当前目录至少应能表达该模型的原生向量能力，而不是工程增强后的输入适配能力
 - 不兼容当前检索切片的文本专用 embedding 模型，例如 `text-embedding-v4`，不得进入当前 `multivector` 可选目录
 - 当前 `local_sidecar` 的实际模型来自 sidecar 运行时绑定值；本切片中它应作为“可见但只读”的 runtime-bound 模型展示
+
+Embedding Capabilities 是模型原生事实的稳定最小承载，不引入 query / index 角色语义。
+
+Embedding Capabilities 的正式字段包括：
+- `input_types`
+- `vector_types`
+- `supports_mixed_inputs`
+
+约束：
+- `input_types` 只表达模型真正原生支持的输入类型；当前切片只要求承接 `text` 与 `image`
+- `document` 与 `video` 不得进入 Embedding Capabilities；它们属于运行时工程适配输入
+- `vector_types` 当前至少支持：
+  - `single_vector`
+  - `independent_vectors`
+  - `multi_vector_late_interaction`
+- `supports_mixed_inputs` 表达单个逻辑输入样本中是否允许混合多种原生输入类型
 
 ## 解析顺序与已解析模型选择
 
@@ -93,6 +112,7 @@ Provider Config 的最小稳定字段包括：
 - `provider_kind`
 - `model_id`
 - 可选 `model_revision`
+- `embedding_capabilities`
 - `status`
 - `message`
 - 可选 `last_probed_at`
@@ -106,10 +126,22 @@ Provider Config 的最小稳定字段包括：
 - 当前唯一正式可执行模型 provider 仍是 `local_sidecar`
 - `local_sidecar` 的真实模型事实来自 sidecar `/health` 与 `/capabilities` 返回的 `model_id` / `model_revision`
 - 当前切片中，`local_sidecar` 的 `multivector` 选择应被视为 runtime-bound，而不是任意可写模型切换入口
+- 当前 `local_sidecar` / ColQwen 运行时的 Embedding Capabilities 固定为：
+  - `input_types = ["text", "image"]`
+  - `vector_types = ["multi_vector_late_interaction"]`
+  - `supports_mixed_inputs = false`
 - `dashscope` 当前只作为配置与未来兼容字段存在；解析到它时必须显式返回 `not_supported`
 - `qdrant` 继续作为内部固定检索后端参与运行，但不再出现在 Settings 的模型配置面
 - 搜索 debug、库摘要与 Settings 摘要都必须直接暴露 exact `model_id`
 - Settings 与库摘要中的主编辑面只应承接 `provider_id` 与 `model_id`；`model_revision` 只作为只读运行时摘要返回
+- Settings 必须提供“测试当前 Provider + 模型配置”的诊断入口，用于在保存前直接验证当前草稿是否能返回 embedding
+- Settings 模型测试固定使用当前未保存草稿，而不是已持久化的 defaults / overrides
+- Settings 模型测试只应回传当前 provider 的可编辑草稿字段；`local_sidecar` 这类 runtime-bound provider 的连接信息只可展示、不可作为测试草稿重新提交
+- Settings 模型测试的输入模态必须由当前模型目录项或等价运行时能力快照中的 `Embedding Capabilities.input_types` 驱动
+- 当前切片中，Settings 模型测试只要求承接 `text` 与 `image`
+- Settings 模型测试是纯诊断能力，不创建 job，不写 durable state，不改变全局默认、库级覆盖或已解析模型选择
+- 当前切片中，`dashscope` 仍只作为配置与未来兼容字段存在；在 Settings 模型测试中选择它时，必须显式返回 `not_supported`
+- 文档与视频查询能力属于 runtime adapter，不属于模型原生能力；它们只允许在运行时诊断或调试面中以命名 adapter 列表呈现
 
 ## 运行时探测与失败语义
 

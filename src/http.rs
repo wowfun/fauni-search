@@ -1,8 +1,11 @@
 use crate::{
     api::*,
     indexing::build_search_response,
-    model::{ResolvedImageQueryInput, SourceActionKind, SourceActionScope, SourceActionTrigger},
-    provider::provider_context_payload,
+    model::{
+        IncomingQueryImageUpload, ResolvedImageQueryInput, SourceActionKind, SourceActionScope,
+        SourceActionTrigger, StagedSettingsModelTestFile,
+    },
+    provider::{provider_context_payload, QUERY_KIND_IMAGE, QUERY_KIND_TEXT},
     qdrant::query_qdrant,
     query_assets::*,
     runtime::{run_import_job, run_source_action_job},
@@ -20,6 +23,22 @@ use axum::{
 use serde_json::json;
 use std::{collections::BTreeMap, fs};
 
+struct ParsedModelTestForm {
+    provider_id: String,
+    model_id: String,
+    input_modality: String,
+    provider_enabled: Option<bool>,
+    provider_base_url: Option<String>,
+    text: Option<String>,
+    file: Option<PendingModelTestFile>,
+}
+
+struct PendingModelTestFile {
+    original_filename: Option<String>,
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
 pub fn build_app(state: SharedState) -> Router {
     Router::new()
         .route("/", get(root))
@@ -34,6 +53,7 @@ pub fn build_app(state: SharedState) -> Router {
             "/settings/model-defaults",
             get(get_global_model_defaults).patch(update_global_model_defaults),
         )
+        .route("/settings/model-tests", post(test_model_selection))
         .route("/libraries", get(list_libraries).post(create_library))
         .route("/libraries/:library_id", get(get_library))
         .route(
@@ -131,6 +151,7 @@ async fn root() -> Json<RootPayload> {
             "GET /settings/model-catalog",
             "GET /settings/model-defaults",
             "PATCH /settings/model-defaults",
+            "POST /settings/model-tests",
             "GET /libraries",
             "POST /libraries",
             "GET /libraries/{library_id}/model-overrides",
@@ -224,6 +245,35 @@ async fn update_global_model_defaults(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+async fn test_model_selection(
+    State(state): State<SharedState>,
+    mut multipart: Multipart,
+) -> Result<Json<SuccessEnvelope<ModelTestData>>, ApiError> {
+    let form = parse_model_test_form(&mut multipart).await?;
+    let staged_file = stage_model_test_file(form.file.as_ref(), &form.input_modality)?;
+
+    let result = {
+        let mut state = state.write().await;
+        state
+            .test_model_selection(
+                &form.provider_id,
+                &form.model_id,
+                &form.input_modality,
+                form.provider_enabled,
+                form.provider_base_url.clone(),
+                form.text.as_deref(),
+                staged_file.as_ref(),
+            )
+            .await
+    };
+
+    if let Some(file) = &staged_file {
+        remove_temp_query_asset_file(&file.path);
+    }
+
+    Ok(Json(SuccessEnvelope { data: result? }))
+}
+
 async fn list_libraries(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<LibrariesListData>> {
@@ -240,6 +290,172 @@ async fn get_library(
     let state = state.read().await;
     let snapshot = state.get_library(&library_id)?;
     Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn parse_model_test_form(multipart: &mut Multipart) -> Result<ParsedModelTestForm, ApiError> {
+    let mut provider_id = None;
+    let mut model_id = None;
+    let mut input_modality = None;
+    let mut provider_enabled = None;
+    let mut provider_base_url = None;
+    let mut text = None;
+    let mut file = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        ApiError::validation_failed(
+            format!("Settings model test form could not be parsed: {error}"),
+            Some(json!({ "field": "multipart" })),
+        )
+    })? {
+        let field_name = field.name().map(str::to_string).unwrap_or_default();
+        match field_name.as_str() {
+            "provider_id" => provider_id = Some(read_text_multipart_field(field).await?),
+            "model_id" => model_id = Some(read_text_multipart_field(field).await?),
+            "input_modality" => input_modality = Some(read_text_multipart_field(field).await?),
+            "provider_enabled" => {
+                provider_enabled = Some(parse_bool_form_field(
+                    &field_name,
+                    &read_text_multipart_field(field).await?,
+                )?)
+            }
+            "provider_base_url" => provider_base_url = Some(read_text_multipart_field(field).await?),
+            "text" => text = Some(read_text_multipart_field(field).await?),
+            "file" => {
+                if file.is_some() {
+                    return Err(ApiError::validation_failed(
+                        "Settings model test accepts exactly one file input.",
+                        Some(json!({ "field": "file" })),
+                    ));
+                }
+                let filename = field.file_name().map(str::to_string);
+                let content_type = field
+                    .content_type()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                let bytes = field.bytes().await.map_err(|error| {
+                    ApiError::validation_failed(
+                        format!("Settings model test file could not be read: {error}"),
+                        Some(json!({ "field": "file" })),
+                    )
+                })?;
+                file = Some(PendingModelTestFile {
+                    original_filename: filename,
+                    content_type,
+                    bytes: bytes.to_vec(),
+                });
+            }
+            _ => {
+                if field.file_name().is_some() {
+                    return Err(ApiError::validation_failed(
+                        "Unexpected file field in settings model test form.",
+                        Some(json!({ "field": field_name })),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(ParsedModelTestForm {
+        provider_id: provider_id.ok_or_else(|| {
+            ApiError::validation_failed(
+                "Settings model test requires provider_id.",
+                Some(json!({ "field": "provider_id" })),
+            )
+        })?,
+        model_id: model_id.ok_or_else(|| {
+            ApiError::validation_failed(
+                "Settings model test requires model_id.",
+                Some(json!({ "field": "model_id" })),
+            )
+        })?,
+        input_modality: input_modality.ok_or_else(|| {
+            ApiError::validation_failed(
+                "Settings model test requires input_modality.",
+                Some(json!({ "field": "input_modality" })),
+            )
+        })?,
+        provider_enabled,
+        provider_base_url,
+        text,
+        file,
+    })
+}
+
+async fn read_text_multipart_field(
+    field: axum::extract::multipart::Field<'_>,
+) -> Result<String, ApiError> {
+    field.text().await.map_err(|error| {
+        ApiError::validation_failed(
+            format!("Multipart text field could not be read: {error}"),
+            Some(json!({ "field": "multipart" })),
+        )
+    })
+}
+
+fn parse_bool_form_field(field: &str, value: &str) -> Result<bool, ApiError> {
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(ApiError::validation_failed(
+            "Boolean multipart field must be true or false.",
+            Some(json!({ "field": field, "received": other })),
+        )),
+    }
+}
+
+fn stage_model_test_file(
+    pending_file: Option<&PendingModelTestFile>,
+    input_modality: &str,
+) -> Result<Option<StagedSettingsModelTestFile>, ApiError> {
+    match input_modality {
+        QUERY_KIND_TEXT => {
+            if pending_file.is_some() {
+                return Err(ApiError::validation_failed(
+                    "text model test does not accept a file input.",
+                    Some(json!({ "field": "file" })),
+                ));
+            }
+            Ok(None)
+        }
+        QUERY_KIND_IMAGE => {
+            let file = pending_file.ok_or_else(|| {
+                ApiError::validation_failed(
+                    "image model test requires one file input.",
+                    Some(json!({ "field": "file" })),
+                )
+            })?;
+            let extension = infer_query_image_extension(
+                file.original_filename.as_deref(),
+                &file.content_type,
+            )
+            .ok_or_else(|| {
+                ApiError::validation_failed(
+                    "Only common image files are accepted as settings model test images right now.",
+                    Some(json!({
+                        "field": "file",
+                        "content_type": file.content_type,
+                        "filename": file.original_filename,
+                    })),
+                )
+            })?;
+            Ok(Some(persist_settings_model_test_image(
+                IncomingQueryImageUpload {
+                    bytes: file.bytes.clone(),
+                    content_type: file.content_type.clone(),
+                    original_filename: file.original_filename.clone(),
+                    extension,
+                },
+            )?))
+        }
+        _ => Err(ApiError::validation_failed(
+            "input_modality must be one of the supported settings model input types.",
+            Some(json!({
+                "field": "input_modality",
+                "received": input_modality,
+                "supported": [QUERY_KIND_TEXT, QUERY_KIND_IMAGE],
+            })),
+        )),
+    }
 }
 
 async fn create_library(

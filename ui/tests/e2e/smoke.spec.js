@@ -11,6 +11,11 @@ const fixtureImagePath = path.resolve(
   __dirname,
   "../../../tests/fixtures/tatdqa-page-images/images/tatdqa-page-0001.png"
 );
+const fixtureDocumentPath = path.resolve(__dirname, "../../../data/example/2025年中期报告.pdf");
+const fixtureVideoPath = path.resolve(
+  __dirname,
+  "../../../data/example/generate_q2_report_from_csv_bank_data-720-512.mp4"
+);
 const invalidQueryUploadPath = path.resolve(__dirname, "../../../README.md");
 const venvPythonPath = path.resolve(__dirname, "../../../.venv/bin/python");
 const workspacePollWaitMs = 3_500;
@@ -528,6 +533,115 @@ test("settings workspace shows exact models and resolves library overrides", asy
 
   await openSearchWorkspace(page);
   await expect(page.getByTestId("provider-bridge-summary")).toContainText(dashscopeModelId);
+});
+
+test("settings workspace tests only native embedding inputs and shows unsupported drafts", async ({
+  page,
+}) => {
+  const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
+  const dashscopeModelId = "qwen3-vl-embedding";
+
+  await page.route("**/api/settings/model-tests", async (route) => {
+    const body = route.request().postDataBuffer()?.toString("latin1") ?? "";
+    const providerMatch = body.match(/name="provider_id"\r\n\r\n([a-z_]+)/);
+    const providerId = providerMatch?.[1] ?? "local_sidecar";
+    const modalityMatch = body.match(/name="input_modality"\r\n\r\n([a-z]+)/);
+    const modality = modalityMatch?.[1] ?? "text";
+    if (providerId === "local_sidecar") {
+      expect(body).not.toContain('name="provider_base_url"');
+    }
+    const operationKindByModality = {
+      text: "query_embedding",
+      image: "image_query_embedding",
+    };
+    const vectorsByModality = {
+      text: [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+      image: [[1, 2, 3]],
+    };
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          resolved_model: {
+            binding_source: "settings_draft",
+            provider_id: "local_sidecar",
+            provider_kind: "local_sidecar",
+            model_id: localModelId,
+            model_revision: "main",
+            embedding_capabilities: {
+              input_types: ["text", "image"],
+              vector_types: ["multi_vector_late_interaction"],
+              supports_mixed_inputs: false,
+            },
+            status: "available",
+            message: `Validated ${modality} draft.`,
+            last_probed_at: "2026-04-19T00:00:00Z",
+          },
+          input_modality: modality,
+          operation_kind: operationKindByModality[modality],
+          vector_shape: [
+            vectorsByModality[modality].length,
+            vectorsByModality[modality][0].length,
+          ],
+          vectors: vectorsByModality[modality],
+          pooled_vector: vectorsByModality[modality][0],
+          input_summary:
+            modality === "text"
+              ? { kind: "text", text_preview: "Revenue 46 percent", size_bytes: 18 }
+              : {
+                  kind: "file",
+                  original_filename: `query-${modality}`,
+                  content_type:
+                    modality === "image"
+                      ? "image/png"
+                      : modality === "video"
+                        ? "video/mp4"
+                        : "application/pdf",
+                  size_bytes: 1234,
+                },
+        },
+      }),
+    });
+  });
+
+  await createLibrary(page, "provider-settings-model-test");
+  await openSettingsWorkspace(page);
+
+  const globalPanel = page.getByTestId("global-model-test-panel");
+  await expect(globalPanel).toContainText(localModelId);
+  await expect(page.getByTestId("global-model-test-support-message")).toContainText("text, image");
+  await expect(page.getByTestId("global-model-capabilities")).toContainText("inputs text, image");
+  await expect(page.getByTestId("global-model-capabilities")).toContainText(
+    "vectors multi_vector_late_interaction"
+  );
+  await expect(page.locator('[data-testid="global-model-test-modality"] option')).toHaveCount(2);
+  await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(0)).toHaveText(
+    "text"
+  );
+  await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(1)).toHaveText(
+    "image"
+  );
+  await expect(page.getByTestId("global-model-test-modality")).toHaveValue("text");
+
+  await page.getByTestId("global-model-test-text").fill("Revenue 46 percent");
+  await page.getByTestId("global-model-test-submit-button").click();
+  await expect(page.getByTestId("global-model-test-shape")).toContainText("[2, 3]");
+  await expect(page.getByTestId("global-model-test-vectors")).toContainText("0.1");
+
+  await page.getByTestId("global-model-test-modality").selectOption("image");
+  await expect(page.getByTestId("global-model-test-file")).toBeVisible();
+  await page.getByTestId("global-model-test-file").setInputFiles(fixtureImagePath);
+  await page.getByTestId("global-model-test-submit-button").click();
+  await expect(page.getByTestId("global-model-test-shape")).toContainText("[1, 3]");
+  await expect(page.getByTestId("global-model-test-vectors")).toContainText("1");
+
+  await page.getByTestId("library-model-provider-id").selectOption("dashscope");
+  await page.getByTestId("library-model-id").selectOption(dashscopeModelId);
+  await expect(page.getByTestId("library-model-test-support-message")).toContainText("not executable");
+  await expect(page.getByTestId("library-model-capabilities")).toContainText("inputs text, image");
+  await expect(page.getByTestId("library-model-test-submit-button")).toBeDisabled();
 });
 
 test("search workspace supports shared filters and load more pagination", async ({ page }) => {

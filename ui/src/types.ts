@@ -69,6 +69,7 @@ export interface ModelCatalogEntry {
   model_id: string;
   model_revision?: string | null;
   supported_index_lines: string[];
+  embedding_capabilities: EmbeddingCapabilities;
   editable: boolean;
   status: string;
   message: string;
@@ -110,6 +111,7 @@ export interface ResolvedModelSelectionPayload {
   provider_kind: string;
   model_id: string;
   model_revision?: string | null;
+  embedding_capabilities: EmbeddingCapabilities;
   status: string;
   message: string;
   last_probed_at?: string | null;
@@ -117,6 +119,32 @@ export interface ResolvedModelSelectionPayload {
 
 export interface ResolvedModelsData {
   index_lines: Record<string, ResolvedModelSelectionPayload>;
+}
+
+export interface EmbeddingCapabilities {
+  input_types: string[];
+  vector_types: string[];
+  supports_mixed_inputs: boolean;
+}
+
+export type ModelTestModality = "text" | "image";
+
+export interface ModelTestInputSummary {
+  kind: string;
+  text_preview?: string | null;
+  original_filename?: string | null;
+  content_type?: string | null;
+  size_bytes?: number | null;
+}
+
+export interface ModelTestData {
+  resolved_model: ResolvedModelSelectionPayload;
+  input_modality: ModelTestModality | string;
+  operation_kind: string;
+  vector_shape: number[];
+  vectors: number[][];
+  pooled_vector?: number[] | null;
+  input_summary: ModelTestInputSummary;
 }
 
 export interface LibrarySnapshot {
@@ -408,6 +436,18 @@ export interface AppState {
   editingProviderId: string;
   providerEnabledDraft: boolean;
   providerBaseUrlDraft: string;
+  globalModelTestModalityDraft: ModelTestModality | "";
+  globalModelTestTextDraft: string;
+  globalModelTestFile: File | null;
+  globalModelTestResult: ModelTestData | null;
+  globalModelTestError: ApiErrorPayload | null;
+  globalModelTestPending: boolean;
+  libraryModelTestModalityDraft: ModelTestModality | "";
+  libraryModelTestTextDraft: string;
+  libraryModelTestFile: File | null;
+  libraryModelTestResult: ModelTestData | null;
+  libraryModelTestError: ApiErrorPayload | null;
+  libraryModelTestPending: boolean;
   globalError: ApiErrorPayload | null;
   statusMessage: string | null;
 }

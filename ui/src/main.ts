@@ -2,6 +2,7 @@ import "./style.css";
 import type {
   ApiErrorPayload,
   AppState,
+  EmbeddingCapabilities,
   GlobalModelDefaultsData,
   ImportPathsData,
   InventorySummary,
@@ -16,6 +17,8 @@ import type {
   ModelCatalogData,
   ModelCatalogEntry,
   ModelDefaultsPayload,
+  ModelTestData,
+  ModelTestModality,
   ModelOverridesPayload,
   ModelSelectionOverridePayload,
   ModelSelectionPayload,
@@ -93,6 +96,7 @@ const WORKSPACE_POLL_INTERVAL_MS = 3000;
 const SEARCH_PAGE_SIZE = 5;
 const PROVIDER_INDEX_LINE = "multivector";
 const PROVIDER_ID_LOCAL_SIDECAR = "local_sidecar";
+const MODEL_TEST_MODALITIES: readonly ModelTestModality[] = ["text", "image"];
 
 function emptyModelDefaults(): ModelDefaultsPayload {
   return {
@@ -172,6 +176,18 @@ const state: AppState = {
   editingProviderId: "",
   providerEnabledDraft: true,
   providerBaseUrlDraft: "",
+  globalModelTestModalityDraft: "",
+  globalModelTestTextDraft: "",
+  globalModelTestFile: null,
+  globalModelTestResult: null,
+  globalModelTestError: null,
+  globalModelTestPending: false,
+  libraryModelTestModalityDraft: "",
+  libraryModelTestTextDraft: "",
+  libraryModelTestFile: null,
+  libraryModelTestResult: null,
+  libraryModelTestError: null,
+  libraryModelTestPending: false,
   globalError: null,
   statusMessage: null,
 };
@@ -420,6 +436,29 @@ function formatResolvedModelContext(selection: ResolvedModelSelectionPayload | u
   return parts.join(" · ");
 }
 
+function formatEmbeddingCapabilityValues(values: string[] | undefined) {
+  return values?.length ? values.join(", ") : "none";
+}
+
+function formatEmbeddingCapabilities(
+  capabilities: EmbeddingCapabilities | undefined,
+  options: { includePrefix?: boolean } = {}
+) {
+  if (!capabilities) {
+    return options.includePrefix ? "Embedding capabilities · unavailable" : "unavailable";
+  }
+
+  const parts = [
+    `inputs ${formatEmbeddingCapabilityValues(capabilities.input_types)}`,
+    `vectors ${formatEmbeddingCapabilityValues(capabilities.vector_types)}`,
+    `mixed inputs ${capabilities.supports_mixed_inputs ? "yes" : "no"}`,
+  ];
+  if (options.includePrefix) {
+    parts.unshift("Embedding capabilities");
+  }
+  return parts.join(" · ");
+}
+
 function resetInventoryState() {
   state.librarySources = [];
   state.inventorySummary = emptyInventorySummary();
@@ -616,6 +655,12 @@ function selectedCatalogEntryForProvider(
   return entries[0] ?? null;
 }
 
+function selectedCatalogEntryForSelection(
+  selection: Pick<ModelSelectionPayload, "provider_id" | "model_id">
+) {
+  return selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
+}
+
 function normalizeModelSelectionForProvider(
   providerId: string,
   base: Partial<ModelSelectionPayload> = {}
@@ -644,6 +689,293 @@ function normalizeModelOverrideForProvider(
     provider_id: normalized.provider_id,
     model_id: normalized.model_id,
   };
+}
+
+function supportedTestModalitiesForSelection(
+  providerId: string | null | undefined,
+  modelId?: string | null
+): ModelTestModality[] {
+  const entry = selectedCatalogEntryForProvider(providerId, modelId);
+  return MODEL_TEST_MODALITIES.filter((modality) =>
+    entry?.embedding_capabilities?.input_types?.includes(modality)
+  );
+}
+
+function activeProviderDraftForSelection(providerId: string): {
+  enabled?: boolean;
+  baseUrl?: string | null;
+} {
+  const allowEditableBaseUrl = providerId !== PROVIDER_ID_LOCAL_SIDECAR;
+  if (state.editingProviderId === providerId) {
+    return {
+      enabled: state.providerEnabledDraft,
+      baseUrl: allowEditableBaseUrl ? state.providerBaseUrlDraft.trim() || null : null,
+    };
+  }
+  const provider = state.providerConfigs.find((item) => item.provider_id === providerId);
+  return {
+    enabled: provider?.enabled,
+    baseUrl: allowEditableBaseUrl ? provider?.base_url ?? null : null,
+  };
+}
+
+function selectedGlobalTestModalities(): ModelTestModality[] {
+  const selection = selectedGlobalModelSelection();
+  return supportedTestModalitiesForSelection(selection.provider_id, selection.model_id);
+}
+
+function selectedLibraryTestModalities(): ModelTestModality[] {
+  const selection = selectedLibraryModelSelection();
+  return supportedTestModalitiesForSelection(selection.provider_id, selection.model_id);
+}
+
+function selectedLibraryModelSelection(): ModelSelectionPayload {
+  const override = selectedLibraryModelOverride();
+  const defaults = selectedGlobalModelSelection();
+  return {
+    provider_id: override.provider_id ?? defaults.provider_id,
+    model_id: override.model_id ?? defaults.model_id,
+  };
+}
+
+function ensureValidModelTestDrafts() {
+  const globalModalities = selectedGlobalTestModalities();
+  if (!globalModalities.includes(state.globalModelTestModalityDraft as ModelTestModality)) {
+    state.globalModelTestModalityDraft =
+      (globalModalities.includes("text") ? "text" : globalModalities[0]) ?? "";
+    state.globalModelTestFile = null;
+    state.globalModelTestResult = null;
+    state.globalModelTestError = null;
+  }
+
+  const libraryModalities = selectedLibraryTestModalities();
+  if (!libraryModalities.includes(state.libraryModelTestModalityDraft as ModelTestModality)) {
+    state.libraryModelTestModalityDraft =
+      (libraryModalities.includes("text") ? "text" : libraryModalities[0]) ?? "";
+    state.libraryModelTestFile = null;
+    state.libraryModelTestResult = null;
+    state.libraryModelTestError = null;
+  }
+}
+
+function resetGlobalModelTestState() {
+  state.globalModelTestFile = null;
+  state.globalModelTestResult = null;
+  state.globalModelTestError = null;
+  state.globalModelTestPending = false;
+  ensureValidModelTestDrafts();
+}
+
+function resetLibraryModelTestState() {
+  state.libraryModelTestFile = null;
+  state.libraryModelTestResult = null;
+  state.libraryModelTestError = null;
+  state.libraryModelTestPending = false;
+  ensureValidModelTestDrafts();
+}
+
+function formatModelTestShape(shape: number[] | undefined) {
+  if (!shape?.length) {
+    return "[]";
+  }
+  return `[${shape.join(", ")}]`;
+}
+
+function modelTestFileAccept(modality: ModelTestModality | "") {
+  switch (modality) {
+    case "image":
+      return "image/*";
+    default:
+      return "";
+  }
+}
+
+function modelTestFileLabel(modality: ModelTestModality | "") {
+  switch (modality) {
+    case "image":
+      return "测试图片";
+    default:
+      return "测试文件";
+  }
+}
+
+function settingsModelTestSupportMessage(
+  selection: ModelSelectionPayload,
+  supportedModalities: ModelTestModality[]
+) {
+  const entry = selectedCatalogEntryForSelection(selection);
+  if (!entry) {
+    return "当前模型目录中没有这条 provider + model 组合。";
+  }
+  if (!supportedModalities.length) {
+    return entry.message;
+  }
+  return `${entry.message} · 原生输入：${supportedModalities.join(", ")}`;
+}
+
+function canExecuteSettingsModelTest(selection: ModelSelectionPayload) {
+  const entry = selectedCatalogEntryForSelection(selection);
+  return entry?.status === "available";
+}
+
+function currentDraftProviderSummary(providerId: string) {
+  const provider = state.providerConfigs.find((item) => item.provider_id === providerId);
+  const draft = activeProviderDraftForSelection(providerId);
+  const parts = [provider?.display_name ?? providerId, providerId];
+  if (draft.baseUrl) {
+    parts.push(draft.baseUrl);
+  }
+  if (draft.enabled === false) {
+    parts.push("disabled");
+  }
+  return parts.join(" · ");
+}
+
+function renderModelTestResult(testIdPrefix: string, result: ModelTestData | null) {
+  if (!result) {
+    return "";
+  }
+
+  return `
+    <div class="model-test-result" data-testid="${testIdPrefix}-result">
+      <div class="job-meta">
+        <span class="pill ready" data-testid="${testIdPrefix}-resolved-model">${escapeHtml(formatResolvedModel(result.resolved_model))}</span>
+        <span class="pill muted">${escapeHtml(result.operation_kind)}</span>
+        <span class="pill muted" data-testid="${testIdPrefix}-shape">${escapeHtml(formatModelTestShape(result.vector_shape))}</span>
+      </div>
+      <p class="helper">${escapeHtml(formatResolvedModelContext(result.resolved_model))}</p>
+      <p class="helper">${escapeHtml(formatEmbeddingCapabilities(result.resolved_model.embedding_capabilities, { includePrefix: true }))}</p>
+      <p class="helper">${escapeHtml(result.resolved_model.message)}</p>
+      <div class="detail-grid model-test-grid">
+        <div class="detail-block">
+          <h5>Vectors</h5>
+          <pre data-testid="${testIdPrefix}-vectors">${escapeHtml(JSON.stringify(result.vectors, null, 2))}</pre>
+        </div>
+        ${
+          result.pooled_vector?.length
+            ? `
+              <div class="detail-block">
+                <h5>Pooled vector</h5>
+                <pre data-testid="${testIdPrefix}-pooled-vector">${escapeHtml(JSON.stringify(result.pooled_vector, null, 2))}</pre>
+              </div>
+            `
+            : ""
+        }
+      </div>
+      <div class="detail-block">
+        <h5>Input summary</h5>
+        <pre>${escapeHtml(JSON.stringify(result.input_summary, null, 2))}</pre>
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsModelTestPanel(options: {
+  scope: "global" | "library";
+  selection: ModelSelectionPayload;
+  supportedModalities: ModelTestModality[];
+  modalityDraft: ModelTestModality | "";
+  textDraft: string;
+  file: File | null;
+  result: ModelTestData | null;
+  error: ApiErrorPayload | null;
+  pending: boolean;
+}) {
+  const { scope, selection, supportedModalities, modalityDraft, textDraft, file, result, error, pending } =
+    options;
+  const testIdPrefix = `${scope}-model-test`;
+  const inputModality = modalityDraft || supportedModalities[0] || "";
+  const fileRequired = inputModality === "image";
+  const disabled =
+    !supportedModalities.length || !canExecuteSettingsModelTest(selection) || pending;
+
+  return `
+    <section class="model-test-panel" data-testid="${testIdPrefix}-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Test</p>
+          <h3>${scope === "global" ? "Test current global model" : "Test current library model"}</h3>
+        </div>
+      </div>
+      <p class="helper" data-testid="${testIdPrefix}-draft-summary">
+        ${escapeHtml(currentDraftProviderSummary(selection.provider_id))} · ${escapeHtml(selection.model_id)}
+      </p>
+      <p class="helper" data-testid="${testIdPrefix}-support-message">
+        ${escapeHtml(settingsModelTestSupportMessage(selection, supportedModalities))}
+      </p>
+      <form id="${testIdPrefix}-form" class="stack-form" data-testid="${testIdPrefix}-form">
+        <div class="filter-grid settings-filter-grid">
+          <label>
+            <span>input_modality</span>
+            <select
+              id="${testIdPrefix}-modality"
+              data-testid="${testIdPrefix}-modality"
+              ${supportedModalities.length ? "" : "disabled"}
+            >
+              ${supportedModalities.length
+                ? supportedModalities
+                    .map(
+                      (modality) => `
+                        <option value="${escapeHtml(modality)}" ${modality === inputModality ? "selected" : ""}>
+                          ${escapeHtml(modality)}
+                        </option>
+                      `
+                    )
+                    .join("")
+                : '<option value="" selected>not_supported</option>'}
+            </select>
+          </label>
+          ${
+            fileRequired
+              ? `
+                <label>
+                  <span>${escapeHtml(modelTestFileLabel(inputModality))}</span>
+                  <input
+                    id="${testIdPrefix}-file"
+                    data-testid="${testIdPrefix}-file"
+                    type="file"
+                    accept="${escapeHtml(modelTestFileAccept(inputModality))}"
+                    ${supportedModalities.length ? "" : "disabled"}
+                  />
+                </label>
+              `
+              : `
+                <label class="model-test-textarea">
+                  <span>测试文本</span>
+                  <textarea
+                    id="${testIdPrefix}-text"
+                    data-testid="${testIdPrefix}-text"
+                    rows="4"
+                    placeholder="输入一段测试文本"
+                    ${supportedModalities.length ? "" : "disabled"}
+                  >${escapeHtml(textDraft)}</textarea>
+                </label>
+              `
+          }
+        </div>
+        ${
+          fileRequired && file
+            ? `<p class="helper" data-testid="${testIdPrefix}-file-name">${escapeHtml(file.name)} · ${escapeHtml(file.type || "application/octet-stream")}</p>`
+            : ""
+        }
+        ${
+          error
+            ? `<div class="notice error" data-testid="${testIdPrefix}-error"><h4>${escapeHtml(error.code)}</h4><p>${escapeHtml(error.message)}</p></div>`
+            : ""
+        }
+        <div class="inline-actions">
+          <button
+            type="submit"
+            data-testid="${testIdPrefix}-submit-button"
+            ${disabled ? "disabled" : ""}
+          >
+            ${pending ? "Testing..." : "测试当前模型"}
+          </button>
+        </div>
+      </form>
+      ${renderModelTestResult(testIdPrefix, result)}
+    </section>
+  `;
 }
 
 function sourceRootDisplayName(sourceRootId) {
@@ -1766,6 +2098,7 @@ function renderGlobalModelDefaultsPanel() {
   const selection = selectedGlobalModelSelection();
   const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
   const catalogEntries = catalogEntriesForProvider(selection.provider_id);
+  const supportedModalities = selectedGlobalTestModalities();
 
   return `
     <section class="panel settings-panel" data-testid="global-model-defaults-panel">
@@ -1804,13 +2137,29 @@ function renderGlobalModelDefaultsPanel() {
         </div>
         ${
           catalogEntry
-            ? `<p class="helper" data-testid="model-catalog-summary">${escapeHtml(catalogEntry.message)}</p>`
+            ? `
+              <p class="helper" data-testid="model-catalog-summary">${escapeHtml(catalogEntry.message)}</p>
+              <p class="helper" data-testid="global-model-capabilities">${escapeHtml(
+                formatEmbeddingCapabilities(catalogEntry.embedding_capabilities, { includePrefix: true })
+              )}</p>
+            `
             : ""
         }
         <div class="inline-actions">
           <button type="submit" data-testid="global-model-defaults-submit-button">保存全局默认模型</button>
         </div>
       </form>
+      ${renderSettingsModelTestPanel({
+        scope: "global",
+        selection,
+        supportedModalities,
+        modalityDraft: state.globalModelTestModalityDraft,
+        textDraft: state.globalModelTestTextDraft,
+        file: state.globalModelTestFile,
+        result: state.globalModelTestResult,
+        error: state.globalModelTestError,
+        pending: state.globalModelTestPending,
+      })}
     </section>
   `;
 }
@@ -1832,7 +2181,13 @@ function renderLibraryModelOverridesPanel(library: LibrarySnapshot | null) {
 
   const selection = selectedLibraryModelOverride();
   const selectedProviderId = selection.provider_id ?? selectedGlobalModelSelection().provider_id;
+  const effectiveSelection = selectedLibraryModelSelection();
+  const catalogEntry = selectedCatalogEntryForProvider(
+    effectiveSelection.provider_id,
+    effectiveSelection.model_id
+  );
   const catalogEntries = catalogEntriesForProvider(selectedProviderId);
+  const supportedModalities = selectedLibraryTestModalities();
 
   return `
     <section class="panel settings-panel" data-testid="library-model-overrides-panel">
@@ -1870,6 +2225,13 @@ function renderLibraryModelOverridesPanel(library: LibrarySnapshot | null) {
             </select>
           </label>
         </div>
+        ${
+          catalogEntry
+            ? `<p class="helper" data-testid="library-model-capabilities">${escapeHtml(
+                formatEmbeddingCapabilities(catalogEntry.embedding_capabilities, { includePrefix: true })
+              )}</p>`
+            : ""
+        }
         <div class="inline-actions">
           <button type="submit" data-testid="library-model-overrides-submit-button">保存库级覆盖</button>
           <button
@@ -1882,6 +2244,17 @@ function renderLibraryModelOverridesPanel(library: LibrarySnapshot | null) {
           </button>
         </div>
       </form>
+      ${renderSettingsModelTestPanel({
+        scope: "library",
+        selection: effectiveSelection,
+        supportedModalities,
+        modalityDraft: state.libraryModelTestModalityDraft,
+        textDraft: state.libraryModelTestTextDraft,
+        file: state.libraryModelTestFile,
+        result: state.libraryModelTestResult,
+        error: state.libraryModelTestError,
+        pending: state.libraryModelTestPending,
+      })}
     </section>
   `;
 }
@@ -1899,6 +2272,9 @@ function renderResolvedModelsPanel(library: LibrarySnapshot | null) {
             <strong>${escapeHtml(indexLine)}</strong>
             <span class="helper">${escapeHtml(formatResolvedModel(selection))} · ${escapeHtml(selection.binding_source)}</span>
             <span class="helper">${escapeHtml(formatResolvedModelContext(selection))}</span>
+            <span class="helper">${escapeHtml(
+              formatEmbeddingCapabilities(selection.embedding_capabilities, { includePrefix: true })
+            )}</span>
             <span class="helper">${escapeHtml(selection.message)}</span>
           </div>
           <span class="pill ${providerSelectionPillClass(selection.status)}">${escapeHtml(selection.status)}</span>
@@ -2992,6 +3368,18 @@ function renderWorkspace() {
     .querySelector("#global-model-id")
     ?.addEventListener("change", onGlobalModelIdInput);
   document
+    .querySelector("#global-model-test-form")
+    ?.addEventListener("submit", onSubmitGlobalModelTest);
+  document
+    .querySelector("#global-model-test-modality")
+    ?.addEventListener("change", onGlobalModelTestModalityChange);
+  document
+    .querySelector("#global-model-test-text")
+    ?.addEventListener("input", onGlobalModelTestTextInput);
+  document
+    .querySelector("#global-model-test-file")
+    ?.addEventListener("change", onGlobalModelTestFileInput);
+  document
     .querySelector("#library-model-overrides-form")
     ?.addEventListener("submit", onSubmitLibraryModelOverrides);
   document
@@ -3001,6 +3389,18 @@ function renderWorkspace() {
     .querySelector("#library-model-provider-id")
     ?.addEventListener("change", onLibraryModelProviderChange);
   document.querySelector("#library-model-id")?.addEventListener("change", onLibraryModelIdInput);
+  document
+    .querySelector("#library-model-test-form")
+    ?.addEventListener("submit", onSubmitLibraryModelTest);
+  document
+    .querySelector("#library-model-test-modality")
+    ?.addEventListener("change", onLibraryModelTestModalityChange);
+  document
+    .querySelector("#library-model-test-text")
+    ?.addEventListener("input", onLibraryModelTestTextInput);
+  document
+    .querySelector("#library-model-test-file")
+    ?.addEventListener("change", onLibraryModelTestFileInput);
   document.querySelector("#source-root-form")?.addEventListener("submit", onSubmitSourceRoot);
   document.querySelector("#source-root-reset-button")?.addEventListener("click", onResetSourceRootEditor);
   document.querySelector("#source-root-path")?.addEventListener("input", onSourceRootPathInput);
@@ -3322,17 +3722,20 @@ async function refreshProviderConfigs() {
 async function refreshModelCatalog() {
   const data = await apiRequest<ModelCatalogData>("/settings/model-catalog");
   state.modelCatalog = data.entries;
+  ensureValidModelTestDrafts();
 }
 
 async function refreshGlobalModelDefaults() {
   const data = await apiRequest<GlobalModelDefaultsData>("/settings/model-defaults");
   state.globalModelDefaults = data.defaults;
+  ensureValidModelTestDrafts();
 }
 
 async function refreshLibraryModelSettings() {
   if (!state.selectedLibraryId) {
     state.libraryModelOverrides = emptyModelOverrides();
     state.resolvedModels = null;
+    resetLibraryModelTestState();
     return;
   }
 
@@ -3346,6 +3749,7 @@ async function refreshLibraryModelSettings() {
   ]);
   state.libraryModelOverrides = overridesData.overrides;
   state.resolvedModels = resolvedData;
+  ensureValidModelTestDrafts();
 }
 
 async function refreshProviderSettingsData() {
@@ -3406,6 +3810,7 @@ async function onCreateLibrary(event) {
     clearQueryImageState();
     clearQueryVideoState();
     clearQueryDocumentState();
+    resetLibraryModelTestState();
     state.importReceipt = null;
     state.selectedVisualUnit = null;
     state.searchOutcome = null;
@@ -3433,6 +3838,7 @@ async function onSelectLibrary(event) {
   clearQueryImageState();
   clearQueryVideoState();
   clearQueryDocumentState();
+  resetLibraryModelTestState();
   state.importReceipt = null;
   state.selectedVisualUnit = null;
   state.searchOutcome = null;
@@ -3502,6 +3908,7 @@ function onGlobalModelProviderChange(event) {
     event.target.value,
     selectedGlobalModelSelection()
   );
+  resetGlobalModelTestState();
   renderWorkspace();
 }
 
@@ -3510,6 +3917,8 @@ function onGlobalModelIdInput(event) {
     ...selectedGlobalModelSelection(),
     model_id: event.target.value,
   };
+  resetGlobalModelTestState();
+  renderWorkspace();
 }
 
 async function onSubmitGlobalModelDefaults(event) {
@@ -3534,6 +3943,7 @@ function onLibraryModelProviderChange(event) {
     event.target.value || null,
     selectedLibraryModelOverride()
   );
+  resetLibraryModelTestState();
   renderWorkspace();
 }
 
@@ -3542,6 +3952,8 @@ function onLibraryModelIdInput(event) {
     ...selectedLibraryModelOverride(),
     model_id: event.target.value || null,
   };
+  resetLibraryModelTestState();
+  renderWorkspace();
 }
 
 async function onSubmitLibraryModelOverrides(event) {
@@ -3572,6 +3984,7 @@ async function onResetLibraryModelOverrides() {
   try {
     state.globalError = null;
     state.libraryModelOverrides = emptyModelOverrides();
+    resetLibraryModelTestState();
     await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/model-overrides`, {
       method: "PATCH",
       body: JSON.stringify(state.libraryModelOverrides),
@@ -3582,6 +3995,165 @@ async function onResetLibraryModelOverrides() {
     state.globalError = toApiError(error);
     renderWorkspace();
   }
+}
+
+function onGlobalModelTestModalityChange(event) {
+  state.globalModelTestModalityDraft = event.target.value;
+  state.globalModelTestFile = null;
+  state.globalModelTestResult = null;
+  state.globalModelTestError = null;
+  renderWorkspace();
+}
+
+function onGlobalModelTestTextInput(event) {
+  state.globalModelTestTextDraft = event.target.value;
+  state.globalModelTestResult = null;
+  state.globalModelTestError = null;
+}
+
+function onGlobalModelTestFileInput(event) {
+  state.globalModelTestFile = event.target.files?.[0] ?? null;
+  state.globalModelTestResult = null;
+  state.globalModelTestError = null;
+  renderWorkspace();
+}
+
+function onLibraryModelTestModalityChange(event) {
+  state.libraryModelTestModalityDraft = event.target.value;
+  state.libraryModelTestFile = null;
+  state.libraryModelTestResult = null;
+  state.libraryModelTestError = null;
+  renderWorkspace();
+}
+
+function onLibraryModelTestTextInput(event) {
+  state.libraryModelTestTextDraft = event.target.value;
+  state.libraryModelTestResult = null;
+  state.libraryModelTestError = null;
+}
+
+function onLibraryModelTestFileInput(event) {
+  state.libraryModelTestFile = event.target.files?.[0] ?? null;
+  state.libraryModelTestResult = null;
+  state.libraryModelTestError = null;
+  renderWorkspace();
+}
+
+async function submitSettingsModelTest(scope: "global" | "library") {
+  const selection =
+    scope === "global" ? selectedGlobalModelSelection() : selectedLibraryModelSelection();
+  const modalityDraft =
+    scope === "global" ? state.globalModelTestModalityDraft : state.libraryModelTestModalityDraft;
+  const inputModality =
+    modalityDraft ||
+    supportedTestModalitiesForSelection(selection.provider_id, selection.model_id)[0] ||
+    "";
+  const textDraft =
+    scope === "global" ? state.globalModelTestTextDraft : state.libraryModelTestTextDraft;
+  const file = scope === "global" ? state.globalModelTestFile : state.libraryModelTestFile;
+  const providerDraft = activeProviderDraftForSelection(selection.provider_id);
+  const setPending = (value: boolean) => {
+    if (scope === "global") {
+      state.globalModelTestPending = value;
+    } else {
+      state.libraryModelTestPending = value;
+    }
+  };
+  const setResult = (result: ModelTestData | null) => {
+    if (scope === "global") {
+      state.globalModelTestResult = result;
+    } else {
+      state.libraryModelTestResult = result;
+    }
+  };
+  const setError = (error: ApiErrorPayload | null) => {
+    if (scope === "global") {
+      state.globalModelTestError = error;
+    } else {
+      state.libraryModelTestError = error;
+    }
+  };
+
+  if (!inputModality) {
+    setError({
+      code: "not_supported",
+      message: "当前 provider + model 组合不支持执行设置页模型测试。",
+    });
+    renderWorkspace();
+    return;
+  }
+
+  if (!canExecuteSettingsModelTest(selection)) {
+    setError({
+      code: "not_supported",
+      message: "当前 provider + model 组合在这个切片里不可执行设置页模型测试。",
+    });
+    renderWorkspace();
+    return;
+  }
+
+  if (inputModality === "text" && !textDraft.trim()) {
+    setError({
+      code: "validation_failed",
+      message: "请先输入测试文本。",
+    });
+    renderWorkspace();
+    return;
+  }
+
+  if (inputModality !== "text" && !file) {
+    setError({
+      code: "validation_failed",
+      message: "请先选择一个测试文件。",
+    });
+    renderWorkspace();
+    return;
+  }
+
+  try {
+    setPending(true);
+    setError(null);
+    renderWorkspace();
+
+    const formData = new FormData();
+    formData.append("provider_id", selection.provider_id);
+    formData.append("model_id", selection.model_id);
+    formData.append("input_modality", inputModality);
+    if (providerDraft.enabled !== undefined) {
+      formData.append("provider_enabled", String(providerDraft.enabled));
+    }
+    if (selection.provider_id !== PROVIDER_ID_LOCAL_SIDECAR && providerDraft.baseUrl) {
+      formData.append("provider_base_url", providerDraft.baseUrl);
+    }
+    if (inputModality === "text") {
+      formData.append("text", textDraft.trim());
+    } else if (file) {
+      formData.append("file", file);
+    }
+
+    const result = await apiRequest<ModelTestData>("/settings/model-tests", {
+      method: "POST",
+      body: formData,
+    });
+    setResult(result);
+    setError(null);
+  } catch (error) {
+    setResult(null);
+    setError(toApiError(error));
+  } finally {
+    setPending(false);
+    renderWorkspace();
+  }
+}
+
+async function onSubmitGlobalModelTest(event) {
+  event.preventDefault();
+  await submitSettingsModelTest("global");
+}
+
+async function onSubmitLibraryModelTest(event) {
+  event.preventDefault();
+  await submitSettingsModelTest("library");
 }
 
 function onImportPathsInput(event) {

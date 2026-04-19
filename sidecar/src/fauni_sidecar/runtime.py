@@ -117,6 +117,15 @@ class ColQwenRuntime:
                 "model_loaded": diagnostics["model_loaded"],
                 "load_error": diagnostics["load_state"]["load_error"],
             },
+            "embedding_capabilities": {
+                "input_types": ["text", "image"],
+                "vector_types": ["multi_vector_late_interaction"],
+                "supports_mixed_inputs": False,
+            },
+            "runtime_adapters": [
+                "document_query_via_page_images",
+                "video_query_via_frame_images",
+            ],
             "operations": [
                 {
                     "operation_kind": "query_embedding",

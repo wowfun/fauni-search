@@ -43,7 +43,6 @@ impl AppState {
         }
         self.prepare_search_scope(
             request.library_id.trim(),
-            QUERY_KIND_TEXT,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
@@ -59,7 +58,6 @@ impl AppState {
     ) -> Result<(SearchPlan, ResolvedImageQueryInput), ApiError> {
         let plan = self.prepare_search_scope(
             request.library_id.trim(),
-            QUERY_KIND_IMAGE,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
@@ -129,7 +127,6 @@ impl AppState {
     ) -> Result<(SearchPlan, ResolvedVideoQueryInput), ApiError> {
         let plan = self.prepare_search_scope(
             request.library_id.trim(),
-            QUERY_KIND_VIDEO,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
@@ -251,7 +248,6 @@ impl AppState {
     ) -> Result<(SearchPlan, ResolvedDocumentQueryInput), ApiError> {
         let plan = self.prepare_search_scope(
             request.library_id.trim(),
-            QUERY_KIND_DOCUMENT,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
@@ -332,7 +328,6 @@ impl AppState {
     pub(crate) async fn prepare_search_scope(
         &mut self,
         library_id: &str,
-        query_kind: &str,
         filters: Option<&Value>,
         top_k: Option<usize>,
         cursor: Option<&str>,
@@ -400,7 +395,7 @@ impl AppState {
         }
 
         let resolved_query_model = self
-            .resolve_query_model_for_execution(&resolved_library_id, query_kind)
+            .resolve_query_model_for_execution(&resolved_library_id)
             .await?;
         let mut resolved_index_models = BTreeMap::new();
         for index_line in &target_index_lines {

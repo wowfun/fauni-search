@@ -80,6 +80,16 @@ pub(crate) struct ProvidersListData {
     pub(crate) providers: Vec<ProviderConfigSnapshot>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct EmbeddingCapabilities {
+    #[serde(default)]
+    pub(crate) input_types: Vec<String>,
+    #[serde(default)]
+    pub(crate) vector_types: Vec<String>,
+    #[serde(default)]
+    pub(crate) supports_mixed_inputs: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ModelCatalogEntry {
     pub(crate) provider_id: String,
@@ -89,6 +99,8 @@ pub(crate) struct ModelCatalogEntry {
     pub(crate) model_revision: Option<String>,
     #[serde(default)]
     pub(crate) supported_index_lines: Vec<String>,
+    #[serde(default)]
+    pub(crate) embedding_capabilities: EmbeddingCapabilities,
     pub(crate) editable: bool,
     pub(crate) status: String,
     pub(crate) message: String,
@@ -143,6 +155,8 @@ pub(crate) struct ResolvedModelSelectionPayload {
     pub(crate) model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) embedding_capabilities: EmbeddingCapabilities,
     pub(crate) status: String,
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,6 +166,31 @@ pub(crate) struct ResolvedModelSelectionPayload {
 #[derive(Debug, Serialize, Default)]
 pub(crate) struct ResolvedModelsData {
     pub(crate) index_lines: BTreeMap<String, ResolvedModelSelectionPayload>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ModelTestInputSummary {
+    pub(crate) kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) original_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) size_bytes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ModelTestData {
+    pub(crate) resolved_model: ResolvedModelSelectionPayload,
+    pub(crate) input_modality: String,
+    pub(crate) operation_kind: String,
+    pub(crate) vector_shape: Vec<usize>,
+    pub(crate) vectors: Vec<Vec<f32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pooled_vector: Vec<f32>,
+    pub(crate) input_summary: ModelTestInputSummary,
 }
 
 #[derive(Debug, Deserialize)]

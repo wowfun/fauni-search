@@ -1,8 +1,9 @@
 use crate::{
-    api::{ApiError, ProviderProbeSnapshot},
+    api::{ApiError, EmbeddingCapabilities, ProviderProbeSnapshot},
     model::{ProviderConfigRecord, VisualUnitRecord},
     provider::{
-        current_rfc3339_timestamp, ProviderRuntimeModelSnapshot,
+        current_rfc3339_timestamp, local_sidecar_embedding_capabilities,
+        ProviderRuntimeModelSnapshot,
     },
     SIDECAR_REQUEST_TIMEOUT_SECS,
 };
@@ -46,6 +47,8 @@ pub(crate) struct QueryEmbeddingResult {
 pub(crate) struct LocalSidecarProviderSnapshot {
     pub(crate) probe: ProviderProbeSnapshot,
     pub(crate) runtime_model: ProviderRuntimeModelSnapshot,
+    pub(crate) embedding_capabilities: EmbeddingCapabilities,
+    pub(crate) _runtime_adapters: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -550,6 +553,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                     last_probed_at: Some(now),
                 },
                 runtime_model: fallback_runtime_model,
+                embedding_capabilities: local_sidecar_embedding_capabilities(),
+                _runtime_adapters: Vec::new(),
             };
         }
     };
@@ -572,6 +577,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                     last_probed_at: Some(now),
                 },
                 runtime_model: fallback_runtime_model,
+                embedding_capabilities: local_sidecar_embedding_capabilities(),
+                _runtime_adapters: Vec::new(),
             };
         }
     };
@@ -587,6 +594,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                 last_probed_at: Some(now),
             },
             runtime_model: fallback_runtime_model,
+            embedding_capabilities: local_sidecar_embedding_capabilities(),
+            _runtime_adapters: Vec::new(),
         };
     }
 
@@ -600,6 +609,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                     last_probed_at: Some(now),
                 },
                 runtime_model: fallback_runtime_model,
+                embedding_capabilities: local_sidecar_embedding_capabilities(),
+                _runtime_adapters: Vec::new(),
             };
         }
     };
@@ -624,6 +635,25 @@ pub(crate) async fn probe_local_sidecar_provider(
             })
         })
         .unwrap_or_else(|| fallback_runtime_model.clone());
+    let embedding_capabilities = payload
+        .get("embedding_capabilities")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<EmbeddingCapabilities>(value).ok())
+        .filter(|capabilities| {
+            !capabilities.input_types.is_empty() && !capabilities.vector_types.is_empty()
+        })
+        .unwrap_or_else(local_sidecar_embedding_capabilities);
+    let runtime_adapters = payload
+        .get("runtime_adapters")
+        .and_then(Value::as_array)
+        .map(|adapters| {
+            adapters
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let can_service = payload
         .pointer("/availability/can_service")
@@ -646,6 +676,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                 last_probed_at: Some(now),
             },
             runtime_model,
+            embedding_capabilities,
+            _runtime_adapters: runtime_adapters,
         };
     }
 
@@ -661,7 +693,6 @@ pub(crate) async fn probe_local_sidecar_provider(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-
     let missing_operations = required_local_sidecar_operations()
         .into_iter()
         .filter(|operation| !supported_operations.iter().any(|item| item == operation))
@@ -677,6 +708,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                 last_probed_at: Some(now),
             },
             runtime_model,
+            embedding_capabilities,
+            _runtime_adapters: runtime_adapters,
         };
     }
 
@@ -690,6 +723,8 @@ pub(crate) async fn probe_local_sidecar_provider(
             last_probed_at: Some(now),
         },
         runtime_model,
+        embedding_capabilities,
+        _runtime_adapters: runtime_adapters,
     }
 }
 

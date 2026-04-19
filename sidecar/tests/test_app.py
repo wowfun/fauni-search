@@ -26,6 +26,15 @@ class FakeRuntime:
                 "model_loaded": False,
                 "load_error": None,
             },
+            "embedding_capabilities": {
+                "input_types": ["text", "image"],
+                "vector_types": ["multi_vector_late_interaction"],
+                "supports_mixed_inputs": False,
+            },
+            "runtime_adapters": [
+                "document_query_via_page_images",
+                "video_query_via_frame_images",
+            ],
             "operations": [
                 {
                     "operation_kind": "query_embedding",
@@ -265,6 +274,15 @@ def test_capabilities_exposes_query_embedding_operation() -> None:
     payload = routes["/capabilities"]()
 
     assert payload["status"] == "ok"
+    assert payload["embedding_capabilities"] == {
+        "input_types": ["text", "image"],
+        "vector_types": ["multi_vector_late_interaction"],
+        "supports_mixed_inputs": False,
+    }
+    assert payload["runtime_adapters"] == [
+        "document_query_via_page_images",
+        "video_query_via_frame_images",
+    ]
     assert [item["operation_kind"] for item in payload["operations"]] == [
         "query_embedding",
         "image_query_embedding",

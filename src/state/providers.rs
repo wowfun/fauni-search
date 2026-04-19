@@ -102,6 +102,11 @@ impl AppState {
             model_id: runtime.model_id,
             model_revision: runtime.model_revision,
             supported_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
+            embedding_capabilities: self
+                .provider_embedding_capabilities
+                .get(LOCAL_SIDECAR_PROVIDER_ID)
+                .cloned()
+                .unwrap_or_else(local_sidecar_embedding_capabilities),
             editable: false,
             status: local_probe
                 .as_ref()
@@ -137,6 +142,7 @@ impl AppState {
                 model_id: (*model_id).to_string(),
                 model_revision: None,
                 supported_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
+                embedding_capabilities: dashscope_embedding_capabilities(model_id),
                 editable: true,
                 status: dashscope_status.clone(),
                 message: dashscope_message.clone(),
@@ -224,6 +230,199 @@ impl AppState {
         Ok(ResolvedModelsData { index_lines })
     }
 
+    pub(crate) async fn test_model_selection(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+        input_modality: &str,
+        provider_enabled: Option<bool>,
+        provider_base_url: Option<String>,
+        text_input: Option<&str>,
+        file_input: Option<&StagedSettingsModelTestFile>,
+    ) -> Result<ModelTestData, ApiError> {
+        let provider_id = normalize_provider_id(provider_id, "provider")?;
+        let model_id = normalize_required_string(model_id, "model_id")?;
+        let input_modality = normalize_model_test_modality(input_modality)?;
+        let mut provider = self
+            .provider_configs
+            .get(&provider_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("Provider was not found."))?;
+
+        let draft_base_url = normalize_optional_string(provider_base_url);
+        if provider.provider_id == LOCAL_SIDECAR_PROVIDER_ID && draft_base_url.is_some() {
+            return Err(ApiError::not_supported(
+                "local_sidecar connection details are derived from runtime env and cannot be edited here.",
+                Some(json!({ "provider_id": provider.provider_id })),
+            ));
+        }
+
+        if let Some(enabled) = provider_enabled {
+            provider.enabled = enabled;
+        }
+        if provider.provider_id == DASHSCOPE_PROVIDER_ID {
+            provider.base_url = draft_base_url.or(provider.base_url.clone());
+        }
+
+        if !provider.enabled {
+            return Err(ApiError::not_enabled(
+                "Model test references a disabled provider.",
+                Some(json!({ "provider_id": provider.provider_id })),
+            ));
+        }
+
+        let selection = ModelSelectionPayload {
+            provider_id: provider.provider_id.clone(),
+            model_id,
+        };
+        validate_provider_selection_shape(
+            &selection.provider_id,
+            &selection.model_id,
+            "model_test",
+        )?;
+        self.validate_provider_model_binding_for_field(&provider, &selection, "model_id")?;
+
+        match provider.provider_id.as_str() {
+            LOCAL_SIDECAR_PROVIDER_ID => {
+                if self.provider_probe_cache.get(LOCAL_SIDECAR_PROVIDER_ID).is_none() {
+                    self.refresh_provider_probe_snapshot(LOCAL_SIDECAR_PROVIDER_ID)
+                        .await;
+                }
+                let probe = self
+                    .provider_probe_cache
+                    .get(LOCAL_SIDECAR_PROVIDER_ID)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ApiError::runtime_unavailable(
+                            "local_sidecar probe snapshot is unavailable.",
+                            Some(json!({ "provider_id": LOCAL_SIDECAR_PROVIDER_ID })),
+                        )
+                    })?;
+                if probe.status != "available" {
+                    return Err(ApiError::runtime_unavailable(
+                        probe.message,
+                        Some(json!({ "provider_id": LOCAL_SIDECAR_PROVIDER_ID })),
+                    ));
+                }
+
+                let embedding_capabilities = self
+                    .provider_embedding_capabilities
+                    .get(LOCAL_SIDECAR_PROVIDER_ID)
+                    .cloned()
+                    .unwrap_or_else(local_sidecar_embedding_capabilities);
+                if !embedding_capabilities_supports_input_type(
+                    &embedding_capabilities,
+                    &input_modality,
+                )
+                {
+                    return Err(ApiError::validation_failed(
+                        "The selected local_sidecar runtime does not support the requested model test input type.",
+                        Some(json!({
+                            "provider_id": LOCAL_SIDECAR_PROVIDER_ID,
+                            "input_modality": input_modality,
+                            "supported": embedding_capabilities.input_types,
+                        })),
+                    ));
+                }
+
+                let runtime_model = self
+                    .provider_runtime_models
+                    .get(LOCAL_SIDECAR_PROVIDER_ID)
+                    .cloned()
+                    .unwrap_or_else(fallback_local_sidecar_runtime_model);
+                let resolved_model = ResolvedModelSelectionPayload {
+                    binding_source: "settings_draft".to_string(),
+                    provider_id: provider.provider_id.clone(),
+                    provider_kind: provider.provider_kind.clone(),
+                    model_id: runtime_model.model_id,
+                    model_revision: runtime_model.model_revision,
+                    embedding_capabilities,
+                    status: "available".to_string(),
+                    message: format!(
+                        "Validated settings draft via {}.",
+                        model_test_operation_kind(&input_modality)
+                    ),
+                    last_probed_at: probe.last_probed_at.clone(),
+                };
+                let provider_context = Some(provider_context_payload(&ResolvedExecutionModelSelection {
+                    summary: resolved_model.clone(),
+                }));
+
+                let (vectors, pooled_vector, input_summary) = match input_modality.as_str() {
+                    QUERY_KIND_TEXT => {
+                        let text = normalize_required_string(
+                            text_input.unwrap_or_default(),
+                            "text",
+                        )?;
+                        let result = embed_query_text(&text, provider_context).await?;
+                        (
+                            result.vectors,
+                            result.pooled_vector,
+                            ModelTestInputSummary {
+                                kind: "text".to_string(),
+                                text_preview: Some(truncate_text_preview(&text)),
+                                original_filename: None,
+                                content_type: None,
+                                size_bytes: Some(text.len()),
+                            },
+                        )
+                    }
+                    QUERY_KIND_IMAGE => {
+                        let file = file_input.ok_or_else(|| {
+                            ApiError::validation_failed(
+                                "image model test requires one file input.",
+                                Some(json!({ "field": "file" })),
+                            )
+                        })?;
+                        let result =
+                            embed_query_image(&file.path, None, provider_context).await?;
+                        (
+                            result.vectors,
+                            result.pooled_vector,
+                            ModelTestInputSummary {
+                                kind: "file".to_string(),
+                                text_preview: None,
+                                original_filename: file.original_filename.clone(),
+                                content_type: Some(file.content_type.clone()),
+                                size_bytes: Some(file.size_bytes),
+                            },
+                        )
+                    }
+                    _ => {
+                        return Err(ApiError::validation_failed(
+                            "input_modality is not supported by the selected model's embedding capabilities.",
+                            Some(json!({
+                                "field": "input_modality",
+                                "received": input_modality,
+                            })),
+                        ));
+                    }
+                };
+
+                Ok(ModelTestData {
+                    resolved_model,
+                    input_modality: input_modality.clone(),
+                    operation_kind: model_test_operation_kind(&input_modality).to_string(),
+                    vector_shape: vector_shape(&vectors),
+                    vectors,
+                    pooled_vector,
+                    input_summary,
+                })
+            }
+            DASHSCOPE_PROVIDER_ID => Err(ApiError::not_supported(
+                "dashscope is configurable but not executable in the current 005 slice.",
+                Some(json!({
+                    "provider_id": DASHSCOPE_PROVIDER_ID,
+                    "input_modality": input_modality,
+                })),
+            )),
+            _ => Err(ApiError::conflict(
+                "Unknown provider kind.",
+                Some(json!({ "provider_id": provider.provider_id })),
+            )),
+        }
+    }
+
     pub(crate) async fn resolve_index_model_for_execution(
         &mut self,
         library_id: &str,
@@ -239,7 +438,6 @@ impl AppState {
     pub(crate) async fn resolve_query_model_for_execution(
         &mut self,
         library_id: &str,
-        _query_kind: &str,
     ) -> Result<ResolvedExecutionModelSelection, ApiError> {
         self.resolve_index_model_for_execution(library_id, MULTIVECTOR_INDEX_LINE)
             .await
@@ -260,22 +458,38 @@ impl AppState {
         let (probe, runtime_model) = match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
                 let snapshot = probe_local_sidecar_provider(&provider).await;
+                self.provider_embedding_capabilities.insert(
+                    provider_id.to_string(),
+                    snapshot.embedding_capabilities.clone(),
+                );
                 (snapshot.probe, Some(snapshot.runtime_model))
             }
-            DASHSCOPE_PROVIDER_ID => (
-                static_not_supported_probe(
+            DASHSCOPE_PROVIDER_ID => {
+                self.provider_embedding_capabilities.insert(
+                    provider_id.to_string(),
+                    empty_embedding_capabilities(),
+                );
+                (
+                    static_not_supported_probe(
                     "dashscope is configurable in the current slice but not executable yet.",
-                ),
-                None,
-            ),
-            _ => (
-                ProviderProbeSnapshot {
-                    status: "not_supported".to_string(),
-                    message: format!("Unknown provider {}.", provider.provider_id),
-                    last_probed_at: Some(current_rfc3339_timestamp()),
-                },
-                None,
-            ),
+                    ),
+                    None,
+                )
+            }
+            _ => {
+                self.provider_embedding_capabilities.insert(
+                    provider_id.to_string(),
+                    empty_embedding_capabilities(),
+                );
+                (
+                    ProviderProbeSnapshot {
+                        status: "not_supported".to_string(),
+                        message: format!("Unknown provider {}.", provider.provider_id),
+                        last_probed_at: Some(current_rfc3339_timestamp()),
+                    },
+                    None,
+                )
+            }
         };
         self.provider_probe_cache
             .insert(provider_id.to_string(), probe.clone());
@@ -342,12 +556,16 @@ impl AppState {
             &selection.model_id,
             "index_lines.multivector",
         )?;
-        self.validate_provider_reference(&selection.provider_id)?;
-        self.validate_provider_model_binding(selection)?;
+        let provider = self.validate_provider_reference(&selection.provider_id)?;
+        self.validate_provider_model_binding_for_field(
+            provider,
+            selection,
+            "index_lines.multivector.model_id",
+        )?;
         Ok(())
     }
 
-    fn validate_provider_reference(&self, provider_id: &str) -> Result<(), ApiError> {
+    fn validate_provider_reference(&self, provider_id: &str) -> Result<&ProviderConfigRecord, ApiError> {
         let provider = self.provider_configs.get(provider_id).ok_or_else(|| {
             ApiError::conflict(
                 "Model selection references a missing provider.",
@@ -360,14 +578,16 @@ impl AppState {
                 Some(json!({ "provider_id": provider_id })),
             ));
         }
-        Ok(())
+        Ok(provider)
     }
 
-    fn validate_provider_model_binding(
+    fn validate_provider_model_binding_for_field(
         &self,
+        provider: &ProviderConfigRecord,
         selection: &ModelSelectionPayload,
+        field: &str,
     ) -> Result<(), ApiError> {
-        match selection.provider_id.as_str() {
+        match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
                 let runtime_model = self
                     .provider_runtime_models
@@ -378,7 +598,7 @@ impl AppState {
                     return Err(ApiError::validation_failed(
                         "local_sidecar model_id is derived from the active runtime and cannot be changed here.",
                         Some(json!({
-                            "field": "index_lines.multivector.model_id",
+                            "field": field,
                             "expected": runtime_model.model_id,
                             "received": selection.model_id,
                         })),
@@ -391,7 +611,7 @@ impl AppState {
                     return Err(ApiError::validation_failed(
                         "DashScope model_id is not supported for multivector indexing/search.",
                         Some(json!({
-                            "field": "index_lines.multivector.model_id",
+                            "field": field,
                             "supported": dashscope_multivector_model_ids(),
                             "received": selection.model_id,
                         })),
@@ -450,6 +670,7 @@ impl AppState {
                 provider_kind: "missing".to_string(),
                 model_id: selection.model_id,
                 model_revision: None,
+                embedding_capabilities: empty_embedding_capabilities(),
                 status: "conflict".to_string(),
                 message: "Selected provider does not exist.".to_string(),
                 last_probed_at: None,
@@ -461,8 +682,19 @@ impl AppState {
                 binding_source: binding_source.to_string(),
                 provider_id: provider.provider_id.clone(),
                 provider_kind: provider.provider_kind.clone(),
-                model_id: selection.model_id,
+                model_id: selection.model_id.clone(),
                 model_revision: None,
+                embedding_capabilities: self
+                    .provider_embedding_capabilities
+                    .get(&provider.provider_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if provider.provider_id == DASHSCOPE_PROVIDER_ID {
+                            dashscope_embedding_capabilities(&selection.model_id)
+                        } else {
+                            empty_embedding_capabilities()
+                        }
+                    }),
                 status: "not_enabled".to_string(),
                 message: format!("Provider {} is disabled.", provider.provider_id),
                 last_probed_at: self
@@ -491,6 +723,11 @@ impl AppState {
                             provider_kind: provider.provider_kind.clone(),
                             model_id: runtime_model.model_id,
                             model_revision: runtime_model.model_revision,
+                            embedding_capabilities: self
+                                .provider_embedding_capabilities
+                                .get(&provider.provider_id)
+                                .cloned()
+                                .unwrap_or_else(local_sidecar_embedding_capabilities),
                             status: probe.status.clone(),
                             message: probe.message.clone(),
                             last_probed_at: probe.last_probed_at.clone(),
@@ -504,6 +741,11 @@ impl AppState {
                     provider_kind: provider.provider_kind.clone(),
                     model_id: runtime_model.model_id,
                     model_revision: runtime_model.model_revision,
+                    embedding_capabilities: self
+                        .provider_embedding_capabilities
+                        .get(&provider.provider_id)
+                        .cloned()
+                        .unwrap_or_else(local_sidecar_embedding_capabilities),
                     status: "available".to_string(),
                     message: format!(
                         "Resolved runtime-bound model for index_line={index_line} via local_sidecar."
@@ -515,8 +757,9 @@ impl AppState {
                 binding_source: binding_source.to_string(),
                 provider_id: provider.provider_id.clone(),
                 provider_kind: provider.provider_kind.clone(),
-                model_id: selection.model_id,
+                model_id: selection.model_id.clone(),
                 model_revision: None,
+                embedding_capabilities: dashscope_embedding_capabilities(&selection.model_id),
                 status: "not_supported".to_string(),
                 message:
                     "dashscope is configurable but not executable in the current 005 slice."
@@ -532,6 +775,7 @@ impl AppState {
                 provider_kind: provider.provider_kind.clone(),
                 model_id: selection.model_id,
                 model_revision: None,
+                embedding_capabilities: empty_embedding_capabilities(),
                 status: "conflict".to_string(),
                 message: "Unknown provider kind.".to_string(),
                 last_probed_at: None,
@@ -604,4 +848,47 @@ fn model_selection_error(summary: &ResolvedModelSelectionPayload) -> ApiError {
         "conflict" => ApiError::conflict(summary.message.clone(), details),
         _ => ApiError::runtime_unavailable(summary.message.clone(), details),
     }
+}
+
+fn normalize_model_test_modality(value: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if matches!(trimmed, QUERY_KIND_TEXT | QUERY_KIND_IMAGE) {
+        return Ok(trimmed.to_string());
+    }
+
+    Err(ApiError::validation_failed(
+        "input_modality must be one of the supported settings model input types.",
+        Some(json!({
+            "field": "input_modality",
+            "received": trimmed,
+            "supported": [
+                QUERY_KIND_TEXT,
+                QUERY_KIND_IMAGE,
+            ],
+        })),
+    ))
+}
+
+fn model_test_operation_kind(input_modality: &str) -> &'static str {
+    match input_modality {
+        QUERY_KIND_TEXT => "query_embedding",
+        QUERY_KIND_IMAGE => "image_query_embedding",
+        _ => "query_embedding",
+    }
+}
+
+fn vector_shape(vectors: &[Vec<f32>]) -> Vec<usize> {
+    let dim = vectors.first().map(|vector| vector.len()).unwrap_or(0);
+    vec![vectors.len(), dim]
+}
+
+fn truncate_text_preview(text: &str) -> String {
+    const LIMIT: usize = 160;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= LIMIT {
+        return trimmed.to_string();
+    }
+
+    let preview = trimmed.chars().take(LIMIT).collect::<String>();
+    format!("{preview}...")
 }

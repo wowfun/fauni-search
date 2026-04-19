@@ -431,6 +431,13 @@ pub(crate) struct StagedQueryAsset {
     pub(crate) duration_ms: Option<u64>,
 }
 
+pub(crate) struct StagedSettingsModelTestFile {
+    pub(crate) path: String,
+    pub(crate) content_type: String,
+    pub(crate) original_filename: Option<String>,
+    pub(crate) size_bytes: usize,
+}
+
 pub(crate) struct IncomingQueryImageUpload {
     pub(crate) bytes: Vec<u8>,
     pub(crate) content_type: String,

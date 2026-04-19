@@ -2,12 +2,15 @@
 
 use axum::{
     body::{to_bytes, Body},
+    extract::Json,
     http::{header, Method, Request, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
     Router,
 };
 use fauni_search::{build_app, new_state};
 use lopdf::{dictionary, Document, Object, Stream};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -15,6 +18,7 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tower::util::ServiceExt;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -35,6 +39,7 @@ pub struct TestEnv {
     _env_lock: MutexGuard<'static, ()>,
     restore: EnvRestore,
     pub runtime_dir: PathBuf,
+    _sidecar_stub: SidecarStub,
 }
 
 impl TestEnv {
@@ -42,7 +47,7 @@ impl TestEnv {
         let lock = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("test env mutex should not be poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let runtime_dir = unique_test_path(name);
         fs::create_dir_all(&runtime_dir).expect("test runtime dir should be creatable");
 
@@ -56,11 +61,13 @@ impl TestEnv {
         env::set_var("FAUNI_ENV", "test");
         env::set_var("TEXT_SEARCH_MODEL_ID", "athrael-soju/colqwen3.5-4.5B-v3");
         env::set_var("TEXT_SEARCH_MODEL_REVISION", "main");
+        let sidecar_stub = SidecarStub::start("127.0.0.1:39011").await;
 
         Self {
             _env_lock: lock,
             restore,
             runtime_dir,
+            _sidecar_stub: sidecar_stub,
         }
     }
 
@@ -131,6 +138,10 @@ impl TestEnv {
         document.compress();
         document.save(&path).expect("test PDF should be writable");
         path
+    }
+
+    pub fn repo_path(&self, relative_path: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path)
     }
 }
 
@@ -207,6 +218,56 @@ impl TestApp {
         .await
     }
 
+    pub async fn post_multipart(
+        &self,
+        path: &str,
+        fields: Vec<(String, String)>,
+        file: Option<MultipartFile>,
+    ) -> TestResponse {
+        let boundary = "fauni-search-test-boundary";
+        let mut body = Vec::new();
+
+        for (name, value) in fields {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            );
+            body.extend_from_slice(value.as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+
+        if let Some(file) = file {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                    file.field_name, file.filename
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(
+                format!("Content-Type: {}\r\n\r\n", file.content_type).as_bytes(),
+            );
+            body.extend_from_slice(&file.bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        self.request(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .expect("multipart request should build"),
+        )
+        .await
+    }
+
     async fn request(&self, request: Request<Body>) -> TestResponse {
         let response = self
             .app
@@ -227,6 +288,13 @@ impl TestApp {
             body,
         }
     }
+}
+
+pub struct MultipartFile {
+    pub field_name: String,
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 pub struct TestResponse {
@@ -275,4 +343,116 @@ fn unique_test_path(name: &str) -> PathBuf {
     Path::new("target")
         .join("test-runtime")
         .join(format!("{sanitized}-{pid}-{millis}"))
+}
+
+struct SidecarStub {
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl SidecarStub {
+    async fn start(address: &str) -> Self {
+        let app = Router::new()
+            .route("/capabilities", get(sidecar_capabilities))
+            .route("/embed", post(sidecar_embed));
+        let listener = TcpListener::bind(address)
+            .await
+            .expect("sidecar test stub should bind");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+            let _ = server.await;
+        });
+        Self {
+            shutdown: Some(shutdown_tx),
+            task,
+        }
+    }
+}
+
+impl Drop for SidecarStub {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.abort();
+    }
+}
+
+async fn sidecar_capabilities() -> impl IntoResponse {
+    Json(json!({
+        "runtime_kind": "local_python",
+        "status": "ok",
+        "availability": {
+            "can_service": true,
+            "load_error": null
+        },
+        "embedding_capabilities": {
+            "input_types": ["text", "image"],
+            "vector_types": ["multi_vector_late_interaction"],
+            "supports_mixed_inputs": false
+        },
+        "runtime_adapters": [
+            "document_query_via_page_images",
+            "video_query_via_frame_images"
+        ],
+        "operations": [
+            sidecar_operation_payload("query_embedding"),
+            sidecar_operation_payload("image_query_embedding"),
+            sidecar_operation_payload("video_query_embedding"),
+            sidecar_operation_payload("document_query_embedding"),
+            sidecar_operation_payload("document_embedding")
+        ]
+    }))
+}
+
+async fn sidecar_embed(Json(payload): Json<Value>) -> impl IntoResponse {
+    let operation_kind = payload
+        .get("operation_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let (vectors, pooled_vector) = match operation_kind {
+        "query_embedding" => (
+            vec![vec![0.1_f32, 0.2, 0.3], vec![0.4, 0.5, 0.6]],
+            vec![0.25_f32, 0.35, 0.45],
+        ),
+        "image_query_embedding" => (vec![vec![1.0_f32, 2.0, 3.0]], vec![1.0_f32, 2.0, 3.0]),
+        "video_query_embedding" => (
+            vec![vec![4.0_f32, 5.0, 6.0], vec![7.0, 8.0, 9.0]],
+            vec![5.5_f32, 6.5, 7.5],
+        ),
+        "document_query_embedding" => (
+            vec![vec![10.0_f32, 11.0, 12.0]],
+            vec![10.0_f32, 11.0, 12.0],
+        ),
+        "document_embedding" => (
+            vec![vec![13.0_f32, 14.0, 15.0]],
+            vec![13.0_f32, 14.0, 15.0],
+        ),
+        _ => (vec![vec![0.0_f32, 0.0, 0.0]], vec![0.0_f32, 0.0, 0.0]),
+    };
+
+    Json(json!({
+        "data": {
+            "embeddings": [
+                {
+                    "vectors": vectors,
+                    "pooled_vector": pooled_vector
+                }
+            ]
+        }
+    }))
+}
+
+fn sidecar_operation_payload(operation_kind: &str) -> Value {
+    json!({
+        "operation_kind": operation_kind,
+        "supported": true,
+        "model": {
+            "model_id": "athrael-soju/colqwen3.5-4.5B-v3",
+            "revision": "main"
+        }
+    })
 }

@@ -79,11 +79,24 @@
 - 当前切片中，最小 Settings 工作区至少应提供：
   - 内建 provider 配置查看与最小编辑入口
   - 全局默认模型配置的最小编辑入口
+- Settings 工作区还应提供“测试当前 Provider + 模型配置”的最小诊断入口；该入口固定面向当前未保存草稿，而不是已保存配置
 - 当前库上下文至少应提供：
   - 库级 model override 的最小编辑入口
   - 已解析模型选择（Resolved Model Selection）摘要
 - Settings 与库摘要都必须直接展示当前 exact `model_id`；用户不应需要理解内部选择字段才知道实际模型
 - Settings 的主编辑面只应承接 `provider_id` 与 `model_id`；`model_revision` 应作为只读运行时事实展示
+- Settings 中的模型测试区必须根据当前模型的 `Embedding Capabilities.input_types` 动态渲染输入控件：
+  - `text` 显示文本输入
+  - `image` 显示单文件输入
+- Settings 模型测试结果至少应展示：
+  - 当前 resolved model 摘要
+  - `operation_kind`
+  - embedding `shape`
+  - 向量结果
+- 当当前 provider / model 不支持测试时，Settings 必须明确展示 `not_supported` 或等价原因，而不是静默禁用
+- Settings、model-catalog 与 resolved model 摘要只应展示模型原生向量能力；`document` / `video` 这类工程增强输入不得作为模型原生能力或原生测试模态呈现
+- 工程增强能力若需暴露，只允许出现在运行时健康 / 诊断或调试面中，并且必须与模型原生能力分开展示
+- 运行时诊断面若展示工程增强能力，应使用命名 adapter 列表，而不是把底层 operation 名称或 `document` / `video` 伪装成模型原生能力
 - 收藏管理与搜索历史管理至少应覆盖：查看与最小清理 / 删除能力
 - `favorites` 与 `search_history` 虽属于辅助状态，但一旦进入正式应用状态，就不应只存在于持久层而缺少管理入口
 

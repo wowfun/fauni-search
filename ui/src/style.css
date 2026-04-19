@@ -877,6 +877,25 @@ textarea {
   align-self: end;
 }
 
+.model-test-panel {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--line);
+}
+
+.model-test-textarea {
+  grid-column: 1 / -1;
+}
+
+.model-test-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.model-test-result pre {
+  max-height: 260px;
+  overflow: auto;
+}
+
 ol {
   margin: 0;
   padding-left: 1.25rem;

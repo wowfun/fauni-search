@@ -2,7 +2,7 @@ use crate::{
     api::{ApiError, PreviewReference},
     model::{
         IncomingQueryDocumentUpload, IncomingQueryImageUpload, IncomingQueryVideoUpload,
-        SourceRecord, StagedQueryAsset, VisualUnitRecord,
+        SourceRecord, StagedQueryAsset, StagedSettingsModelTestFile, VisualUnitRecord,
     },
     VIDEO_SEGMENT_OVERLAP_MS, VIDEO_SEGMENT_WINDOW_MS,
 };
@@ -310,6 +310,18 @@ pub(crate) fn persist_query_image_asset(
     })
 }
 
+pub(crate) fn persist_settings_model_test_image(
+    upload: IncomingQueryImageUpload,
+) -> Result<StagedSettingsModelTestFile, ApiError> {
+    let path = persist_settings_model_test_file("image", &upload.extension, &upload.bytes)?;
+    Ok(StagedSettingsModelTestFile {
+        path,
+        content_type: upload.content_type,
+        original_filename: upload.original_filename,
+        size_bytes: upload.bytes.len(),
+    })
+}
+
 pub(crate) fn persist_query_video_asset(
     upload: IncomingQueryVideoUpload,
 ) -> Result<StagedQueryAsset, ApiError> {
@@ -382,6 +394,34 @@ pub(crate) fn persist_query_document_asset(
         page_count: Some(page_count),
         duration_ms: None,
     })
+}
+
+fn persist_settings_model_test_file(
+    modality: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<String, ApiError> {
+    let runtime_dir = read_required_env("APP_RUNTIME_DIR")?;
+    let target_dir = FsPath::new(&runtime_dir)
+        .join("settings-model-tests")
+        .join(modality);
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Settings model test directory could not be created: {error}"),
+            Some(json!({ "path": target_dir })),
+        )
+    })?;
+
+    let filename = format!("settings-model-test-{}.{}", runtime_token(), extension);
+    let path = target_dir.join(filename);
+    fs::write(&path, bytes).map_err(|error| {
+        ApiError::runtime_unavailable(
+            format!("Settings model test file could not be written: {error}"),
+            Some(json!({ "path": path })),
+        )
+    })?;
+
+    Ok(path.to_string_lossy().to_string())
 }
 
 pub(crate) fn pdf_page_count(path: &FsPath) -> Result<usize, String> {

@@ -1,7 +1,7 @@
 use crate::{
     api::{
-        ApiError, ModelDefaultsPayload, ModelOverridesPayload, ModelSelectionOverridePayload,
-        ModelSelectionPayload, ProviderProbeSnapshot,
+        ApiError, EmbeddingCapabilities, ModelDefaultsPayload, ModelOverridesPayload,
+        ModelSelectionOverridePayload, ModelSelectionPayload, ProviderProbeSnapshot,
     },
     model::{ProviderConfigRecord, ResolvedExecutionModelSelection},
     MULTIVECTOR_INDEX_LINE,
@@ -21,8 +21,10 @@ pub(crate) const DASHSCOPE_PROVIDER_KIND: &str = "dashscope";
 
 pub(crate) const QUERY_KIND_TEXT: &str = "text";
 pub(crate) const QUERY_KIND_IMAGE: &str = "image";
-pub(crate) const QUERY_KIND_VIDEO: &str = "video";
-pub(crate) const QUERY_KIND_DOCUMENT: &str = "document";
+pub(crate) const VECTOR_TYPE_SINGLE: &str = "single_vector";
+pub(crate) const VECTOR_TYPE_INDEPENDENT: &str = "independent_vectors";
+pub(crate) const VECTOR_TYPE_MULTI_VECTOR_LATE_INTERACTION: &str =
+    "multi_vector_late_interaction";
 
 const DASHSCOPE_MULTIVECTOR_MODEL_IDS: &[&str] = &[
     "multimodal-embedding-v1",
@@ -42,6 +44,51 @@ pub(crate) struct ProviderRuntimeModelSnapshot {
 
 pub(crate) fn supported_index_lines() -> [&'static str; 1] {
     [MULTIVECTOR_INDEX_LINE]
+}
+
+pub(crate) fn empty_embedding_capabilities() -> EmbeddingCapabilities {
+    EmbeddingCapabilities::default()
+}
+
+pub(crate) fn local_sidecar_embedding_capabilities() -> EmbeddingCapabilities {
+    EmbeddingCapabilities {
+        input_types: vec![QUERY_KIND_TEXT.to_string(), QUERY_KIND_IMAGE.to_string()],
+        vector_types: vec![VECTOR_TYPE_MULTI_VECTOR_LATE_INTERACTION.to_string()],
+        supports_mixed_inputs: false,
+    }
+}
+
+pub(crate) fn dashscope_embedding_capabilities(model_id: &str) -> EmbeddingCapabilities {
+    let input_types = vec![QUERY_KIND_TEXT.to_string(), QUERY_KIND_IMAGE.to_string()];
+    let (vector_types, supports_mixed_inputs) = match model_id {
+        "multimodal-embedding-v1" => (vec![VECTOR_TYPE_INDEPENDENT.to_string()], true),
+        "qwen2.5-vl-embedding" => (vec![VECTOR_TYPE_SINGLE.to_string()], true),
+        "qwen3-vl-embedding"
+        | "tongyi-embedding-vision-flash"
+        | "tongyi-embedding-vision-flash-2026-03-06"
+        | "tongyi-embedding-vision-plus"
+        | "tongyi-embedding-vision-plus-2026-03-06" => (
+            vec![
+                VECTOR_TYPE_SINGLE.to_string(),
+                VECTOR_TYPE_INDEPENDENT.to_string(),
+            ],
+            true,
+        ),
+        _ => (vec![VECTOR_TYPE_SINGLE.to_string()], true),
+    };
+
+    EmbeddingCapabilities {
+        input_types,
+        vector_types,
+        supports_mixed_inputs,
+    }
+}
+
+pub(crate) fn embedding_capabilities_supports_input_type(
+    capabilities: &EmbeddingCapabilities,
+    input_type: &str,
+) -> bool {
+    capabilities.input_types.iter().any(|value| value == input_type)
 }
 
 pub(crate) fn default_provider_configs() -> BTreeMap<String, ProviderConfigRecord> {
@@ -251,7 +298,7 @@ fn normalize_model_selection_override(
     })
 }
 
-fn normalize_provider_id(value: &str, field_prefix: &str) -> Result<String, ApiError> {
+pub(crate) fn normalize_provider_id(value: &str, field_prefix: &str) -> Result<String, ApiError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ApiError::validation_failed(
@@ -274,7 +321,7 @@ fn normalize_provider_id(value: &str, field_prefix: &str) -> Result<String, ApiE
     Ok(trimmed.to_string())
 }
 
-fn normalize_required_string(value: &str, field: &str) -> Result<String, ApiError> {
+pub(crate) fn normalize_required_string(value: &str, field: &str) -> Result<String, ApiError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ApiError::validation_failed(

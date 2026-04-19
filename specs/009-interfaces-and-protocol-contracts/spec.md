@@ -145,6 +145,7 @@
   - `GET /settings/model-catalog`
   - `GET /settings/model-defaults`
   - `PATCH /settings/model-defaults`
+  - `POST /settings/model-tests`
 - 若通过 HTTP 暴露，库级 model 接口的稳定入口应包括：
   - `GET /libraries/{library_id}/model-overrides`
   - `PATCH /libraries/{library_id}/model-overrides`
@@ -160,6 +161,16 @@
 - model defaults 与 library model overrides 的稳定最小编码应支持：
   - `index_lines.{index_line}.provider_id`
   - `index_lines.{index_line}.model_id`
+- model catalog 条目至少应支持：
+  - `provider_id`
+  - `provider_kind`
+  - `model_id`
+  - 可选 `model_revision`
+  - `supported_index_lines`
+  - `embedding_capabilities`
+  - `editable`
+  - `status`
+  - `message`
 - 当前切片中，库级 `model-overrides` 作为库级 overrides 入口公开；缺失字段表示回退到全局默认
 - `resolved-models` 的稳定最小返回至少应覆盖：
   - `index_lines.multivector`
@@ -169,9 +180,29 @@
   - `provider_kind`
   - `model_id`
   - 可选 `model_revision`
+  - `embedding_capabilities`
   - `status`
   - `message`
   - `last_probed_at`
+- `POST /settings/model-tests` 的稳定输入应采用 `multipart/form-data`，至少支持：
+  - `provider_id`
+  - `model_id`
+  - `input_modality`
+  - 可选 `provider_enabled`
+  - 可选 `provider_base_url`
+  - 文本测试时的 `text`
+  - 文件测试时的单个 `file`
+- `provider_base_url` 仅适用于当前允许编辑连接信息的 provider；`local_sidecar` 这类 runtime-derived provider 不得把展示用连接地址重新回传为测试草稿
+- `input_modality` 必须受目标模型的 `embedding_capabilities.input_types` 约束；当前切片只要求承接 `text` 与 `image`
+- `POST /settings/model-tests` 的成功响应至少应支持：
+  - `resolved_model`
+  - `input_modality`
+  - `operation_kind`
+  - `vector_shape`
+  - `vectors`
+  - 可选 `pooled_vector`
+  - `input_summary`
+- `POST /settings/model-tests` 是纯诊断接口，不创建 job，不修改已持久化的 provider config、model defaults 或 library model overrides
 - `GET /libraries/{library_id}/sources` 当前阶段至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
 - 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与当前路径或等价来源定位摘要
 - 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
@@ -224,6 +255,10 @@
   - `POST /embed`
 - 健康探测响应必须返回健康快照载荷，至少表达：可用 / 降级 / 不可用状态、最近一次探测结果与诊断摘要
 - 能力 / 可用性探测响应必须能表达：声明能力、当前可用能力裁剪结果，以及是否可服务目标操作
+- 能力 / 可用性探测响应必须显式区分：
+  - `embedding_capabilities`：模型原生向量能力事实
+  - `runtime_adapters`：工程增强后的输入适配能力
+- 若某个能力响应项可用于 Settings 模型测试，其可测试模态必须由 `embedding_capabilities.input_types` 推导，而不是由工程增强操作列表反推
 - 推理 / 编码请求至少应显式携带：
   - `operation_kind`
   - 输入引用或临时资产引用
@@ -244,6 +279,10 @@
 - 若 `document_embedding` 因批大小上限拒绝请求，应继续复用统一错误载荷并返回 `validation_failed`
 - `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了视觉单元级 `locator`，响应应能返回与该输入对应的定位摘要
 - `document_embedding` 的批大小限制属于实现配置而不是稳定协议契约；无论是否触发该限制，`POST /embed` 的成功响应 shape 都不应改变
+- `video_query_embedding` 与 `document_query_embedding` 在当前切片中属于 runtime adapter operation；它们不应被上游误判为模型原生输入类型
+- `GET /capabilities` 中的 `runtime_adapters` 应使用命名 adapter 列表，例如：
+  - `document_query_via_page_images`
+  - `video_query_via_frame_images`
 - 当前切片中的批处理、staging 与 active 切换属于内部执行实现；app 对外公开 API shape 不应因此改变
 - 推理 / 编码成功响应必须返回与 `operation_kind` 对应的结构化 `data`，例如向量输出、派生结果描述或媒体处理摘要；不得依赖未文档化的 sidecar 私有字段
 - sidecar 的超时、不可达、能力不满足与内部失败，必须复用稳定错误载荷与错误码族表达，而不是只依赖传输层异常
