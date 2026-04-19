@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-04-19
+### Changed
+- Completed the UI TypeScript migration with a real `pnpm --dir ui typecheck` path, added `typescript` to the Vite workspace, tightened the local fast-check contract/docs to include UI typecheck before the existing UI build step, and fixed the remaining narrow DOM/locator typing gaps without changing workspace behavior.
+
+## 2026-04-17
+### Changed
+- Migrated the Vite UI entry from plain JavaScript to TypeScript, adding typed UI state and API payload models plus a local `tsconfig`/`vite-env` baseline without changing workspace behavior.
+
 ## 2026-04-16
 ### Changed
 - Added the external demo capability guide, clarified query-mode terminology, and rewrote `README.md` into a newcomer-first entry that points detailed operator guidance to the docs set.

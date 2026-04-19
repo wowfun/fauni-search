@@ -1,21 +1,75 @@
 import "./style.css";
+import type {
+  ApiErrorPayload,
+  AppState,
+  ImportPathsData,
+  InventorySummary,
+  JobSnapshot,
+  JobsListData,
+  LibrariesListData,
+  LibraryObjectQueryDocument,
+  LibraryObjectQueryImage,
+  LibraryObjectQueryVideo,
+  LibrarySnapshot,
+  PreviewReference,
+  QueryAssetData,
+  SearchOutcomeState,
+  SourceInventoryItem,
+  SourceRootRulesPayload,
+  SourceRootSnapshot,
+  SourceRootsListData,
+  SourcesListData,
+  VideoSourceItem,
+  VideoSourcesData,
+  VisualUnitDetailData,
+  WorkspaceKind,
+} from "./types";
 
-function requireEnv(name) {
+interface ApiSuccessEnvelope<T> {
+  data: T;
+}
+
+interface ApiErrorEnvelope {
+  error: ApiErrorPayload;
+}
+
+type ApiEnvelope<T> = ApiSuccessEnvelope<T> | ApiErrorEnvelope;
+
+interface EndpointConfig {
+  appHealth: string;
+  sidecarHealth: string;
+  qdrantCollections: string;
+  uiRoot: string;
+}
+
+interface DemoFixture {
+  path: string;
+  query: string;
+}
+
+interface FocusedEditableState {
+  id: string;
+  value: string | null;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+}
+
+function requireEnv(name: string): string {
   const value = import.meta.env[name];
   if (!value) {
     throw new Error(`Missing required environment variable ${name}`);
   }
-  return value;
+  return String(value);
 }
 
-const endpoints = {
+const endpoints: EndpointConfig = {
   appHealth: `http://${requireEnv("APP_HOST")}:${requireEnv("APP_PORT")}/health`,
   sidecarHealth: `http://${requireEnv("SIDECAR_HOST")}:${requireEnv("SIDECAR_PORT")}/health`,
   qdrantCollections: `${requireEnv("QDRANT_URL").replace(/\/$/, "")}/collections`,
   uiRoot: `http://${requireEnv("UI_HOST")}:${requireEnv("UI_PORT")}/`,
 };
 
-const demoFixture = {
+const demoFixture: DemoFixture = {
   path: "tests/fixtures/tatdqa-page-images/images/tatdqa-page-0001.png",
   query: "What is the percentage change in the net cash provided from operating activities?",
 };
@@ -24,7 +78,7 @@ const JOB_POLL_INTERVAL_MS = 1000;
 const JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKSPACE_POLL_INTERVAL_MS = 3000;
 
-const state = {
+const state: AppState = {
   libraries: [],
   jobs: [],
   videoSources: [],
@@ -79,11 +133,43 @@ const state = {
 };
 
 const EDITABLE_TARGET_SELECTOR = 'input, textarea, [contenteditable="true"], [contenteditable=""], select';
-let lastRenderedDetailSignature = null;
+let lastRenderedDetailSignature: string | null = null;
 
-const root = document.querySelector("#app");
+const root = document.querySelector<HTMLElement>("#app");
 
-function selectedVisualUnitDetailSignature() {
+if (!root) {
+  throw new Error("Missing #app root element.");
+}
+
+function toApiError(error: unknown): ApiErrorPayload {
+  if (typeof error === "string") {
+    return {
+      code: "request_failed",
+      message: error,
+    };
+  }
+
+  if (error && typeof error === "object") {
+    const candidate = error as Partial<ApiErrorPayload>;
+    return {
+      code: typeof candidate.code === "string" ? candidate.code : "request_failed",
+      message:
+        typeof candidate.message === "string" ? candidate.message : "Unexpected request failure.",
+      details:
+        candidate.details && typeof candidate.details === "object"
+          ? candidate.details
+          : undefined,
+      retryable: typeof candidate.retryable === "boolean" ? candidate.retryable : undefined,
+    };
+  }
+
+  return {
+    code: "request_failed",
+    message: "Unexpected request failure.",
+  };
+}
+
+function selectedVisualUnitDetailSignature(): string | null {
   if (!state.selectedVisualUnit) {
     return null;
   }
@@ -101,11 +187,11 @@ function selectedVisualUnitDetailSignature() {
   });
 }
 
-function captureFocusedEditableState() {
+function captureFocusedEditableState(): FocusedEditableState | null {
   const activeElement = document.activeElement;
   if (
     !(activeElement instanceof HTMLElement) ||
-    !root?.contains(activeElement) ||
+    !root.contains(activeElement) ||
     !activeElement.matches(EDITABLE_TARGET_SELECTOR) ||
     !activeElement.id
   ) {
@@ -142,7 +228,7 @@ function hasFocusedEditableControl() {
   return captureFocusedEditableState() !== null;
 }
 
-function restoreFocusedEditableState(snapshot) {
+function restoreFocusedEditableState(snapshot: FocusedEditableState | null): void {
   if (!snapshot?.id) {
     return;
   }
@@ -186,11 +272,11 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-function selectedLibrary() {
+function selectedLibrary(): LibrarySnapshot | null {
   return state.libraries.find((library) => library.id === state.selectedLibraryId) ?? null;
 }
 
-function emptyInventorySummary() {
+function emptyInventorySummary(): InventorySummary {
   return {
     total: 0,
     active: 0,
@@ -212,7 +298,7 @@ function resetInventoryState() {
   state.inventorySummary = emptyInventorySummary();
 }
 
-function summarizeInventorySources(sources) {
+function summarizeInventorySources(sources: SourceInventoryItem[]): InventorySummary {
   const summary = emptyInventorySummary();
   summary.total = sources.length;
   for (const source of sources) {
@@ -279,7 +365,7 @@ function sourceRootDisplayName(sourceRootId) {
   return sourceRoot?.root_path ?? sourceRootId;
 }
 
-function sourceRootInventoryLabel(source) {
+function sourceRootInventoryLabel(source: SourceInventoryItem) {
   return source.source_root_label || source.source_root_id || "manual import";
 }
 
@@ -485,28 +571,18 @@ function setPendingQueryDocumentFile(file) {
   state.queryDocumentObjectUrl = URL.createObjectURL(state.queryDocumentFile);
 }
 
-function setLibraryQueryDocumentVisualUnit(visualUnit) {
+function setLibraryQueryDocumentVisualUnit(visualUnit: LibraryObjectQueryDocument) {
   clearQueryDocumentState();
-  const page = Number(visualUnit?.locator?.page ?? 0);
-  state.queryDocumentLibraryObject = {
-    ...visualUnit,
-    locator:
-      page > 0
-        ? {
-            start_page: page,
-            end_page: page,
-          }
-        : null,
-  };
+  state.queryDocumentLibraryObject = visualUnit;
 }
 
-function setLibraryQueryVideoSource(source) {
+function setLibraryQueryVideoSource(source: VideoSourceItem) {
   clearQueryVideoState();
   state.queryVideoSource = source;
   setQueryVideoDuration(source?.duration_ms ?? null);
 }
 
-function setLibraryQueryVideoVisualUnit(visualUnit) {
+function setLibraryQueryVideoVisualUnit(visualUnit: LibraryObjectQueryVideo) {
   clearQueryVideoState();
   state.queryVideoLibraryObject = visualUnit;
   setQueryVideoDuration(
@@ -531,7 +607,7 @@ function probeVideoDurationFromUrl(url) {
   });
 }
 
-function firstClipboardImageFile(clipboardData) {
+function firstClipboardImageFile(clipboardData: DataTransfer | null | undefined) {
   if (!clipboardData) {
     return null;
   }
@@ -609,7 +685,7 @@ function queryImageDisplayName() {
   return null;
 }
 
-function activeQueryImagePreview() {
+function activeQueryImagePreview(): PreviewReference | null {
   return state.queryImageAsset?.preview ?? state.queryImageLibraryObject?.preview ?? null;
 }
 
@@ -659,7 +735,7 @@ function queryVideoDisplayName() {
   return null;
 }
 
-function activeQueryVideoPreview() {
+function activeQueryVideoPreview(): PreviewReference | null {
   return (
     state.queryVideoAsset?.preview ??
     state.queryVideoSource?.preview ??
@@ -669,14 +745,14 @@ function activeQueryVideoPreview() {
 }
 
 function currentQueryVideoStartMs() {
-  if (state.queryVideoLibraryObject?.locator?.start_ms != null) {
+  if (typeof state.queryVideoLibraryObject?.locator?.start_ms === "number") {
     return state.queryVideoLibraryObject.locator.start_ms;
   }
   return state.queryVideoRange?.start_ms ?? 0;
 }
 
 function currentQueryVideoEndMs() {
-  if (state.queryVideoLibraryObject?.locator?.end_ms != null) {
+  if (typeof state.queryVideoLibraryObject?.locator?.end_ms === "number") {
     return state.queryVideoLibraryObject.locator.end_ms;
   }
   return state.queryVideoRange?.end_ms ?? state.queryVideoDurationMs ?? 0;
@@ -770,7 +846,7 @@ function queryDocumentDisplayName() {
   return null;
 }
 
-function activeQueryDocumentPreview() {
+function activeQueryDocumentPreview(): PreviewReference | null {
   return state.queryDocumentAsset?.preview ?? state.queryDocumentLibraryObject?.preview ?? null;
 }
 
@@ -1498,7 +1574,8 @@ function renderSearchOutcome() {
     `;
   }
 
-  if (!state.searchOutcome.results.length) {
+  const results = state.searchOutcome.results ?? [];
+  if (!results.length) {
     return `
       <div class="notice success">
         <h4>No results</h4>
@@ -1511,12 +1588,12 @@ function renderSearchOutcome() {
     <div class="results-summary">
       <div>
         <p class="eyebrow">Results</p>
-        <h3>命中 ${state.searchOutcome.results.length} 条结果</h3>
+        <h3>命中 ${results.length} 条结果</h3>
       </div>
       <p class="helper">点击结果卡片后，右侧会更新预览和详情。</p>
     </div>
     <ul class="result-list" data-testid="result-list">
-      ${state.searchOutcome.results
+      ${results
         .map(
           (item) => {
             const scoreLabel = formatScore(item.score);
@@ -2270,11 +2347,11 @@ function renderWorkspace() {
   restoreFocusedEditableState(focusedEditableState);
 }
 
-async function apiRequest(path, options = {}) {
-  const headers = { ...(options.headers ?? {}) };
+async function apiRequest<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers);
   const isFormDataBody = options.body instanceof FormData;
-  if (!isFormDataBody && !headers["Content-Type"]) {
-    headers["Content-Type"] = "application/json";
+  if (!isFormDataBody && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
 
   const response = await fetch(`/api${path}`, {
@@ -2282,18 +2359,25 @@ async function apiRequest(path, options = {}) {
     headers,
   });
 
-  let payload = null;
+  let payload: ApiEnvelope<T> | null = null;
   try {
-    payload = await response.json();
+    payload = (await response.json()) as ApiEnvelope<T>;
   } catch {
     payload = null;
   }
 
-  if (!response.ok || payload?.error) {
-    throw payload?.error ?? {
+  if (!response.ok || (payload && "error" in payload)) {
+    throw toApiError((payload && "error" in payload ? payload.error : null) ?? {
       code: "request_failed",
       message: `Request failed with status ${response.status}`,
-    };
+    });
+  }
+
+  if (!payload || !("data" in payload)) {
+    throw toApiError({
+      code: "request_failed",
+      message: "Expected a successful JSON payload but did not receive one.",
+    });
   }
 
   return payload.data;
@@ -2350,7 +2434,7 @@ function attachBoundedVideoPlayback(videoElement) {
 }
 
 async function refreshLibraries({ keepSelection = true } = {}) {
-  const data = await apiRequest("/libraries");
+  const data = await apiRequest<LibrariesListData>("/libraries");
   state.libraries = data.libraries;
 
   if (!keepSelection || !state.libraries.some((item) => item.id === state.selectedLibraryId)) {
@@ -2365,7 +2449,9 @@ async function refreshSourceRoots() {
     return;
   }
 
-  const data = await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/source-roots`);
+  const data = await apiRequest<SourceRootsListData>(
+    `/libraries/${encodeURIComponent(state.selectedLibraryId)}/source-roots`
+  );
   state.sourceRoots = data.source_roots;
 
   if (
@@ -2384,7 +2470,7 @@ async function refreshLibrarySources() {
     return;
   }
 
-  const unfilteredData = await apiRequest(
+  const unfilteredData = await apiRequest<SourcesListData>(
     `/libraries/${encodeURIComponent(state.selectedLibraryId)}/sources`
   );
   state.inventorySummary = summarizeInventorySources(unfilteredData.sources);
@@ -2419,7 +2505,9 @@ async function refreshJobs() {
     return;
   }
 
-  const data = await apiRequest(`/jobs?library_id=${encodeURIComponent(state.selectedLibraryId)}`);
+  const data = await apiRequest<JobsListData>(
+    `/jobs?library_id=${encodeURIComponent(state.selectedLibraryId)}`
+  );
   state.jobs = data.jobs;
 }
 
@@ -2432,7 +2520,7 @@ async function refreshVideoSources() {
     return;
   }
 
-  const data = await apiRequest(
+  const data = await apiRequest<VideoSourcesData>(
     `/libraries/${encodeURIComponent(state.selectedLibraryId)}/video-sources`
   );
   state.videoSources = data.sources;
@@ -2451,7 +2539,7 @@ async function refreshVideoSources() {
 }
 
 async function refreshJob(jobId) {
-  return apiRequest(`/jobs/${encodeURIComponent(jobId)}`);
+  return apiRequest<JobSnapshot>(`/jobs/${encodeURIComponent(jobId)}`);
 }
 
 async function refreshWorkspace(options) {
@@ -2497,7 +2585,7 @@ async function onCreateLibrary(event) {
     state.statusMessage = null;
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     renderWorkspace();
   }
 }
@@ -2553,7 +2641,7 @@ function onSourceRootIncludeExtensionsInput(event) {
 function onSourceFilterRootChange(event) {
   state.inventoryFilters.sourceRootId = event.target.value;
   refreshWorkspace({ keepSelection: true }).catch((error) => {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     renderWorkspace();
   });
 }
@@ -2561,7 +2649,7 @@ function onSourceFilterRootChange(event) {
 function onSourceFilterTypeChange(event) {
   state.inventoryFilters.sourceType = event.target.value;
   refreshWorkspace({ keepSelection: true }).catch((error) => {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     renderWorkspace();
   });
 }
@@ -2569,7 +2657,7 @@ function onSourceFilterTypeChange(event) {
 function onSourceFilterStatusChange(event) {
   state.inventoryFilters.sourceStatus = event.target.value;
   refreshWorkspace({ keepSelection: true }).catch((error) => {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     renderWorkspace();
   });
 }
@@ -2622,7 +2710,7 @@ async function onSubmitSourceRoot(event) {
     state.statusMessage = null;
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
@@ -2675,7 +2763,7 @@ async function onRefreshLibrarySources() {
       "正在执行库级 refresh..."
     );
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
@@ -2692,7 +2780,7 @@ async function onRescanLibrarySources() {
       "正在执行库级 rescan..."
     );
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
@@ -2710,7 +2798,7 @@ async function onRefreshSourceRoot(event) {
       `正在 refresh ${sourceRootDisplayName(sourceRootId)}...`
     );
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
@@ -2728,7 +2816,7 @@ async function onRescanSourceRoot(event) {
       `正在 rescan ${sourceRootDisplayName(sourceRootId)}...`
     );
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
@@ -2759,7 +2847,7 @@ async function onToggleSourceRoot(event) {
     state.statusMessage = null;
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
@@ -2785,7 +2873,7 @@ async function onDeleteSourceRoot(event) {
     state.statusMessage = null;
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
@@ -2797,7 +2885,7 @@ async function onImportPaths(event) {
     return;
   }
 
-  const textarea = document.querySelector("#import-paths");
+  const textarea = document.querySelector<HTMLTextAreaElement>("#import-paths");
   state.importPathsDraft = textarea?.value ?? "";
   const paths = parseImportPaths(state.importPathsDraft);
   if (!paths.length) {
@@ -2818,17 +2906,20 @@ async function onImportPaths(event) {
     state.statusMessage = null;
     renderWorkspace();
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
 }
 
-async function importPaths(paths) {
-  state.importReceipt = await apiRequest(`/libraries/${state.selectedLibraryId}/imports`, {
-    method: "POST",
-    body: JSON.stringify({ paths }),
-  });
+async function importPaths(paths: string[]): Promise<ImportPathsData> {
+  state.importReceipt = await apiRequest<ImportPathsData>(
+    `/libraries/${state.selectedLibraryId}/imports`,
+    {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }
+  );
   state.searchOutcome = null;
   await refreshWorkspace({ keepSelection: true });
 
@@ -2855,7 +2946,7 @@ async function importPaths(paths) {
   return state.importReceipt;
 }
 
-async function waitForJobTerminal(jobId) {
+async function waitForJobTerminal(jobId: string): Promise<JobSnapshot> {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < JOB_POLL_TIMEOUT_MS) {
@@ -2900,14 +2991,14 @@ async function onSearchSubmit(event) {
     state.statusMessage = null;
     renderWorkspace();
   } catch (error) {
-    state.searchOutcome = { error };
+    state.searchOutcome = { error: toApiError(error) };
     state.statusMessage = null;
     renderWorkspace();
   }
 }
 
 async function runTextSearch() {
-  const input = document.querySelector("#search-text");
+  const input = document.querySelector<HTMLInputElement>("#search-text");
   state.searchTextDraft = input?.value ?? "";
   const text = state.searchTextDraft.trim();
   if (!text) {
@@ -3053,8 +3144,8 @@ async function runDocumentSearch() {
   }
 }
 
-async function searchText(text) {
-  const data = await apiRequest("/search/text", {
+async function searchText(text: string): Promise<SearchOutcomeState> {
+  const data = await apiRequest<SearchOutcomeState>("/search/text", {
     method: "POST",
     body: JSON.stringify({
       library_id: state.selectedLibraryId,
@@ -3065,19 +3156,22 @@ async function searchText(text) {
   });
   state.searchOutcome = data;
   renderWorkspace();
-  if (data.results[0]?.visual_unit_id) {
+  if (data.results?.[0]?.visual_unit_id) {
     await loadVisualUnit(data.results[0].visual_unit_id);
   }
   return data;
 }
 
-async function uploadQueryImage(file) {
+async function uploadQueryImage(file: File): Promise<QueryAssetData> {
   const formData = new FormData();
   formData.append("file", file);
-  const data = await apiRequest(`/libraries/${state.selectedLibraryId}/query-assets/images`, {
-    method: "POST",
-    body: formData,
-  });
+  const data = await apiRequest<QueryAssetData>(
+    `/libraries/${state.selectedLibraryId}/query-assets/images`,
+    {
+      method: "POST",
+      body: formData,
+    }
+  );
   if (state.queryImageObjectUrl) {
     URL.revokeObjectURL(state.queryImageObjectUrl);
   }
@@ -3088,13 +3182,16 @@ async function uploadQueryImage(file) {
   return data;
 }
 
-async function uploadQueryVideo(file) {
+async function uploadQueryVideo(file: File): Promise<QueryAssetData> {
   const formData = new FormData();
   formData.append("file", file);
-  const data = await apiRequest(`/libraries/${state.selectedLibraryId}/query-assets/videos`, {
-    method: "POST",
-    body: formData,
-  });
+  const data = await apiRequest<QueryAssetData>(
+    `/libraries/${state.selectedLibraryId}/query-assets/videos`,
+    {
+      method: "POST",
+      body: formData,
+    }
+  );
   if (state.queryVideoObjectUrl) {
     URL.revokeObjectURL(state.queryVideoObjectUrl);
   }
@@ -3107,13 +3204,16 @@ async function uploadQueryVideo(file) {
   return data;
 }
 
-async function uploadQueryDocument(file) {
+async function uploadQueryDocument(file: File): Promise<QueryAssetData> {
   const formData = new FormData();
   formData.append("file", file);
-  const data = await apiRequest(`/libraries/${state.selectedLibraryId}/query-assets/documents`, {
-    method: "POST",
-    body: formData,
-  });
+  const data = await apiRequest<QueryAssetData>(
+    `/libraries/${state.selectedLibraryId}/query-assets/documents`,
+    {
+      method: "POST",
+      body: formData,
+    }
+  );
   if (state.queryDocumentObjectUrl) {
     URL.revokeObjectURL(state.queryDocumentObjectUrl);
   }
@@ -3126,8 +3226,8 @@ async function uploadQueryDocument(file) {
   return data;
 }
 
-async function searchImage(imageInput) {
-  const data = await apiRequest("/search/image", {
+async function searchImage(imageInput: Record<string, unknown>): Promise<SearchOutcomeState> {
+  const data = await apiRequest<SearchOutcomeState>("/search/image", {
     method: "POST",
     body: JSON.stringify({
       library_id: state.selectedLibraryId,
@@ -3138,14 +3238,14 @@ async function searchImage(imageInput) {
   });
   state.searchOutcome = data;
   renderWorkspace();
-  if (data.results[0]?.visual_unit_id) {
+  if (data.results?.[0]?.visual_unit_id) {
     await loadVisualUnit(data.results[0].visual_unit_id);
   }
   return data;
 }
 
-async function searchVideo(videoInput) {
-  const data = await apiRequest("/search/video", {
+async function searchVideo(videoInput: Record<string, unknown>): Promise<SearchOutcomeState> {
+  const data = await apiRequest<SearchOutcomeState>("/search/video", {
     method: "POST",
     body: JSON.stringify({
       library_id: state.selectedLibraryId,
@@ -3156,14 +3256,14 @@ async function searchVideo(videoInput) {
   });
   state.searchOutcome = data;
   renderWorkspace();
-  if (data.results[0]?.visual_unit_id) {
+  if (data.results?.[0]?.visual_unit_id) {
     await loadVisualUnit(data.results[0].visual_unit_id);
   }
   return data;
 }
 
-async function searchDocument(documentInput) {
-  const data = await apiRequest("/search/document", {
+async function searchDocument(documentInput: Record<string, unknown>): Promise<SearchOutcomeState> {
+  const data = await apiRequest<SearchOutcomeState>("/search/document", {
     method: "POST",
     body: JSON.stringify({
       library_id: state.selectedLibraryId,
@@ -3174,7 +3274,7 @@ async function searchDocument(documentInput) {
   });
   state.searchOutcome = data;
   renderWorkspace();
-  if (data.results[0]?.visual_unit_id) {
+  if (data.results?.[0]?.visual_unit_id) {
     await loadVisualUnit(data.results[0].visual_unit_id);
   }
   return data;
@@ -3207,14 +3307,14 @@ async function onRunDemo() {
     state.statusMessage = null;
     renderWorkspace();
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     state.statusMessage = null;
     renderWorkspace();
   }
 }
 
 async function onSelectWorkspace(event) {
-  const nextWorkspace = event.currentTarget.dataset.workspace;
+  const nextWorkspace = event.currentTarget.dataset.workspace as WorkspaceKind | undefined;
   if (!nextWorkspace || nextWorkspace === state.activeWorkspace) {
     return;
   }
@@ -3229,7 +3329,7 @@ async function onSelectWorkspace(event) {
     }
     renderWorkspace();
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     renderWorkspace();
   }
 }
@@ -3430,7 +3530,7 @@ function onQueryDocumentRangeEndInput(event) {
   syncQueryDocumentRangeUi();
 }
 
-function resolveLibraryObjectQueryImage(visualUnitId) {
+function resolveLibraryObjectQueryImage(visualUnitId): LibraryObjectQueryImage | null {
   const resultItem =
     state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
   if (resultItem?.kind === "image") {
@@ -3466,7 +3566,7 @@ function resolveLibraryObjectQueryImage(visualUnitId) {
   return null;
 }
 
-function resolveLibraryObjectQueryVideo(visualUnitId) {
+function resolveLibraryObjectQueryVideo(visualUnitId): LibraryObjectQueryVideo | null {
   const resultItem =
     state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
   if (resultItem?.kind === "video_segment") {
@@ -3493,7 +3593,9 @@ function resolveLibraryObjectQueryVideo(visualUnitId) {
   return null;
 }
 
-function resolveLibraryObjectQueryDocument(visualUnitId) {
+function resolveLibraryObjectQueryDocument(
+  visualUnitId
+): LibraryObjectQueryDocument | null {
   const resultItem =
     state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
   if (resultItem?.kind === "document_page") {
@@ -3594,19 +3696,19 @@ function onUseAsQueryDocument(event) {
   renderWorkspace();
 }
 
-async function loadVisualUnit(visualUnitId) {
+async function loadVisualUnit(visualUnitId: string): Promise<void> {
   if (!state.selectedLibraryId) {
     return;
   }
 
   try {
     state.globalError = null;
-    state.selectedVisualUnit = await apiRequest(
+    state.selectedVisualUnit = await apiRequest<VisualUnitDetailData>(
       `/libraries/${state.selectedLibraryId}/visual-units/${encodeURIComponent(visualUnitId)}`
     );
     renderWorkspace();
   } catch (error) {
-    state.globalError = error;
+    state.globalError = toApiError(error);
     renderWorkspace();
   }
 }
@@ -3626,7 +3728,7 @@ window.setInterval(() => {
   workspacePollInFlight = true;
   refreshWorkspace({ keepSelection: true })
     .catch((error) => {
-      state.globalError = error;
+      state.globalError = toApiError(error);
       renderWorkspace();
     })
     .finally(() => {
@@ -3635,6 +3737,6 @@ window.setInterval(() => {
 }, WORKSPACE_POLL_INTERVAL_MS);
 
 refreshWorkspace({ keepSelection: false }).catch((error) => {
-  state.globalError = error;
+  state.globalError = toApiError(error);
   renderWorkspace();
 });

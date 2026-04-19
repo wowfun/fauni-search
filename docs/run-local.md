@@ -165,7 +165,7 @@ bash scripts/local/smoke-document-search.sh --dev --json
 bash scripts/local/check.sh
 ```
 
-该命令默认执行 Rust 测试、sidecar 窄测试和 UI 构建。隔离开发配置可以使用 `bash scripts/local/check.sh --dev`。
+该命令默认执行 Rust 测试、sidecar 窄测试、UI TypeScript typecheck 和 UI 构建。隔离开发配置可以使用 `bash scripts/local/check.sh --dev`。
 
 当前最小 UI smoke 入口：
 

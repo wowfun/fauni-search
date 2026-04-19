@@ -72,7 +72,7 @@
 
 ## 快速检查与 smoke
 
-- `check.sh` 默认执行 Rust 主服务窄测试、sidecar 窄测试与 UI 构建检查
+- `check.sh` 默认执行 Rust 主服务窄测试、sidecar 窄测试、UI TypeScript typecheck 与 UI 构建检查
 - `check.sh` 不应默认执行 GPU smoke，也不应要求 app、sidecar、UI 或 Qdrant 已经启动
 - `smoke-text-search.sh` 用于真实模型与真实 Qdrant 链路验证，应在 app、sidecar 与 Qdrant 已可访问后运行
 - `smoke-image-search.sh` 若存在，用于真实图片查询链路验证，并应复用与 `smoke-text-search.sh` 相同的本地配置选择、服务前置与 JSON 输出约定

@@ -23,6 +23,7 @@ Options:
 Runs the no-GPU fast check path:
   - cargo test
   - .venv-test/bin/python -m pytest sidecar/tests -q
+  - pnpm --dir ui typecheck
   - pnpm --dir ui build --outDir /tmp/fauni-search-ui-build
 EOF
 }
@@ -57,6 +58,9 @@ cargo test
 
 echo "[check] sidecar pytest"
 .venv-test/bin/python -m pytest sidecar/tests -q
+
+echo "[check] UI typecheck"
+pnpm --dir ui typecheck
 
 echo "[check] UI build"
 pnpm --dir ui build --outDir /tmp/fauni-search-ui-build
