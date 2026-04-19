@@ -60,6 +60,9 @@
   - `sources`
   - `visual_units`
   - `active_index_references`
+  - `provider_configs`
+  - `global_model_defaults`
+  - `library_model_overrides`
 - 当前 v1 采用“单个 durable snapshot + 事务性整份重写”的写入方式，而不是 row-by-row live sync
 - 为承接 [002-state-and-data-model](../002-state-and-data-model/spec.md) 中的稳定关系，可以存在必要的关联记录族；但这些记录不得改变上游定义的事实源归属
 - `jobs`、`job_attempts`、`search_history` 与 `favorites` 不属于当前 v1 的 restart-durable subset；它们在重启后清空或缺失，不构成持久恢复失败
@@ -90,7 +93,8 @@
 | 派生资产载荷 | 派生资产存储区 | 可重建文件载荷，不替代结构化真相 |
 | 激活索引引用 | 主结构化存储 | 指向当前 active / staging 检索命名空间 |
 | 索引与向量载荷 | 检索命名空间 | 仅承载检索事实，不承载业务元数据真相 |
-| 提供方绑定状态 | 主结构化存储 | 承载全局默认、库级覆盖与显式绑定记录 |
+| provider configs | 主结构化存储 | 承载内建 provider 的平台、base_url 与启用状态 |
+| 全局模型默认与库级模型覆盖 | 主结构化存储 | 承载按 index line 的模型选择配置 |
 | 任务状态、任务尝试、检查点引用 | 运行时进程自身 | 当前 v1 只作为进程内执行状态；重启后清空 |
 | 搜索历史记录、收藏记录 | 非当前 v1 durable subset | 当前切片不要求跨 restart 恢复 |
 | 临时查询资产 | 临时资产存储区 | 纯临时输入，不构成长期共享事实源 |
@@ -106,6 +110,7 @@
 - 应用数据根的 layout version 必须能表达派生资产存储区、临时资产存储区与运行时工作区的布局兼容性
 - 当检索命名空间的物理命名或后端兼容要求发生变化时，应通过显式兼容代际或重建路径处理，而不是直接改写结构化真相含义
 - 当前 active index reference 在应用启动时必须重新对照 stable active namespace naming 探测可用性；若 active alias 缺失、alias target 缺失，或只剩同名旧物理 collection，该引用应失活并让搜索返回 `not_ready`
+- provider configs、global model defaults 与 library model overrides 在旧 `state.sqlite` 中缺失时，应用必须按向后兼容路径自动补齐最小默认值，而不是把旧 durable store 视为损坏
 - 升级过程中，`library_id`、`source_id`、`visual_unit_id`、`content_version_id` 等稳定身份不得被重写
 - 派生资产载荷、临时资产与检索命名空间若与新版本不兼容，可以按规则重建；主结构化存储中的稳定记录与持久队列记录不得依赖“删掉重建”作为默认升级手段
 - 若派生资产载荷或检索命名空间被判定为需要重建，主结构化存储中的引用、检查点与激活关系应继续作为恢复入口，而不是被隐式清空
@@ -116,7 +121,7 @@
 - [001-architecture](../001-architecture/spec.md) 定义结构化存储、检索后端与 Rust 主服务之间的系统边界
 - [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义逻辑实体、状态族、事实源归属与可恢复边界
 - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义来源边界、内容版本、active / staging 语义与延迟清理窗口
-- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义提供方绑定与运行时探测语义
+- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义 provider config、模型选择与运行时探测语义
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务恢复、检查点推进、运行时工作区清理与后台维护执行语义
 - [008-ui-ux](../008-ui-ux/spec.md) 定义依赖这些持久记录与工作区数据的应用壳层、管理体验与控制面接口族
 - [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义搜索与控制面公开接口的请求 / 响应契约，以及任务 / 健康快照的公开编码

@@ -62,6 +62,11 @@ async function openSearchWorkspace(page) {
   await expect(page.getByTestId("search-panel")).toBeVisible();
 }
 
+async function openSettingsWorkspace(page) {
+  await page.getByTestId("workspace-tab-settings").click();
+  await expect(page.getByTestId("settings-workspace")).toBeVisible();
+}
+
 async function waitForFirstJobCompleted(page) {
   const firstJob = page.getByTestId("job-card").first();
   await expect(firstJob).toBeVisible({ timeout: 30_000 });
@@ -470,6 +475,59 @@ test("workspace refresh preserves the open PDF detail preview element", async ({
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
+});
+
+test("settings workspace shows exact models and resolves library overrides", async ({ page }) => {
+  const dashscopeModelId = "qwen3-vl-embedding";
+  const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
+
+  await createLibrary(page, "provider-settings");
+  await expect(page.getByTestId("provider-bridge-summary")).toContainText(localModelId);
+
+  await openSettingsWorkspace(page);
+
+  await expect(page.getByTestId("provider-configs-panel")).toContainText("Local Sidecar");
+  await expect(page.getByTestId("provider-configs-panel")).toContainText("DashScope");
+  await expect(page.getByTestId("provider-configs-panel")).not.toContainText("qdrant");
+  await expect(page.getByTestId("settings-workspace")).not.toContainText("Region");
+  await expect(page.getByTestId("settings-workspace")).not.toContainText("Provider profiles");
+  await expect(page.getByTestId("settings-workspace")).not.toContainText("selection_kind");
+  await expect(page.getByTestId("settings-workspace")).not.toContainText("variant");
+  await expect(page.getByTestId("resolved-models-panel")).toContainText(localModelId);
+
+  await page.getByTestId("provider-config-id").selectOption("dashscope");
+  await page.getByTestId("provider-base-url").fill("https://dashscope.aliyuncs.com");
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes("/settings/providers/dashscope") &&
+        response.request().method() === "PATCH" &&
+        response.ok()
+    ),
+    page.getByTestId("provider-config-submit-button").click(),
+  ]);
+
+  await page.getByTestId("library-model-provider-id").selectOption("dashscope");
+  await page.getByTestId("library-model-id").selectOption(dashscopeModelId);
+  await expect(page.getByTestId("library-model-id")).toHaveValue(dashscopeModelId);
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes("/model-overrides") &&
+        response.request().method() === "PATCH" &&
+        response.ok()
+    ),
+    page.getByTestId("library-model-overrides-submit-button").click(),
+  ]);
+
+  const resolvedModels = page.getByTestId("resolved-models-panel");
+  await expect(resolvedModels).toContainText(dashscopeModelId);
+  await expect(resolvedModels).toContainText("library_override");
+  await expect(resolvedModels).toContainText("not_supported");
+  await expect(page.getByTestId("provider-bridge-summary")).toContainText(dashscopeModelId);
+
+  await openSearchWorkspace(page);
+  await expect(page.getByTestId("provider-bridge-summary")).toContainText(dashscopeModelId);
 });
 
 test("search workspace supports shared filters and load more pagination", async ({ page }) => {

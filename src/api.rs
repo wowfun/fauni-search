@@ -1,6 +1,7 @@
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateLibraryRequest {
@@ -44,6 +45,113 @@ pub(crate) struct LibraryIndexLineStatus {
 pub(crate) struct LibraryCounts {
     pub(crate) accepted_items: usize,
     pub(crate) pending_jobs: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ProviderProbeSnapshot {
+    pub(crate) status: String,
+    pub(crate) message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_probed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ProviderConfigSnapshot {
+    pub(crate) provider_id: String,
+    pub(crate) display_name: String,
+    pub(crate) provider_kind: String,
+    pub(crate) enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) readonly_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) probe: Option<ProviderProbeSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateProviderConfigRequest {
+    pub(crate) enabled: Option<bool>,
+    pub(crate) base_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ProvidersListData {
+    pub(crate) providers: Vec<ProviderConfigSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ModelCatalogEntry {
+    pub(crate) provider_id: String,
+    pub(crate) provider_kind: String,
+    pub(crate) model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) supported_index_lines: Vec<String>,
+    pub(crate) editable: bool,
+    pub(crate) status: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ModelCatalogData {
+    pub(crate) entries: Vec<ModelCatalogEntry>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ModelSelectionPayload {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ModelSelectionOverridePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ModelDefaultsPayload {
+    #[serde(default)]
+    pub(crate) index_lines: BTreeMap<String, ModelSelectionPayload>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ModelOverridesPayload {
+    #[serde(default)]
+    pub(crate) index_lines: BTreeMap<String, ModelSelectionOverridePayload>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct GlobalModelDefaultsData {
+    pub(crate) defaults: ModelDefaultsPayload,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LibraryModelOverridesData {
+    pub(crate) overrides: ModelOverridesPayload,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ResolvedModelSelectionPayload {
+    pub(crate) binding_source: String,
+    pub(crate) provider_id: String,
+    pub(crate) provider_kind: String,
+    pub(crate) model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_revision: Option<String>,
+    pub(crate) status: String,
+    pub(crate) message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_probed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub(crate) struct ResolvedModelsData {
+    pub(crate) index_lines: BTreeMap<String, ResolvedModelSelectionPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,6 +625,18 @@ impl ApiError {
                 message: message.into(),
                 details,
                 retryable: Some(true),
+            },
+        }
+    }
+
+    pub(crate) fn conflict(message: impl Into<String>, details: Option<Value>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            payload: ErrorPayload {
+                code: "conflict".to_string(),
+                message: message.into(),
+                details,
+                retryable: Some(false),
             },
         }
     }

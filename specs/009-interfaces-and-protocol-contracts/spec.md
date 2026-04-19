@@ -113,7 +113,7 @@
 - 当前切片中，`debug` 载荷的稳定最小结构至少应支持：
   - `backend`
   - `repr_kind`
-  - `provider`
+  - `resolved_model`
   - `index_lines`
 - 搜索请求若同时携带多种查询输入、显式请求未启用索引线，或命中已启用但未就绪的目标索引线，应通过统一错误载荷返回失败
 - `not_ready` 错误的 `details` 至少应支持按索引线返回结构化条目；每个条目至少可表达 `index_line`，并可附带相关 `job` / `phase` 摘要
@@ -139,6 +139,39 @@
   - `exclude_globs`
   - `include_extensions`
 - 若通过 HTTP 暴露，库级来源清单接口的稳定入口应包括 `GET /libraries/{library_id}/sources`
+- 若通过 HTTP 暴露，provider / model settings 资源接口的稳定入口应包括：
+  - `GET /settings/providers`
+  - `PATCH /settings/providers/{provider_id}`
+  - `GET /settings/model-catalog`
+  - `GET /settings/model-defaults`
+  - `PATCH /settings/model-defaults`
+- 若通过 HTTP 暴露，库级 model 接口的稳定入口应包括：
+  - `GET /libraries/{library_id}/model-overrides`
+  - `PATCH /libraries/{library_id}/model-overrides`
+  - `GET /libraries/{library_id}/resolved-models`
+- provider 资源快照至少应支持：
+  - `provider_id`
+  - `display_name`
+  - `provider_kind`
+  - `enabled`
+  - 可选 `base_url`
+  - 可选 `readonly_reason`
+  - 可选 `probe`
+- model defaults 与 library model overrides 的稳定最小编码应支持：
+  - `index_lines.{index_line}.provider_id`
+  - `index_lines.{index_line}.model_id`
+- 当前切片中，库级 `model-overrides` 作为库级 overrides 入口公开；缺失字段表示回退到全局默认
+- `resolved-models` 的稳定最小返回至少应覆盖：
+  - `index_lines.multivector`
+- 每个 resolved model 条目至少应支持：
+  - `binding_source`
+  - `provider_id`
+  - `provider_kind`
+  - `model_id`
+  - 可选 `model_revision`
+  - `status`
+  - `message`
+  - `last_probed_at`
 - `GET /libraries/{library_id}/sources` 当前阶段至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
 - 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与当前路径或等价来源定位摘要
 - 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
@@ -223,7 +256,7 @@
 - [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义资源标识、任务状态、健康状态与辅助状态的逻辑模型
 - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义导入、刷新、重扫、索引线切换与内容版本的上游行为语义
 - [004-search](../004-search/spec.md) 定义搜索查询、结果语义、过滤分页规则与显式拒绝条件
-- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义提供方能力、绑定、解析顺序与运行时探测判定语义
+- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义 provider config、模型选择、解析顺序与运行时探测判定语义
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务执行、任务恢复、运行时健康与 sidecar 托管语义
 - [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义结构化记录、任务记录、检索命名空间与文件载荷的物理落点
 - [008-ui-ux](../008-ui-ux/spec.md) 定义搜索工作区、管理工作区、控制面入口与应用级体验边界

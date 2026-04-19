@@ -1,104 +1,137 @@
-# 005 提供方能力与配置档 (Provider Capabilities and Profiles)
+# 005 提供方配置与模型选择 (Provider Configuration and Model Selection)
 
-定义 FauniSearch 的提供方语义边界，明确提供方家族 (Provider Family)、提供方配置档 (Provider Profile)、提供方能力 (Provider Capability)、提供方绑定 (Provider Binding) 与运行时探测 (Runtime Probe) 如何共同决定某项索引或搜索能力是否可用。
+定义 FauniSearch 的提供方与模型选择语义，明确哪些配置属于 provider、哪些配置属于 model，以及全局默认、库级覆盖与运行时已解析模型如何共同决定某条索引线是否可执行。
 
 ## 关键术语 (Terminology)
 
-- 提供方家族（Provider Family）
-- 模型提供方（Model Provider）
-- 检索后端提供方（Retrieval Backend Provider）
-- 提供方配置档（Provider Profile）
-- 提供方能力（Provider Capability）
-- 提供方绑定（Provider Binding）
-- 运行时探测（Runtime Probe）
-- 已解析提供方选择（Resolved Provider Selection）
+- 提供方配置（Provider Config）
+- 模型目录项（Model Catalog Entry）
+- 索引线模型选择（Index-Line Model Selection）
+- 已解析模型选择（Resolved Model Selection）
+- 运行时绑定模型（Runtime-Bound Model）
+- 运行时修订（Runtime Revision）
 
 ## 范围
 
-- 提供方家族、配置档与能力的稳定语义
-- 最小配置、绑定粒度与优先级解析顺序
-- 声明能力与运行时探测的关系
-- 提供方不可用或能力不满足时的显式失败语义
+- 提供方配置与模型选择的稳定语义边界
+- 全局默认与库级覆盖的最小解析顺序
+- 当前正式索引线的模型配置粒度
+- 运行时可见模型事实与显式失败语义
 
 范围外：
-- 具体模型名、默认模型线与权重来源
-- 检索后端产品细节与具体协议字段
-- HTTP wire shape、sidecar 或远端提供方的私有协议字段、凭据字段与数据库 schema
+- 检索后端产品私有配置、collection schema 与向量参数
+- 第三方平台私有凭据字段与计费细节
+- sidecar、DashScope 或其他远端平台的私有协议字段
 - 模型懒加载、驻留、容量与缓存策略
-- 任务调度、融合排序与搜索结果语义
+- 搜索排序、结果语义与任务调度策略
 
 ## 设计原则
 
-- 能力先声明（Declared Capability First）：提供方的稳定能力边界必须先被显式声明，不能仅依赖配置档名称或实现细节推断
-- 探测只校验不扩权（Probe Does Not Expand）：运行时探测只能确认、裁剪或拒绝声明能力，不能隐式扩宽能力集合
-- 绑定先于执行（Binding Before Execution）：索引与搜索在执行前必须先解析出合法提供方绑定，而不是在运行时临时猜测可用提供方
-- 显式失败（Explicit Failure）：缺少可用绑定、能力不满足或运行时不可用时，应明确失败，不自动 fallback 到其他提供方或能力线
-- 抽象后端边界（Abstract Backend Boundary）：检索后端提供方在本专题中只定义抽象边界与绑定语义，不把当前后端产品细节写成稳定事实
+- Provider 薄化（Thin Provider）：provider 只承载平台与连接语义，不再隐藏实际模型身份
+- 模型显式化（Model Is Explicit）：系统必须始终能够直接回答“当前实际用的是哪个 exact model_id”
+- 按索引线选择（Index-Line Selection）：当前稳定配置粒度收敛到索引线，不再按 query kind 公开分别选模型
+- 运行时事实优先（Runtime Truth Wins）：本地运行时已绑定模型时，应直接暴露运行时返回的 `model_id` / `model_revision`
+- 显式失败（Explicit Failure）：模型不可执行、运行时不可达或当前切片未实现时，必须明确失败，不自动 fallback
 
-## 提供方家族与配置档
+## Provider Config
 
-- 提供方家族是上层分类边界，用于区分不同类型提供方的职责与绑定面
-- 模型提供方负责模型侧能力，例如向量编码或查询理解，可同时服务 `indexing` 与 `search`，也可以只服务其中一个阶段
-- 检索后端提供方负责检索索引承载与查询执行的后端抽象
-- 正式模型提供方配置档固定为：
-  - `local_python`
-  - `remote_http`
-- `local_python` 表示本地 Python sidecar 协作路径；该配置档可以声明设备偏好，但设备偏好只代表可声明偏好，不代表最终可用性承诺
-- `remote_http` 表示远端 HTTP 服务协作路径；其能力仍需显式声明并接受运行时探测校验
-- 检索后端提供方保持抽象家族语义；`QdrantProvider` 只可作为当前实现实例被提及，不构成产品级稳定承诺
+- Provider Config 是内建稳定资源，而不是用户任意创建 / 删除的 profile
+- 当前固定 provider 集合为：
+  - `local_sidecar`
+  - `dashscope`
+- `local_sidecar` 表示当前本地 Python sidecar 执行链路
+- `dashscope` 表示面向未来百炼 / DashScope 兼容的 provider 语义位；本切片中允许配置、展示与持久化，但不要求进入真实执行路径
+- `qdrant` 不再作为用户可配置 provider 暴露；它在当前切片中降为内部固定检索后端，只继续出现在运行时健康与调试摘要中
 
-## 提供方能力
+Provider Config 的最小稳定字段包括：
+- `provider_id`
+- `display_name`
+- `provider_kind`
+- `enabled`
+- 可选 `base_url`
+- 可选 `readonly_reason`
 
-- 提供方能力是提供方的稳定能力声明，至少覆盖三类维度：
-  - 支持的查询输入：`text`、`image`、`video`
-  - 支持的索引线：`single-vector`、`multivector`
-  - 支持的使用阶段：`indexing`、`search`
-- 提供方可以只支持其中一部分输入类型、索引线或使用阶段
-- 对检索后端提供方而言，上述维度表达的是兼容边界与可承载范围，不意味着其直接承担模型推理职责
-- 支持某类查询输入，不自动意味着支持所有索引线
-- 支持某条索引线，不自动意味着同时支持 `indexing` 与 `search` 两个阶段
-- 提供方能力是该提供方的声明上限；运行时只能把可用集合缩小或判定不可用，不能把声明中不存在的能力补出来
+约束：
+- 当前 provider 集合是内建固定集合；用户不能创建、删除或重命名 provider
+- `local_sidecar` 可以展示但在当前切片中以 runtime-bound 方式提供模型事实，不要求支持 UI 中任意热切换模型
+- `dashscope` 的 `base_url` 是正式配置维度；即使当前不可执行，也必须作为稳定语义保留
 
-## 提供方绑定与解析顺序
+## 模型目录与模型选择
 
-- 提供方绑定是把提供方选择规则绑定到具体使用场景的稳定语义
-- 稳定绑定粒度至少包括：
-  - 按索引线绑定，用于解析某条索引线的索引期提供方选择
-  - 按查询用途或查询类型（query kind）绑定，用于解析某类搜索请求的提供方选择
-- 同一提供方家族不要求所有绑定面完全对称，但都必须服从统一的解析顺序
-- 稳定解析顺序固定为：
-  - 显式绑定
+- 模型身份的稳定核心是 exact `model_id` 字符串
+- `model_revision` 属于模型观察或运行时上下文的正式辅助维度
+- 当前稳定模型选择粒度固定为“按索引线”
+- 当前唯一正式 index line 仍是 `multivector`
+- 文本、图片、视频与文档查询当前都共享 `multivector` 这条索引线的模型选择
+- 当前不再公开“按 query kind 分别选模型”的稳定配置面
+
+索引线模型选择的最小稳定字段包括：
+- `provider_id`
+- `model_id`
+
+模型目录（Model Catalog）是可展示、可选择的模型清单，而不是 provider 本身：
+- 当前目录至少应能表达“是否兼容当前 `multivector` 检索切片”
+- 不兼容当前检索切片的文本专用 embedding 模型，例如 `text-embedding-v4`，不得进入当前 `multivector` 可选目录
+- 当前 `local_sidecar` 的实际模型来自 sidecar 运行时绑定值；本切片中它应作为“可见但只读”的 runtime-bound 模型展示
+
+## 解析顺序与已解析模型选择
+
+- 当前正式生效的稳定解析顺序固定为：
   - 库级覆盖
   - 全局默认
-- 已解析提供方选择（Resolved Provider Selection）只有在以下条件同时满足时才成立：
-  - 已解析出某个提供方选择
-  - 该提供方的声明能力覆盖目标输入、索引线与使用阶段
+  - 运行时事实补全
+- `resolved model selection` 只有在以下条件同时满足时才成立：
+  - 已解析出目标索引线的 provider 与模型选择
+  - 所选模型与该索引线兼容
+  - provider 当前已启用
+  - provider 在当前切片中属于可执行路径，或能明确返回“当前仅配置、不可执行”
   - 运行时探测未将其判定为不可用
-- 若缺少可用绑定，或解析出的提供方无法满足能力 / 探测约束，应显式失败
+
+已解析模型选择（Resolved Model Selection）的稳定最小字段包括：
+- `binding_source`
+- `provider_id`
+- `provider_kind`
+- `model_id`
+- 可选 `model_revision`
+- `status`
+- `message`
+- 可选 `last_probed_at`
+
+`binding_source` 当前至少包括：
+- `global_default`
+- `library_override`
+
+## 当前切片的正式执行语义
+
+- 当前唯一正式可执行模型 provider 仍是 `local_sidecar`
+- `local_sidecar` 的真实模型事实来自 sidecar `/health` 与 `/capabilities` 返回的 `model_id` / `model_revision`
+- 当前切片中，`local_sidecar` 的 `multivector` 选择应被视为 runtime-bound，而不是任意可写模型切换入口
+- `dashscope` 当前只作为配置与未来兼容字段存在；解析到它时必须显式返回 `not_supported`
+- `qdrant` 继续作为内部固定检索后端参与运行，但不再出现在 Settings 的模型配置面
+- 搜索 debug、库摘要与 Settings 摘要都必须直接暴露 exact `model_id`
+- Settings 与库摘要中的主编辑面只应承接 `provider_id` 与 `model_id`；`model_revision` 只作为只读运行时摘要返回
 
 ## 运行时探测与失败语义
 
-- 运行时探测用于在运行时校验提供方是否真实可用，以及声明能力是否需要被裁剪
-- 运行时探测可以验证例如：
-  - 配置档是否可达
-  - 运行环境是否满足声明能力
-  - 可声明的设备偏好是否在当前环境中可兑现
-- 运行时探测可以产生三类稳定结果：
-  - 确认可用
-  - 裁剪可用能力
-  - 判定不可用并返回失败
-- 对 `local_python` 这类配置档，设备偏好不可满足时，应按探测结果显式失败或裁剪，而不是把设备偏好当作自动可兑现承诺
-- 提供方解析失败、能力不匹配或探测不通过时，系统不得静默切换到其他提供方、其他索引线或其他查询路径
-- 本地运行时托管、模型驻留、容量逐出与维护执行语义由 [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义，不在本专题重写
+- provider 的可达性与可执行性应通过运行时探测表达，但探测结果不改变模型身份语义
+- `local_sidecar` 的探测至少应覆盖：
+  - sidecar 可达性
+  - `can_service`
+  - 当前绑定的 `model_id`
+  - 当前绑定的 `model_revision`
+- `dashscope` 当前不要求进入真实 probe 或真实执行路径；若被选中，应稳定返回 `not_supported`
+- 解析失败、provider 禁用、运行时不可达或模型不兼容时，系统不得自动切换到其他 provider 或其他模型
+
+## 兼容语义
+
+- 当前 005 公开配置面不承诺向后兼容旧的 profile/binding 抽象
+- 本专题的稳定配置面只承接 `provider_id` 与 `model_id`
 
 ## 关联主题
 
-- [000-foundation](../000-foundation/spec.md) 定义提供方驱动架构、多向量能力与项目级基础约束
-- [001-architecture](../001-architecture/spec.md) 定义提供方所处的系统边界、组件职责与交互路径
-- [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义提供方绑定状态的承载位置、作用域与事实源归属
-- [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义正式来源边界与索引线生命周期，并复用本专题的提供方能力与提供方绑定语义
-- [004-search](../004-search/spec.md) 定义搜索语义与结果语义，并复用本专题的已解析提供方选择与提供方能力语义
-- [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义本地运行时托管、模型驻留、容量逐出与后台维护执行语义
-- [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义提供方绑定记录、持久队列记录与检索命名空间的物理持久化边界
-- [008-ui-ux](../008-ui-ux/spec.md) 定义提供方绑定与相关设置的管理体验、应用入口与非搜索控制面接口族
-- [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义搜索与控制面公开接口的编码契约，以及 Rust / Python sidecar 的稳定协议载荷
+- [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义 provider config、model default、library override 与 resolved model 的状态承载位置
+- [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 复用本专题的索引线模型选择与已解析模型语义
+- [004-search](../004-search/spec.md) 复用本专题的已解析模型选择与搜索期调试摘要语义
+- [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义 provider configs 与 model defaults / overrides 的 durable 边界
+- [008-ui-ux](../008-ui-ux/spec.md) 定义 Settings、库摘要与搜索工作区中如何呈现 resolved model
+- [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义 provider/model 相关公开接口与 sidecar 暴露的运行时模型事实

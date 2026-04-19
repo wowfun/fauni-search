@@ -570,6 +570,7 @@ impl AppState {
                 config: LibraryConfigPayload {
                     enabled_index_lines,
                 },
+                model_overrides: default_library_model_overrides(),
                 source_roots: BTreeMap::new(),
                 source_root_order: Vec::new(),
                 sources: BTreeMap::new(),

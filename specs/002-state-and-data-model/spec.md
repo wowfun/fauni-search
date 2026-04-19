@@ -26,7 +26,7 @@
 范围外：
 - 数据库表、字段、ORM 映射与迁移
 - 摄取流程、索引线生命周期、生效切换与失败恢复
-- 提供方能力、提供方绑定的解析算法与运行时探测细节
+- 提供方配置、模型选择的解析算法与运行时探测细节
 - 对外公开接口与请求响应形状
 - 任务调度策略、worker 并发与执行流程
 
@@ -46,7 +46,7 @@
 | 记录 / 状态族 | 关键字段 | 稳定关系 | 主事实源 | 保留 / 恢复语义 |
 | --- | --- | --- | --- | --- |
 | 库 (Library) | `library_id`、显示元数据、默认配置引用 | 是库级作用域边界，拥有库配置、来源根、源内容与辅助状态 | 结构化存储 | 长期保留，不自动重建 |
-| 库配置 (LibraryConfig) | `library_id`、`enabled_index_lines`、刷新策略、摄取 / 搜索 / 索引默认值、库级提供方覆盖 | 与单个库一一对应，为摄取、索引构建、搜索与提供方选择提供库级输入 | 结构化存储 | 长期保留，不自动重建 |
+| 库配置 (LibraryConfig) | `library_id`、`enabled_index_lines`、刷新策略、摄取 / 搜索 / 索引默认值、库级模型覆盖 | 与单个库一一对应，为摄取、索引构建、搜索与模型选择提供库级输入 | 结构化存储 | 长期保留，不自动重建 |
 | 库来源根 (Library Source Root) | `source_root_id`、`library_id`、根定位、`enabled`、状态、`watch_state`、接入边界、覆盖边界摘要 | 属于单个库，定义扫描入口与覆盖边界 | 结构化存储 | 可通过重新探测或重新扫描修复部分状态 |
 | 库来源根规则 (Library Source Root Rule) | `rule_id`、`source_root_id`、规则模式、规则表达、可选扩展名过滤 | 属于单个库来源根，参与包含 / 排除（include / exclude）覆盖判定 | 结构化存储 | 长期保留；规则 DSL 与优先级算法不在本专题固定 |
 | 源内容 (Source) | `source_id`、`library_id`、内容身份、来源类型、摄取模式、可用性 / 失效 / 脱离覆盖状态 | 属于单个库，可被多个路径或来源根通过归属/引用关系指向 | 结构化存储 | 可通过重新扫描与内容确认重建部分记录，但不作为默认恢复路径 |
@@ -54,29 +54,29 @@
 | 派生资产 (Derived Asset) | `derived_asset_id`、资产类型、复用规格、载荷引用 | 与视觉单元是多对多关系，可跨库按内容与规格复用 | 结构化存储中的资产记录；实际载荷见状态边界 | 结构化记录保留，载荷可重建 |
 | 内容版本 (Content Version) | `content_version_id`、所有者引用、处理边界摘要 | 连接某次处理结果与源内容、视觉单元、派生资产及索引引用 | 结构化存储 | 长期保留，可支撑诊断、激活引用与延迟清理窗口 |
 | 激活索引引用 (Active Index Reference) | `library_id`、`index_line`、当前 active / staging 引用、`content_version` 引用 | 把库级索引线状态映射到检索后端中的索引实例 | 结构化存储中的引用记录 | 引用可保留；重启后需重新对照检索后端中的 stable collection 判定是否仍可用 |
-| 提供方绑定状态 (Provider Binding State) | 绑定作用域、目标索引线或查询用途、提供方选择、覆盖层级 | 附着在全局默认、库级覆盖或显式绑定面上 | 结构化存储 | 长期保留；提供方能力与解析顺序由 [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义 |
+| 提供方配置与模型选择状态 (Provider/Model Selection State) | provider 配置、目标索引线、模型选择、覆盖层级 | 附着在全局默认与库级覆盖上 | 结构化存储 | provider 配置、全局默认与库级覆盖长期保留 |
 | 任务状态 (Job State) | `job_id`、任务类型、所有者引用、阶段状态、检查点引用 | 可指向库、源内容、`index_line` 或搜索流程 | 当前切片中属于运行时状态 | 当前 restart 语义下重启清空，不自动恢复执行；执行语义由 [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义 |
 | 搜索历史记录 (Search History Record) | `search_history_id`、`library_id`、查询类型、过滤摘要、时间戳 | 属于单个库，可关联搜索输入与调试追踪 | 非当前 restart-durable subset | 当前切片不要求跨 restart 保留 |
 | 收藏记录 (Favorite Record) | `favorite_id`、`library_id`、目标对象引用、创建时间 | 属于单个库，指向被收藏的稳定对象 | 非当前 restart-durable subset | 当前切片不要求跨 restart 保留 |
 | 临时查询资产 (Temporary Query Asset) | `temp_asset_id`、查询类型、来源、可选查询定位摘要、过期窗口 | 服务于图片 / 视频 / 文档查询的临时输入链路 | Rust 主服务管理的临时资产存储区 | 纯临时；丢失后需重新上传或重新选择 |
-| 运行时驻留状态 (Runtime Resident State) | 运行时 / 提供方配置档引用、健康状态、设备分配、已加载模型或后端摘要、有效能力快照 | 属于 Python sidecar 或其他运行时进程，不承载长期业务事实 | 运行时进程自身 | 可通过重连、重载或重新探测恢复；生命周期语义由 [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义 |
+| 运行时驻留状态 (Runtime Resident State) | 运行时 / 提供方配置档引用、健康状态、设备分配、已加载模型或后端摘要、有效能力快照 | 属于 Python sidecar 或其他运行时进程，不承载长期业务事实 | 运行时进程自身 | 可通过重连、重载或重新探测恢复；当前 provider probe cache 属于 app 运行态观察状态，不属于长期 durable truth |
 
 ## 核心对象与关系
 
 - 库是上层容器对象，定义对象关系与配置覆盖的作用域边界
-- 库配置是库级配置对象，承载启用索引线列表、刷新策略、默认摄取 / 搜索 / 索引控制项与库级提供方覆盖
+- 库配置是库级配置对象，承载启用索引线列表、刷新策略、默认摄取 / 搜索 / 索引控制项与库级模型覆盖
 - 库来源根是边界入口对象，定义内容从何处进入某个库，并提供扫描覆盖边界、当前启用状态与 watcher 运行状态
 - 库来源根规则从属于单个来源根，承载包含 / 排除规则与可选扩展名过滤记录；本专题不固定 DSL 或优先级算法
 - 源内容是核心主对象，承载库内原始内容的稳定身份，并记录来源类型、摄取模式与可用性 / 脱离覆盖状态
 - 视觉单元是从属于源内容的核心对象，表示实际参与检索的视觉单元
 - 派生资产是独立、可复用的核心对象，表示处理流程产出的中间或结果资产
 - 内容版本是桥接对象，用于承载某次内容处理结果的版本边界
-- 激活索引引用、提供方绑定状态、任务状态、搜索历史记录与收藏记录都是围绕核心对象运行的稳定状态记录，不重新定义核心对象身份
+- 激活索引引用、provider/model 选择状态、任务状态、搜索历史记录与收藏记录都是围绕核心对象运行的稳定状态记录，不重新定义核心对象身份
 
 ## 对象关系
 
 - 库是库配置、库来源根、源内容与各类辅助状态的作用域边界
-- 库配置与单个库一一对应；其中的 `enabled_index_lines`、摄取 / 搜索 / 索引默认值与提供方覆盖属于配置状态，不属于检索载荷本身
+- 库配置与单个库一一对应；其中的 `enabled_index_lines`、摄取 / 搜索 / 索引默认值与模型覆盖属于配置状态，不属于检索载荷本身
 - 库来源根属于单个库；同一库可拥有多个来源根，它们共同参与扫描覆盖范围的形成，`enabled`、`status`、`watch_state` 与 `coverage_summary` 都属于该来源根的结构化状态
 - 库来源根规则属于单个库来源根，只影响覆盖范围，不决定源内容身份
 - 源内容属于单个库；同库内多个路径或多个来源根可以通过归属/引用关系指向同一源内容，来源类型、摄取模式与可用性 / 脱离覆盖状态属于该源内容的结构化状态
@@ -84,7 +84,8 @@
 - 派生资产与视觉单元是多对多关系；同一派生资产可以被多个视觉单元引用，同一视觉单元也可以关联多个派生资产
 - 内容版本连接某次处理结果与上述对象关系网，并可被激活索引引用、任务状态等状态记录引用
 - 激活索引引用把某个库某条索引线映射到当前 active 或 staging 索引实例；摄取与索引生命周期由 [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义
-- 提供方绑定状态为索引构建与搜索提供配置承载面；能力与解析顺序由 [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义
+- provider config、全局模型默认与库级模型覆盖为索引构建与搜索提供配置承载面；解析顺序与运行时模型事实由 [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义
+- 当前切片中的 provider config 是正式结构化状态；当前唯一稳定配置粒度固定为按 index line 选择模型
 
 ## 身份与唯一性
 
@@ -103,7 +104,7 @@
 - 当视频查询使用指定时间范围作为实际输入时，该时间范围在状态模型上也属于查询输入的定位摘要，而不是后续由搜索端隐式推导出的派生状态
 - 派生资产的复用边界由输入内容、资产类型与规格共同决定，而不是由单个源内容或单个视觉单元私有
 - 内容版本标识某次处理结果的版本边界，不重新定义源内容、视觉单元或派生资产的基础身份
-- 激活索引引用、提供方绑定状态、任务状态、搜索历史记录、收藏记录与临时查询资产都是状态记录；它们的稳定标识只服务于记录归属与引用，不扩展核心对象身份规则
+- 激活索引引用、provider/model 选择状态、任务状态、搜索历史记录、收藏记录与临时查询资产都是状态记录；它们的稳定标识只服务于记录归属与引用，不扩展核心对象身份规则
 
 ## 替换与复用原则
 
@@ -116,8 +117,9 @@
 
 ## 跨重启 durable 子集
 
-- 当前切片跨 restart 恢复的最小 durable truth 固定为：`libraries`、`library_configs`、`library_source_roots`、`library_source_root_rules`、`sources`、`visual_units` 与 `active_index_references`
+- 当前切片跨 restart 恢复的最小 durable truth 固定为：`libraries`、`library_configs`、`library_source_roots`、`library_source_root_rules`、`sources`、`visual_units`、`active_index_references`、`provider_configs`、`global_model_defaults` 与 `library_model_overrides`
 - `jobs`、`latest_job_id`、`job_order`、临时查询资产、search history、favorites 与 watcher runtime scratch 不属于当前 restart-durable subset
+- provider probe cache 与 resolved model 摘要不属于当前 restart-durable subset；应用重启后需要重新探测或重新生成观察快照
 - 来源根的 `watch_state`、debounce 队列、待处理路径集合与最近一次运行时错误属于 runtime scratch；应用启动后需要重新播种，而不是按上次进程内状态直接恢复
 - 激活索引引用是否真正可搜索，除结构化记录外，还取决于检索后端中对应 stable collection 是否仍存在
 
@@ -129,7 +131,7 @@
 
 | 状态类别 | 主要实体 / 记录 | 事实源 | 可写组件 | 非事实源表示 | 丢失后处理 |
 | --- | --- | --- | --- | --- | --- |
-| 配置与设置 | 库配置、库来源根规则、提供方绑定状态 | 结构化存储 | Rust 主服务 | 前端表单状态、进程内配置快照、sidecar 运行参数副本 | 不自动重建，应通过备份或重新配置恢复 |
+| 配置与设置 | 库配置、库来源根规则、provider configs、全局模型默认与库级模型覆盖 | 结构化存储 | Rust 主服务 | 前端表单状态、进程内配置快照、sidecar 运行参数副本 | 不自动重建，应通过备份或重新配置恢复 |
 | 核心结构化对象 | 库、库来源根、源内容、视觉单元、内容版本 | 结构化存储 | Rust 主服务 | 读取模型、导出结果、调试视图 | 可部分重建，但不作为常规恢复路径 |
 | 原始文件引用与覆盖边界 | 来源根定位、接入模式记录、归属/引用关系记录、扫描覆盖快照 | 结构化存储 | Rust 主服务 | 文件选择状态、临时路径列表、一次性扫描结果 | 可通过重新扫描或重新导入恢复 |
 | 检索索引与向量状态 | 检索后端中的 active / staging 索引载荷 | 检索后端 | Rust 主服务 | 激活索引引用、统计信息、调试视图 | 可通过重新编码与重建索引恢复 |
@@ -152,7 +154,7 @@
 - [001-architecture](../001-architecture/spec.md) 定义组件边界、编排关系与稳定交互路径
 - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 承接正式来源类型、摄取流程、内容版本、索引引用与激活索引的生命周期语义
 - [004-search](../004-search/spec.md) 承接搜索语义、结果语义与查询期状态约束
-- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 承接提供方能力、提供方绑定、解析顺序与运行时探测语义
+- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 承接 provider config、模型选择、解析顺序与运行时探测语义
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 承接任务执行、运行时生命周期、健康摘要与清理任务的执行语义
 - [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 承接主结构化存储、检索命名空间、派生资产存储区与迁移版本的物理持久化语义
 - [008-ui-ux](../008-ui-ux/spec.md) 承接库、来源根、配置、任务、收藏与搜索历史的应用入口、管理体验与控制面接口族

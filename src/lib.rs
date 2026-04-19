@@ -3,6 +3,7 @@ mod http;
 mod indexing;
 mod model;
 mod persistence;
+mod provider;
 mod qdrant;
 mod query_assets;
 mod runtime;
@@ -20,6 +21,8 @@ pub(crate) use indexing::*;
 pub(crate) use model::*;
 #[allow(unused_imports)]
 pub(crate) use persistence::*;
+#[allow(unused_imports)]
+pub(crate) use provider::*;
 #[allow(unused_imports)]
 pub(crate) use qdrant::*;
 #[allow(unused_imports)]

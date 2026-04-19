@@ -31,8 +31,8 @@ impl AppState {
         })
     }
 
-    pub(crate) fn prepare_text_search(
-        &self,
+    pub(crate) async fn prepare_text_search(
+        &mut self,
         request: &TextSearchRequest,
     ) -> Result<SearchPlan, ApiError> {
         if request.text.trim().is_empty() {
@@ -43,26 +43,30 @@ impl AppState {
         }
         self.prepare_search_scope(
             request.library_id.trim(),
+            QUERY_KIND_TEXT,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
         )
+        .await
     }
 
-    pub(crate) fn prepare_image_search(
-        &self,
+    pub(crate) async fn prepare_image_search(
+        &mut self,
         request: &ImageSearchRequest,
     ) -> Result<(SearchPlan, ResolvedImageQueryInput), ApiError> {
         let plan = self.prepare_search_scope(
             request.library_id.trim(),
+            QUERY_KIND_IMAGE,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
-        )?;
+        )
+        .await?;
 
         match request.image_input.kind.as_str() {
             "temp_asset" => {
@@ -119,18 +123,20 @@ impl AppState {
         }
     }
 
-    pub(crate) fn prepare_video_search(
-        &self,
+    pub(crate) async fn prepare_video_search(
+        &mut self,
         request: &VideoSearchRequest,
     ) -> Result<(SearchPlan, ResolvedVideoQueryInput), ApiError> {
         let plan = self.prepare_search_scope(
             request.library_id.trim(),
+            QUERY_KIND_VIDEO,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
-        )?;
+        )
+        .await?;
 
         match request.video_input.kind.as_str() {
             "temp_asset" => {
@@ -239,18 +245,20 @@ impl AppState {
         }
     }
 
-    pub(crate) fn prepare_document_search(
-        &self,
+    pub(crate) async fn prepare_document_search(
+        &mut self,
         request: &DocumentSearchRequest,
     ) -> Result<(SearchPlan, ResolvedDocumentQueryInput), ApiError> {
         let plan = self.prepare_search_scope(
             request.library_id.trim(),
+            QUERY_KIND_DOCUMENT,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
             request.debug,
             request.target_index_lines.as_ref(),
-        )?;
+        )
+        .await?;
 
         match request.document_input.kind.as_str() {
             "temp_asset" => {
@@ -321,9 +329,10 @@ impl AppState {
         }
     }
 
-    pub(crate) fn prepare_search_scope(
-        &self,
+    pub(crate) async fn prepare_search_scope(
+        &mut self,
         library_id: &str,
+        query_kind: &str,
         filters: Option<&Value>,
         top_k: Option<usize>,
         cursor: Option<&str>,
@@ -334,15 +343,20 @@ impl AppState {
             .libraries
             .get(library_id)
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        let resolved_library_id = library.id.clone();
+        let collection_name = library.collection_name.clone();
+        let enabled_index_lines = library.config.enabled_index_lines.clone();
+        let active_index_lines = library.active_index_lines.clone();
+        let active_visual_unit_ids = library.visual_units.keys().cloned().collect::<BTreeSet<_>>();
+        let latest_job_id = library.latest_job_id.clone();
 
         let target_index_lines = target_index_lines
             .cloned()
             .map(|lines| normalize_index_lines(Some(lines)))
             .filter(|lines| !lines.is_empty())
-            .unwrap_or_else(|| library.config.enabled_index_lines.clone());
+            .unwrap_or_else(|| enabled_index_lines.clone());
 
-        let enabled_lines: BTreeSet<_> =
-            library.config.enabled_index_lines.iter().cloned().collect();
+        let enabled_lines: BTreeSet<_> = enabled_index_lines.iter().cloned().collect();
         let invalid_target_lines: Vec<_> = target_index_lines
             .iter()
             .filter(|line| !enabled_lines.contains(*line))
@@ -358,9 +372,9 @@ impl AppState {
 
         let not_ready_lines: Vec<_> = target_index_lines
             .iter()
-            .filter(|line| !library.active_index_lines.contains(*line))
+            .filter(|line| !active_index_lines.contains(*line))
             .map(|line| {
-                let job_summary = library.latest_job_id.as_ref().and_then(|job_id| {
+                let job_summary = latest_job_id.as_ref().and_then(|job_id| {
                     self.jobs.get(job_id).map(|job| {
                         json!({
                             "job_id": job.snapshot.job_id,
@@ -385,12 +399,23 @@ impl AppState {
             ));
         }
 
+        let resolved_query_model = self
+            .resolve_query_model_for_execution(&resolved_library_id, query_kind)
+            .await?;
+        let mut resolved_index_models = BTreeMap::new();
+        for index_line in &target_index_lines {
+            let selection = self
+                .resolve_index_model_for_execution(&resolved_library_id, index_line)
+                .await?;
+            resolved_index_models.insert(index_line.clone(), selection);
+        }
+
         let cursor_offset = decode_search_cursor_offset(cursor)?;
         let time_range_filter = resolve_time_range_filter(filters)?;
 
         Ok(SearchPlan {
-            library_id: library.id.clone(),
-            collection_name: library.collection_name.clone(),
+            library_id: resolved_library_id,
+            collection_name,
             top_k: top_k.unwrap_or(10).max(1),
             cursor_offset,
             kind_filter: read_string_filter(filters, "visual_unit.kind")
@@ -399,7 +424,9 @@ impl AppState {
             source_type_filter: read_string_filter(filters, "source_type"),
             time_range_filter,
             target_index_lines: target_index_lines.clone(),
-            active_visual_unit_ids: library.visual_units.keys().cloned().collect(),
+            active_visual_unit_ids,
+            resolved_query_model,
+            resolved_index_models,
             debug: debug.unwrap_or(false),
         })
     }

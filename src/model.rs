@@ -1,7 +1,9 @@
 use crate::api::{
-    ImportAcceptedItem, ImportRejectedItem, JobSnapshot, LibraryConfigPayload,
-    SourceRootCoverageSummary, SourceRootLastAction, SourceRootRulesPayload, VisualUnitSnapshot,
-    VisualUnitSummary,
+    ImportAcceptedItem, ImportRejectedItem, JobSnapshot,
+    LibraryConfigPayload, ModelOverridesPayload, ProviderConfigSnapshot,
+    SourceRootCoverageSummary, ResolvedModelSelectionPayload,
+    SourceRootLastAction,
+    SourceRootRulesPayload, VisualUnitSnapshot, VisualUnitSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,12 +17,42 @@ pub(crate) enum ActiveNamespaceProbeResult {
     LegacyDirectCollection,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ProviderConfigRecord {
+    pub(crate) provider_id: String,
+    pub(crate) display_name: String,
+    pub(crate) provider_kind: String,
+    pub(crate) enabled: bool,
+    pub(crate) base_url: Option<String>,
+    pub(crate) readonly_reason: Option<String>,
+}
+
+impl ProviderConfigRecord {
+    pub(crate) fn snapshot(&self) -> ProviderConfigSnapshot {
+        ProviderConfigSnapshot {
+            provider_id: self.provider_id.clone(),
+            display_name: self.display_name.clone(),
+            provider_kind: self.provider_kind.clone(),
+            enabled: self.enabled,
+            base_url: self.base_url.clone(),
+            readonly_reason: self.readonly_reason.clone(),
+            probe: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedExecutionModelSelection {
+    pub(crate) summary: ResolvedModelSelectionPayload,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct LibraryRecord {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) collection_name: String,
     pub(crate) config: LibraryConfigPayload,
+    pub(crate) model_overrides: ModelOverridesPayload,
     pub(crate) source_roots: BTreeMap<String, SourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
     pub(crate) sources: BTreeMap<String, SourceRecord>,
@@ -379,6 +411,8 @@ pub(crate) struct SearchPlan {
     pub(crate) time_range_filter: Option<SearchTimeRangeFilter>,
     pub(crate) target_index_lines: Vec<String>,
     pub(crate) active_visual_unit_ids: BTreeSet<String>,
+    pub(crate) resolved_query_model: ResolvedExecutionModelSelection,
+    pub(crate) resolved_index_models: BTreeMap<String, ResolvedExecutionModelSelection>,
     pub(crate) debug: bool,
 }
 

@@ -1,4 +1,11 @@
-use crate::{api::ApiError, model::VisualUnitRecord, SIDECAR_REQUEST_TIMEOUT_SECS};
+use crate::{
+    api::{ApiError, ProviderProbeSnapshot},
+    model::{ProviderConfigRecord, VisualUnitRecord},
+    provider::{
+        current_rfc3339_timestamp, ProviderRuntimeModelSnapshot,
+    },
+    SIDECAR_REQUEST_TIMEOUT_SECS,
+};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -36,6 +43,11 @@ pub(crate) struct QueryEmbeddingResult {
     pub(crate) pooled_vector: Vec<f32>,
 }
 
+pub(crate) struct LocalSidecarProviderSnapshot {
+    pub(crate) probe: ProviderProbeSnapshot,
+    pub(crate) runtime_model: ProviderRuntimeModelSnapshot,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct SidecarErrorEnvelope {
     error: SidecarErrorPayload,
@@ -51,6 +63,7 @@ pub(crate) struct SidecarErrorPayload {
 
 pub(crate) async fn embed_documents(
     visual_units: &[VisualUnitRecord],
+    provider_context: Option<Value>,
 ) -> Result<Vec<SidecarEmbeddingItem>, IndexingError> {
     let documents: Vec<_> = visual_units
         .iter()
@@ -61,12 +74,15 @@ pub(crate) async fn embed_documents(
             })
         })
         .collect();
-    let payload = json!({
+    let mut payload = json!({
         "operation_kind": "document_embedding",
         "inputs": {
             "documents": documents,
         },
     });
+    if let Some(provider_context) = provider_context {
+        payload["provider_context"] = provider_context;
+    }
 
     let response = sidecar_client()
         .post(format!(
@@ -181,13 +197,19 @@ pub(crate) async fn embed_documents(
     Ok(envelope.data.embeddings)
 }
 
-pub(crate) async fn embed_query_text(text: &str) -> Result<QueryEmbeddingResult, ApiError> {
-    let payload = json!({
+pub(crate) async fn embed_query_text(
+    text: &str,
+    provider_context: Option<Value>,
+) -> Result<QueryEmbeddingResult, ApiError> {
+    let mut payload = json!({
         "operation_kind": "query_embedding",
         "inputs": {
             "queries": [text],
         },
     });
+    if let Some(provider_context) = provider_context {
+        payload["provider_context"] = provider_context;
+    }
     let response = sidecar_client()
         .post(format!("{}/embed", sidecar_base_url()?))
         .json(&payload)
@@ -245,8 +267,9 @@ pub(crate) async fn embed_query_text(text: &str) -> Result<QueryEmbeddingResult,
 pub(crate) async fn embed_query_image(
     path: &str,
     locator: Option<Value>,
+    provider_context: Option<Value>,
 ) -> Result<QueryEmbeddingResult, ApiError> {
-    let payload = json!({
+    let mut payload = json!({
         "operation_kind": "image_query_embedding",
         "inputs": {
             "images": [{
@@ -255,6 +278,9 @@ pub(crate) async fn embed_query_image(
             }],
         },
     });
+    if let Some(provider_context) = provider_context {
+        payload["provider_context"] = provider_context;
+    }
     let response = sidecar_client()
         .post(format!("{}/embed", sidecar_base_url()?))
         .json(&payload)
@@ -313,8 +339,9 @@ pub(crate) async fn embed_query_image(
 pub(crate) async fn embed_query_video(
     path: &str,
     locator: Option<Value>,
+    provider_context: Option<Value>,
 ) -> Result<QueryEmbeddingResult, ApiError> {
-    let payload = json!({
+    let mut payload = json!({
         "operation_kind": "video_query_embedding",
         "inputs": {
             "videos": [{
@@ -323,6 +350,9 @@ pub(crate) async fn embed_query_video(
             }],
         },
     });
+    if let Some(provider_context) = provider_context {
+        payload["provider_context"] = provider_context;
+    }
     let response = sidecar_client()
         .post(format!("{}/embed", sidecar_base_url()?))
         .json(&payload)
@@ -381,8 +411,9 @@ pub(crate) async fn embed_query_video(
 pub(crate) async fn embed_query_document(
     path: &str,
     locator: Option<Value>,
+    provider_context: Option<Value>,
 ) -> Result<QueryEmbeddingResult, ApiError> {
-    let payload = json!({
+    let mut payload = json!({
         "operation_kind": "document_query_embedding",
         "inputs": {
             "documents": [{
@@ -391,6 +422,9 @@ pub(crate) async fn embed_query_document(
             }],
         },
     });
+    if let Some(provider_context) = provider_context {
+        payload["provider_context"] = provider_context;
+    }
     let response = sidecar_client()
         .post(format!("{}/embed", sidecar_base_url()?))
         .json(&payload)
@@ -499,4 +533,172 @@ pub(crate) fn parse_sidecar_error_message(body: &str) -> Option<String> {
                 envelope.error.code, envelope.error.message
             )
         })
+}
+
+pub(crate) async fn probe_local_sidecar_provider(
+    _provider: &ProviderConfigRecord,
+) -> LocalSidecarProviderSnapshot {
+    let now = current_rfc3339_timestamp();
+    let fallback_runtime_model = crate::provider::fallback_local_sidecar_runtime_model();
+    let base_url = match sidecar_base_url() {
+        Ok(base_url) => base_url,
+        Err(error) => {
+            return LocalSidecarProviderSnapshot {
+                probe: ProviderProbeSnapshot {
+                    status: "runtime_unavailable".to_string(),
+                    message: error.payload.message,
+                    last_probed_at: Some(now),
+                },
+                runtime_model: fallback_runtime_model,
+            };
+        }
+    };
+
+    let response = match Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("sidecar probe client should be constructible")
+        .get(format!("{base_url}/capabilities"))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return LocalSidecarProviderSnapshot {
+                probe: ProviderProbeSnapshot {
+                    status: "runtime_unavailable".to_string(),
+                    message: format!("Sidecar capabilities probe failed: {error}"),
+                    last_probed_at: Some(now),
+                },
+                runtime_model: fallback_runtime_model,
+            };
+        }
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return LocalSidecarProviderSnapshot {
+            probe: ProviderProbeSnapshot {
+                status: "runtime_unavailable".to_string(),
+                message: parse_sidecar_error_message(&body)
+                    .unwrap_or_else(|| format!("Sidecar capabilities probe failed with {status}.")),
+                last_probed_at: Some(now),
+            },
+            runtime_model: fallback_runtime_model,
+        };
+    }
+
+    let payload: Value = match response.json().await {
+        Ok(payload) => payload,
+        Err(error) => {
+            return LocalSidecarProviderSnapshot {
+                probe: ProviderProbeSnapshot {
+                    status: "runtime_unavailable".to_string(),
+                    message: format!("Sidecar capabilities probe returned invalid JSON: {error}"),
+                    last_probed_at: Some(now),
+                },
+                runtime_model: fallback_runtime_model,
+            };
+        }
+    };
+
+    let runtime_model = payload
+        .get("operations")
+        .and_then(Value::as_array)
+        .and_then(|operations| {
+            operations.iter().find_map(|operation| {
+                operation.get("model").map(|model| ProviderRuntimeModelSnapshot {
+                    model_id: model
+                        .get("model_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| fallback_runtime_model.model_id.clone()),
+                    model_revision: model
+                        .get("revision")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| fallback_runtime_model.model_revision.clone()),
+                })
+            })
+        })
+        .unwrap_or_else(|| fallback_runtime_model.clone());
+
+    let can_service = payload
+        .pointer("/availability/can_service")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !can_service {
+        let message = payload
+            .pointer("/availability/load_error")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                "local_sidecar runtime reported that it cannot currently service requests."
+                    .to_string()
+            });
+        return LocalSidecarProviderSnapshot {
+            probe: ProviderProbeSnapshot {
+                status: "runtime_unavailable".to_string(),
+                message,
+                last_probed_at: Some(now),
+            },
+            runtime_model,
+        };
+    }
+
+    let supported_operations = payload
+        .get("operations")
+        .and_then(Value::as_array)
+        .map(|operations| {
+            operations
+                .iter()
+                .filter(|item| item.get("supported").and_then(Value::as_bool).unwrap_or(false))
+                .filter_map(|item| item.get("operation_kind").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let missing_operations = required_local_sidecar_operations()
+        .into_iter()
+        .filter(|operation| !supported_operations.iter().any(|item| item == operation))
+        .collect::<Vec<_>>();
+    if !missing_operations.is_empty() {
+        return LocalSidecarProviderSnapshot {
+            probe: ProviderProbeSnapshot {
+                status: "runtime_unavailable".to_string(),
+                message: format!(
+                    "local_sidecar runtime is missing required operations: {}.",
+                    missing_operations.join(", ")
+                ),
+                last_probed_at: Some(now),
+            },
+            runtime_model,
+        };
+    }
+
+    LocalSidecarProviderSnapshot {
+        probe: ProviderProbeSnapshot {
+            status: "available".to_string(),
+            message: format!(
+                "local_sidecar runtime is available for {} required operation(s).",
+                required_local_sidecar_operations().len()
+            ),
+            last_probed_at: Some(now),
+        },
+        runtime_model,
+    }
+}
+
+fn required_local_sidecar_operations() -> Vec<String> {
+    vec![
+        "query_embedding".to_string(),
+        "image_query_embedding".to_string(),
+        "video_query_embedding".to_string(),
+        "document_query_embedding".to_string(),
+        "document_embedding".to_string(),
+    ]
 }

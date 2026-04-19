@@ -1,4 +1,4 @@
-export type WorkspaceKind = "search" | "inventory";
+export type WorkspaceKind = "search" | "inventory" | "settings";
 export type SearchMode = "text" | "image" | "video" | "document";
 export type VisualUnitKind = "image" | "document_page" | "video_segment" | string;
 export type Locator = Record<string, string | number | boolean | null | undefined>;
@@ -36,6 +36,87 @@ export interface LibraryIndexLineStatus {
 export interface LibraryCounts {
   accepted_items: number;
   pending_jobs: number;
+}
+
+export interface ProviderProbeSnapshot {
+  status: string;
+  message: string;
+  last_probed_at?: string | null;
+}
+
+export interface ProviderConfigSnapshot {
+  provider_id: string;
+  display_name: string;
+  provider_kind: string;
+  enabled: boolean;
+  base_url?: string | null;
+  readonly_reason?: string | null;
+  probe?: ProviderProbeSnapshot | null;
+}
+
+export interface ProvidersListData {
+  providers: ProviderConfigSnapshot[];
+}
+
+export interface UpdateProviderConfigRequest {
+  enabled?: boolean;
+  base_url?: string;
+}
+
+export interface ModelCatalogEntry {
+  provider_id: string;
+  provider_kind: string;
+  model_id: string;
+  model_revision?: string | null;
+  supported_index_lines: string[];
+  editable: boolean;
+  status: string;
+  message: string;
+}
+
+export interface ModelCatalogData {
+  entries: ModelCatalogEntry[];
+}
+
+export interface ModelSelectionPayload {
+  provider_id: string;
+  model_id: string;
+}
+
+export interface ModelSelectionOverridePayload {
+  provider_id?: string | null;
+  model_id?: string | null;
+}
+
+export interface ModelDefaultsPayload {
+  index_lines: Record<string, ModelSelectionPayload>;
+}
+
+export interface ModelOverridesPayload {
+  index_lines: Record<string, ModelSelectionOverridePayload>;
+}
+
+export interface GlobalModelDefaultsData {
+  defaults: ModelDefaultsPayload;
+}
+
+export interface LibraryModelOverridesData {
+  overrides: ModelOverridesPayload;
+}
+
+export interface ResolvedModelSelectionPayload {
+  binding_source: string;
+  provider_id: string;
+  provider_kind: string;
+  model_id: string;
+  model_revision?: string | null;
+  status: string;
+  message: string;
+  last_probed_at?: string | null;
+}
+
+export interface ResolvedModelsData {
+  index_lines: Record<string, ResolvedModelSelectionPayload>;
 }
 
 export interface LibrarySnapshot {
@@ -281,6 +362,11 @@ export interface AppState {
   jobs: JobSnapshot[];
   videoSources: VideoSourceItem[];
   sourceRoots: SourceRootSnapshot[];
+  providerConfigs: ProviderConfigSnapshot[];
+  modelCatalog: ModelCatalogEntry[];
+  globalModelDefaults: ModelDefaultsPayload;
+  libraryModelOverrides: ModelOverridesPayload;
+  resolvedModels: ResolvedModelsData | null;
   activeWorkspace: WorkspaceKind;
   inventoryFilters: InventoryFilters;
   searchFilters: SearchFilters;
@@ -319,6 +405,9 @@ export interface AppState {
   selectedVisualUnit: VisualUnitDetailData | null;
   searchOutcome: SearchOutcomeState | null;
   lastSearchRequest: SearchRequestSnapshot | null;
+  editingProviderId: string;
+  providerEnabledDraft: boolean;
+  providerBaseUrlDraft: string;
   globalError: ApiErrorPayload | null;
   statusMessage: string | null;
 }

@@ -2,6 +2,7 @@ use super::*;
 use crate::*;
 use lopdf::{dictionary, Document, Object, Stream};
 use serde_json::json;
+use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, process::Command};
 
@@ -220,14 +221,13 @@ fn restart_load_missing_collection_marks_index_not_ready() {
         )
         .unwrap();
 
-    let loaded = load_state_with_qdrant_namespaces(&store_path, &[], &[]);
+    let mut loaded = load_state_with_qdrant_namespaces(&store_path, &[], &[]);
     let loaded_library = loaded.libraries.get(&library.id).unwrap();
     assert!(!loaded_library
         .active_index_lines
         .contains(MULTIVECTOR_INDEX_LINE));
 
-    let error = loaded
-        .prepare_text_search(&TextSearchRequest {
+    let error = run_async(loaded.prepare_text_search(&TextSearchRequest {
             library_id: library.id.clone(),
             text: "chart".to_string(),
             filters: None,
@@ -235,8 +235,8 @@ fn restart_load_missing_collection_marks_index_not_ready() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
     assert_eq!(error.payload.code, "not_ready");
 
     let active_alias = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
@@ -373,7 +373,7 @@ fn restart_load_reseeds_watcher_runtime_fields_without_auto_queueing_jobs() {
 
 #[test]
 fn source_root_refresh_activates_files_and_rule_update_moves_sources_out_of_scope() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "source-root-refresh".to_string(),
@@ -501,7 +501,7 @@ fn source_root_refresh_activates_files_and_rule_update_moves_sources_out_of_scop
 
 #[test]
 fn source_root_refresh_marks_deleted_files_invalidated() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "source-root-invalidation".to_string(),
@@ -578,8 +578,7 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
         Some("not_found")
     );
 
-    let search_plan = state
-        .prepare_text_search(&TextSearchRequest {
+    let search_plan = run_async(state.prepare_text_search(&TextSearchRequest {
             library_id: library.id.clone(),
             text: "chart".to_string(),
             filters: None,
@@ -587,8 +586,8 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
     assert!(search_plan.active_visual_unit_ids.is_empty());
 
     let _ = fs::remove_dir_all(root_dir);
@@ -596,7 +595,7 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
 
 #[test]
 fn watcher_poll_debounces_into_incremental_refresh_queue() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "watcher-refresh".to_string(),
@@ -648,7 +647,7 @@ fn watcher_poll_debounces_into_incremental_refresh_queue() {
 
 #[test]
 fn disabled_source_root_skips_watcher_and_rejects_manual_refresh() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "disabled-source-root".to_string(),
@@ -706,7 +705,7 @@ fn disabled_source_root_skips_watcher_and_rejects_manual_refresh() {
 #[test]
 fn build_search_response_returns_qdrant_results_after_import() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "ready-search".to_string(),
@@ -764,8 +763,7 @@ fn build_search_response_returns_qdrant_results_after_import() {
             )
             .unwrap();
 
-    let plan = state
-        .prepare_text_search(&TextSearchRequest {
+    let plan = run_async(state.prepare_text_search(&TextSearchRequest {
             library_id: library.id.clone(),
             text: "report".to_string(),
             filters: None,
@@ -773,8 +771,8 @@ fn build_search_response_returns_qdrant_results_after_import() {
             cursor: None,
             debug: Some(true),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
 
     let response = build_search_response(
         plan,
@@ -826,8 +824,12 @@ fn build_search_response_returns_qdrant_results_after_import() {
         .starts_with("http://127.0.0.1:53210/libraries/")));
     assert_eq!(response.debug.as_ref().unwrap()["repr_kind"], "multivector");
     assert_eq!(
-        response.debug.as_ref().unwrap()["provider"]["model_profile"],
-        "local_python"
+        response.debug.as_ref().unwrap()["resolved_model"]["provider_kind"],
+        LOCAL_SIDECAR_PROVIDER_KIND
+    );
+    assert_eq!(
+        response.debug.as_ref().unwrap()["resolved_model"]["provider_id"],
+        LOCAL_SIDECAR_PROVIDER_ID
     );
     assert_eq!(
         response.debug.as_ref().unwrap()["index_lines"][0]["index_line"],
@@ -855,6 +857,8 @@ fn build_search_response_supports_cursor_pagination() {
             "vu_000001".to_string(),
             "vu_000002".to_string(),
         ]),
+        resolved_query_model: available_provider_selection(),
+        resolved_index_models: default_resolved_index_providers(),
         debug: true,
     };
     let candidates = vec![
@@ -939,6 +943,8 @@ fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_fil
                 "vu_000002".to_string(),
                 "vu_000003".to_string(),
             ]),
+            resolved_query_model: available_provider_selection(),
+            resolved_index_models: default_resolved_index_providers(),
             debug: false,
         },
         QueryEmbeddingResult {
@@ -993,7 +999,7 @@ fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_fil
 #[test]
 fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "search-filter-validation".to_string(),
@@ -1009,8 +1015,7 @@ fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
         .active_index_lines
         .insert(MULTIVECTOR_INDEX_LINE.to_string());
 
-    let invalid_cursor = state
-        .prepare_text_search(&TextSearchRequest {
+    let invalid_cursor = run_async(state.prepare_text_search(&TextSearchRequest {
             library_id: library.id.clone(),
             text: "report".to_string(),
             filters: None,
@@ -1018,16 +1023,15 @@ fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
             cursor: Some("bogus-cursor".to_string()),
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
     assert_eq!(invalid_cursor.payload.code, "validation_failed");
     assert_eq!(
         invalid_cursor.payload.details.as_ref().unwrap()["field"],
         "cursor"
     );
 
-    let invalid_time_range = state
-        .prepare_text_search(&TextSearchRequest {
+    let invalid_time_range = run_async(state.prepare_text_search(&TextSearchRequest {
             library_id: library.id,
             text: "report".to_string(),
             filters: Some(json!({
@@ -1040,8 +1044,8 @@ fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
     assert_eq!(invalid_time_range.payload.code, "validation_failed");
     assert_eq!(
         invalid_time_range.payload.details.as_ref().unwrap()["field"],
@@ -1052,7 +1056,7 @@ fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
 #[test]
 fn prepare_image_search_requires_existing_temp_asset() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "image-search".to_string(),
@@ -1083,8 +1087,7 @@ fn prepare_image_search_requires_existing_temp_asset() {
         .register_temp_query_asset(&library.id, staged)
         .unwrap();
 
-    let (plan, temp_asset) = state
-        .prepare_image_search(&ImageSearchRequest {
+    let (plan, temp_asset) = run_async(state.prepare_image_search(&ImageSearchRequest {
             library_id: library.id.clone(),
             image_input: QueryImageInputRequest {
                 kind: "temp_asset".to_string(),
@@ -1096,8 +1099,8 @@ fn prepare_image_search_requires_existing_temp_asset() {
             cursor: None,
             debug: Some(true),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
 
     assert_eq!(plan.library_id, library.id);
     match temp_asset {
@@ -1110,8 +1113,7 @@ fn prepare_image_search_requires_existing_temp_asset() {
         }
     }
 
-    let missing = state
-        .prepare_image_search(&ImageSearchRequest {
+    let missing = run_async(state.prepare_image_search(&ImageSearchRequest {
             library_id: library.id.clone(),
             image_input: QueryImageInputRequest {
                 kind: "temp_asset".to_string(),
@@ -1123,8 +1125,8 @@ fn prepare_image_search_requires_existing_temp_asset() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(missing.payload.code, "not_found");
 
@@ -1133,7 +1135,7 @@ fn prepare_image_search_requires_existing_temp_asset() {
 
 #[test]
 fn prepare_image_search_accepts_library_image_objects() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "image-search-library-object".to_string(),
@@ -1167,8 +1169,7 @@ fn prepare_image_search_accepts_library_image_objects() {
         .visual_units
         .insert(visual_unit.id.clone(), visual_unit.clone());
 
-    let (plan, input) = state
-        .prepare_image_search(&ImageSearchRequest {
+    let (plan, input) = run_async(state.prepare_image_search(&ImageSearchRequest {
             library_id: library.id.clone(),
             image_input: QueryImageInputRequest {
                 kind: "library_object".to_string(),
@@ -1180,8 +1181,8 @@ fn prepare_image_search_accepts_library_image_objects() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
 
     assert_eq!(plan.library_id, library.id);
     match input {
@@ -1199,7 +1200,7 @@ fn prepare_image_search_accepts_library_image_objects() {
 
 #[test]
 fn prepare_image_search_accepts_library_document_page_objects() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "document-page-query-object".to_string(),
@@ -1233,8 +1234,7 @@ fn prepare_image_search_accepts_library_document_page_objects() {
         .visual_units
         .insert(visual_unit.id.clone(), visual_unit.clone());
 
-    let (plan, input) = state
-        .prepare_image_search(&ImageSearchRequest {
+    let (plan, input) = run_async(state.prepare_image_search(&ImageSearchRequest {
             library_id: library.id.clone(),
             image_input: QueryImageInputRequest {
                 kind: "library_object".to_string(),
@@ -1246,8 +1246,8 @@ fn prepare_image_search_accepts_library_document_page_objects() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
 
     assert_eq!(plan.library_id, library.id);
     match input {
@@ -1265,7 +1265,7 @@ fn prepare_image_search_accepts_library_document_page_objects() {
 
 #[test]
 fn prepare_image_search_rejects_unsupported_library_object_query_images() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "unsupported-query-object".to_string(),
@@ -1301,8 +1301,7 @@ fn prepare_image_search_rejects_unsupported_library_object_query_images() {
             },
         );
 
-    let error = state
-        .prepare_image_search(&ImageSearchRequest {
+    let error = run_async(state.prepare_image_search(&ImageSearchRequest {
             library_id: library.id.clone(),
             image_input: QueryImageInputRequest {
                 kind: "library_object".to_string(),
@@ -1314,8 +1313,8 @@ fn prepare_image_search_rejects_unsupported_library_object_query_images() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "not_supported");
     let details = error.payload.details.unwrap();
@@ -1326,7 +1325,7 @@ fn prepare_image_search_rejects_unsupported_library_object_query_images() {
 #[test]
 fn get_temp_query_asset_rejects_expired_assets() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "expired-query-image".to_string(),
@@ -1371,7 +1370,7 @@ fn get_temp_query_asset_rejects_expired_assets() {
 #[test]
 fn prune_temp_query_assets_removes_expired_asset_records_and_files() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "prune-expired-query-image".to_string(),
@@ -1411,7 +1410,7 @@ fn prune_temp_query_assets_removes_expired_asset_records_and_files() {
 #[test]
 fn prune_temp_query_assets_removes_missing_asset_records() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "prune-missing-query-image".to_string(),
@@ -1445,7 +1444,7 @@ fn prune_temp_query_assets_removes_missing_asset_records() {
 
 #[test]
 fn import_paths_accepts_video_and_generates_video_segments() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "video-import".to_string(),
@@ -1489,7 +1488,7 @@ fn import_paths_accepts_video_and_generates_video_segments() {
 
 #[test]
 fn prepare_video_search_accepts_temp_assets_and_library_sources() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "video-search".to_string(),
@@ -1519,8 +1518,7 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
         .register_temp_query_video_asset(&library.id, staged)
         .unwrap();
 
-    let (plan, temp_input) = state
-        .prepare_video_search(&VideoSearchRequest {
+    let (plan, temp_input) = run_async(state.prepare_video_search(&VideoSearchRequest {
             library_id: library.id.clone(),
             video_input: QueryVideoInputRequest {
                 kind: "temp_asset".to_string(),
@@ -1534,8 +1532,8 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
     assert_eq!(plan.library_id, library.id);
     assert_eq!(temp_input.path, video_path.to_string_lossy());
     assert!(temp_input.locator.is_none());
@@ -1551,8 +1549,7 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
         .sources
         .insert(source.id.clone(), source.clone());
 
-    let (_, library_input) = state
-        .prepare_video_search(&VideoSearchRequest {
+    let (_, library_input) = run_async(state.prepare_video_search(&VideoSearchRequest {
             library_id: library.id.clone(),
             video_input: QueryVideoInputRequest {
                 kind: "library_object".to_string(),
@@ -1566,8 +1563,8 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
 
     assert_eq!(library_input.path, video_path.to_string_lossy());
     assert_eq!(
@@ -1580,7 +1577,7 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
 
 #[test]
 fn prepare_video_search_rejects_invalid_ranges() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "video-range-errors".to_string(),
@@ -1610,8 +1607,7 @@ fn prepare_video_search_rejects_invalid_ranges() {
         .register_temp_query_video_asset(&library.id, staged)
         .unwrap();
 
-    let error = state
-        .prepare_video_search(&VideoSearchRequest {
+    let error = run_async(state.prepare_video_search(&VideoSearchRequest {
             library_id: library.id.clone(),
             video_input: QueryVideoInputRequest {
                 kind: "temp_asset".to_string(),
@@ -1625,8 +1621,8 @@ fn prepare_video_search_rejects_invalid_ranges() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "validation_failed");
 
@@ -1636,7 +1632,7 @@ fn prepare_video_search_rejects_invalid_ranges() {
 #[test]
 fn prepare_video_search_rejects_expired_temp_assets() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "expired-query-video".to_string(),
@@ -1671,8 +1667,7 @@ fn prepare_video_search_rejects_expired_temp_assets() {
         .unwrap()
         .expires_at_ms = 0;
 
-    let error = state
-        .prepare_video_search(&VideoSearchRequest {
+    let error = run_async(state.prepare_video_search(&VideoSearchRequest {
             library_id: library.id.clone(),
             video_input: QueryVideoInputRequest {
                 kind: "temp_asset".to_string(),
@@ -1686,8 +1681,8 @@ fn prepare_video_search_rejects_expired_temp_assets() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "not_found");
 
@@ -1696,7 +1691,7 @@ fn prepare_video_search_rejects_expired_temp_assets() {
 
 #[test]
 fn prepare_video_search_rejects_non_video_library_sources() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "unsupported-video-query-source".to_string(),
@@ -1737,8 +1732,7 @@ fn prepare_video_search_rejects_non_video_library_sources() {
             },
         );
 
-    let error = state
-        .prepare_video_search(&VideoSearchRequest {
+    let error = run_async(state.prepare_video_search(&VideoSearchRequest {
             library_id: library.id.clone(),
             video_input: QueryVideoInputRequest {
                 kind: "library_object".to_string(),
@@ -1752,8 +1746,8 @@ fn prepare_video_search_rejects_non_video_library_sources() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "not_supported");
     let details = error.payload.details.unwrap();
@@ -1763,7 +1757,7 @@ fn prepare_video_search_rejects_non_video_library_sources() {
 
 #[test]
 fn prepare_video_search_accepts_library_video_segments() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "video-segment-query".to_string(),
@@ -1800,8 +1794,7 @@ fn prepare_video_search_accepts_library_video_segments() {
             },
         );
 
-    let (_, input) = state
-        .prepare_video_search(&VideoSearchRequest {
+    let (_, input) = run_async(state.prepare_video_search(&VideoSearchRequest {
             library_id: library.id.clone(),
             video_input: QueryVideoInputRequest {
                 kind: "library_object".to_string(),
@@ -1815,8 +1808,8 @@ fn prepare_video_search_accepts_library_video_segments() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
 
     assert_eq!(input.path, "/tmp/example.mp4");
     assert_eq!(input.locator.unwrap(), locator);
@@ -1824,7 +1817,7 @@ fn prepare_video_search_accepts_library_video_segments() {
 
 #[test]
 fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "video-segment-query-locator".to_string(),
@@ -1860,8 +1853,7 @@ fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
             },
         );
 
-    let error = state
-        .prepare_video_search(&VideoSearchRequest {
+    let error = run_async(state.prepare_video_search(&VideoSearchRequest {
             library_id: library.id.clone(),
             video_input: QueryVideoInputRequest {
                 kind: "library_object".to_string(),
@@ -1875,8 +1867,8 @@ fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "validation_failed");
 }
@@ -1884,7 +1876,7 @@ fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
 #[test]
 fn prepare_document_search_accepts_temp_assets_and_library_sources() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "document-search".to_string(),
@@ -1914,8 +1906,7 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
         .register_temp_query_document_asset(&library.id, staged)
         .unwrap();
 
-    let (plan, temp_input) = state
-        .prepare_document_search(&DocumentSearchRequest {
+    let (plan, temp_input) = run_async(state.prepare_document_search(&DocumentSearchRequest {
             library_id: library.id.clone(),
             document_input: QueryDocumentInputRequest {
                 kind: "temp_asset".to_string(),
@@ -1928,8 +1919,8 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
     assert_eq!(plan.library_id, library.id);
     assert_eq!(temp_input.path, pdf_path.to_string_lossy());
     assert!(temp_input.locator.is_none());
@@ -1945,8 +1936,7 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
         .sources
         .insert(source.id.clone(), source.clone());
 
-    let (_, library_input) = state
-        .prepare_document_search(&DocumentSearchRequest {
+    let (_, library_input) = run_async(state.prepare_document_search(&DocumentSearchRequest {
             library_id: library.id.clone(),
             document_input: QueryDocumentInputRequest {
                 kind: "library_object".to_string(),
@@ -1959,8 +1949,8 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap();
+        }))
+    .unwrap();
 
     assert_eq!(library_input.path, pdf_path.to_string_lossy());
     assert_eq!(
@@ -1974,7 +1964,7 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
 #[test]
 fn prepare_document_search_rejects_invalid_ranges() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "document-range-errors".to_string(),
@@ -2004,8 +1994,7 @@ fn prepare_document_search_rejects_invalid_ranges() {
         .register_temp_query_document_asset(&library.id, staged)
         .unwrap();
 
-    let error = state
-        .prepare_document_search(&DocumentSearchRequest {
+    let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
             library_id: library.id.clone(),
             document_input: QueryDocumentInputRequest {
                 kind: "temp_asset".to_string(),
@@ -2018,8 +2007,8 @@ fn prepare_document_search_rejects_invalid_ranges() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "validation_failed");
 
@@ -2029,7 +2018,7 @@ fn prepare_document_search_rejects_invalid_ranges() {
 #[test]
 fn prepare_document_search_rejects_expired_temp_assets() {
     set_test_app_env();
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "expired-query-document".to_string(),
@@ -2064,8 +2053,7 @@ fn prepare_document_search_rejects_expired_temp_assets() {
         .unwrap()
         .expires_at_ms = 0;
 
-    let error = state
-        .prepare_document_search(&DocumentSearchRequest {
+    let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
             library_id: library.id.clone(),
             document_input: QueryDocumentInputRequest {
                 kind: "temp_asset".to_string(),
@@ -2078,8 +2066,8 @@ fn prepare_document_search_rejects_expired_temp_assets() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "not_found");
 
@@ -2088,7 +2076,7 @@ fn prepare_document_search_rejects_expired_temp_assets() {
 
 #[test]
 fn prepare_document_search_rejects_non_pdf_library_sources() {
-    let mut state = AppState::default();
+    let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
             name: "unsupported-document-query-source".to_string(),
@@ -2129,8 +2117,7 @@ fn prepare_document_search_rejects_non_pdf_library_sources() {
             },
         );
 
-    let error = state
-        .prepare_document_search(&DocumentSearchRequest {
+    let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
             library_id: library.id.clone(),
             document_input: QueryDocumentInputRequest {
                 kind: "library_object".to_string(),
@@ -2143,8 +2130,8 @@ fn prepare_document_search_rejects_non_pdf_library_sources() {
             cursor: None,
             debug: Some(false),
             target_index_lines: None,
-        })
-        .unwrap_err();
+        }))
+    .unwrap_err();
 
     assert_eq!(error.payload.code, "not_supported");
     let details = error.payload.details.unwrap();
@@ -2214,6 +2201,56 @@ fn unique_test_dir_path(name: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("fauni-search-{stamp}-{name}"))
+}
+
+fn run_async<T>(future: impl Future<Output = T>) -> T {
+    tokio::runtime::Runtime::new().unwrap().block_on(future)
+}
+
+fn test_state() -> AppState {
+    let mut state = AppState::default();
+    seed_available_provider_probe_cache(&mut state);
+    state
+}
+
+fn seed_available_provider_probe_cache(state: &mut AppState) {
+    state.provider_probe_cache.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        ProviderProbeSnapshot {
+            status: "available".to_string(),
+            message: "local_sidecar probe seeded for unit tests".to_string(),
+            last_probed_at: None,
+        },
+    );
+    state.provider_runtime_models.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        ProviderRuntimeModelSnapshot {
+            model_id: "athrael-soju/colqwen3.5-4.5B-v3".to_string(),
+            model_revision: Some("main".to_string()),
+        },
+    );
+}
+
+fn available_provider_selection() -> ResolvedExecutionModelSelection {
+    ResolvedExecutionModelSelection {
+        summary: ResolvedModelSelectionPayload {
+            binding_source: "global_default".to_string(),
+            provider_id: LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+            provider_kind: LOCAL_SIDECAR_PROVIDER_KIND.to_string(),
+            model_id: "athrael-soju/colqwen3.5-4.5B-v3".to_string(),
+            model_revision: Some("main".to_string()),
+            status: "available".to_string(),
+            message: "Resolved search model for tests.".to_string(),
+            last_probed_at: None,
+        },
+    }
+}
+
+fn default_resolved_index_providers() -> BTreeMap<String, ResolvedExecutionModelSelection> {
+    BTreeMap::from([(
+        MULTIVECTOR_INDEX_LINE.to_string(),
+        available_provider_selection(),
+    )])
 }
 
 fn simulated_active_namespace_probe(

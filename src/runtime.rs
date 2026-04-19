@@ -5,7 +5,8 @@ use crate::{
         SourceActionPlan, SourceActionSummary,
     },
     state::SharedState,
-    SOURCE_WATCHER_POLL_INTERVAL_SECS, TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS,
+    MULTIVECTOR_INDEX_LINE, SOURCE_WATCHER_POLL_INTERVAL_SECS,
+    TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS,
 };
 use std::time::Duration;
 
@@ -64,6 +65,23 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
 }
 
 pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared: PreparedImport) {
+    let resolved_model = {
+        let mut state = state.write().await;
+        match state
+            .resolve_index_model_for_execution(&prepared.library_id, MULTIVECTOR_INDEX_LINE)
+            .await
+        {
+            Ok(selection) => selection,
+            Err(error) => {
+                let outcome = ImportJobOutcome::failed("encode", error.payload.message, 0);
+                if let Err(message) = state.finalize_import_job(&job_id, prepared, outcome) {
+                    tracing::warn!("Failed to finalize import job {job_id}: {message}");
+                }
+                return;
+            }
+        }
+    };
+
     {
         let mut state = state.write().await;
         state.update_job_snapshot(
@@ -78,7 +96,7 @@ pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared:
         );
     }
 
-    let outcome = match index_visual_units(&prepared, state.clone(), &job_id).await {
+    let outcome = match index_visual_units(&prepared, &resolved_model, state.clone(), &job_id).await {
         Ok(summary) => ImportJobOutcome::completed(summary, prepared.accepted.len()),
         Err(error) => ImportJobOutcome::failed(error.phase, error.message, error.completed),
     };
@@ -98,6 +116,39 @@ pub(crate) async fn run_source_action_job(
         let mut state = state.write().await;
         state.mark_source_action_running(&plan, &job_id);
     }
+
+    let resolved_model = {
+        let mut state = state.write().await;
+        match state
+            .resolve_index_model_for_execution(&plan.library_id, MULTIVECTOR_INDEX_LINE)
+            .await
+        {
+            Ok(selection) => selection,
+            Err(error) => {
+                let prepared = PreparedSourceAction {
+                    library_id: plan.library_id.clone(),
+                    collection_name: String::new(),
+                    action: plan.action,
+                    accepted_root_count: plan.target_root_ids.len(),
+                    can_rebuild_from_scratch: false,
+                    had_existing_visual_units: false,
+                    root_updates: Vec::new(),
+                    source_mutations: Vec::new(),
+                    stale_point_ids: Vec::new(),
+                    visual_units_to_index: Vec::new(),
+                    summary: SourceActionSummary::default(),
+                };
+                if let Err(message) = state.finalize_source_action_job(
+                    &job_id,
+                    prepared,
+                    SourceActionJobOutcome::failed(plan.action, 0, error.payload.message),
+                ) {
+                    tracing::warn!("Failed to finalize source action job {job_id}: {message}");
+                }
+                return;
+            }
+        }
+    };
 
     let prepared = {
         let mut state = state.write().await;
@@ -123,7 +174,13 @@ pub(crate) async fn run_source_action_job(
                 }
 
                 let indexing =
-                    index_source_action_visual_units(&prepared, state.clone(), &job_id).await;
+                    index_source_action_visual_units(
+                        &prepared,
+                        &resolved_model,
+                        state.clone(),
+                        &job_id,
+                    )
+                    .await;
                 match indexing {
                     Ok(()) => {
                         let outcome = SourceActionJobOutcome::completed(&prepared);

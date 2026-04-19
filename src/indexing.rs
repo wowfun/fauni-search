@@ -1,6 +1,10 @@
 use crate::{
     api::{ApiError, SearchResultItem, TextSearchData},
-    model::{PreparedImport, PreparedSourceAction, SearchPlan, SearchTimeRangeFilter},
+    model::{
+        PreparedImport, PreparedSourceAction, ResolvedExecutionModelSelection, SearchPlan,
+        SearchTimeRangeFilter,
+    },
+    provider::provider_context_payload,
     qdrant::*,
     query_assets::visual_unit_preview_reference,
     sidecar::{embed_documents, IndexingError, QueryEmbeddingResult},
@@ -12,6 +16,7 @@ use std::env;
 
 pub(crate) async fn index_visual_units(
     prepared: &PreparedImport,
+    resolved_model: &ResolvedExecutionModelSelection,
     state: SharedState,
     job_id: &str,
 ) -> Result<String, IndexingError> {
@@ -63,7 +68,12 @@ pub(crate) async fn index_visual_units(
             );
         }
 
-        let embeddings = match embed_documents(visual_unit_batch).await {
+        let embeddings = match embed_documents(
+            visual_unit_batch,
+            Some(provider_context_payload(resolved_model)),
+        )
+        .await
+        {
             Ok(embeddings) => embeddings,
             Err(error) => {
                 if stage_initialized {
@@ -155,6 +165,7 @@ pub(crate) async fn index_visual_units(
 
 pub(crate) async fn index_source_action_visual_units(
     prepared: &PreparedSourceAction,
+    resolved_model: &ResolvedExecutionModelSelection,
     state: SharedState,
     job_id: &str,
 ) -> Result<(), String> {
@@ -222,7 +233,12 @@ pub(crate) async fn index_source_action_visual_units(
             );
         }
 
-        let embeddings = match embed_documents(visual_unit_batch).await {
+        let embeddings = match embed_documents(
+            visual_unit_batch,
+            Some(provider_context_payload(resolved_model)),
+        )
+        .await
+        {
             Ok(embeddings) => embeddings,
             Err(error) => {
                 if stage_initialized {
@@ -353,8 +369,10 @@ pub(crate) fn build_search_response(
         .target_index_lines
         .iter()
         .map(|index_line| {
+            let selection = plan.resolved_index_models.get(index_line);
             json!({
                 "index_line": index_line,
+                "resolved_model": selection.map(|selection| selection.summary.clone()),
                 "raw_scores": raw_scores.clone(),
             })
         })
@@ -366,10 +384,7 @@ pub(crate) fn build_search_response(
         debug: plan.debug.then_some(json!({
             "backend": "qdrant",
             "repr_kind": "multivector",
-            "provider": {
-                "model_profile": "local_python",
-                "retrieval_backend": "qdrant",
-            },
+            "resolved_model": plan.resolved_query_model.summary.clone(),
             "index_lines": index_lines_debug,
             "query_vector_count": embedding.vectors.len(),
             "retrieved_points": result_count,

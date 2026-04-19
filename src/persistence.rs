@@ -1,6 +1,9 @@
 use crate::{
-    api::{LibraryConfigPayload, SourceRootRulesPayload},
-    model::{SourceRecord, VisualUnitRecord},
+    api::{LibraryConfigPayload, ModelDefaultsPayload, ModelOverridesPayload, SourceRootRulesPayload},
+    model::{ProviderConfigRecord, SourceRecord, VisualUnitRecord},
+    provider::{
+        default_global_model_defaults, default_library_model_overrides, default_provider_configs,
+    },
     STATE_SNAPSHOT_ROW_ID,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -12,10 +15,19 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[derive(Debug)]
+pub(crate) struct LoadedDurableStateSnapshot {
+    pub(crate) snapshot: DurableAppStateSnapshot,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct DurableAppStateSnapshot {
     pub(crate) version: u32,
     pub(crate) library_order: Vec<String>,
+    #[serde(default = "default_provider_configs")]
+    pub(crate) provider_configs: BTreeMap<String, ProviderConfigRecord>,
+    #[serde(default = "default_global_model_defaults")]
+    pub(crate) global_model_defaults: ModelDefaultsPayload,
     pub(crate) libraries: BTreeMap<String, DurableLibraryRecord>,
 }
 
@@ -24,6 +36,8 @@ pub(crate) struct DurableLibraryRecord {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) config: LibraryConfigPayload,
+    #[serde(default = "default_library_model_overrides")]
+    pub(crate) model_overrides: ModelOverridesPayload,
     pub(crate) source_roots: BTreeMap<String, DurableSourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
     pub(crate) sources: BTreeMap<String, SourceRecord>,
@@ -43,7 +57,7 @@ pub(crate) struct DurableSourceRootRecord {
 
 pub(crate) fn load_durable_state_snapshot(
     path: &FsPath,
-) -> Result<Option<DurableAppStateSnapshot>, io::Error> {
+) -> Result<Option<LoadedDurableStateSnapshot>, io::Error> {
     if !path.exists() {
         return Ok(None);
     }
@@ -85,18 +99,25 @@ pub(crate) fn load_durable_state_snapshot(
         })?;
 
     payload
-        .map(|payload| {
-            serde_json::from_str::<DurableAppStateSnapshot>(&payload).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Failed to decode durable state snapshot {}: {error}",
-                        path.display()
-                    ),
-                )
-            })
-        })
+        .map(|payload| decode_durable_state_snapshot(path, &payload))
         .transpose()
+}
+
+fn decode_durable_state_snapshot(
+    path: &FsPath,
+    payload: &str,
+) -> Result<LoadedDurableStateSnapshot, io::Error> {
+    let snapshot = serde_json::from_str::<DurableAppStateSnapshot>(payload).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Failed to decode durable state snapshot {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+
+    Ok(LoadedDurableStateSnapshot { snapshot })
 }
 
 pub(crate) fn write_durable_state_snapshot(

@@ -2,6 +2,8 @@
 
 ## 2026-04-19
 ### Changed
+- Added the first runnable `005-provider-capabilities-and-profiles` slice across the Rust app and Settings workspace, covering durable provider/model defaults, library overrides, resolved-model summaries, `remote_http` as a configurable-but-not-executable shell, and black-box API/UI coverage for the new control surface.
+- Simplified the public `005` surface to a strict pre-stable `provider_id + model_id` contract by removing `selection_kind`, `variant`, and the unused `region` field, tightening `multivector` model validation, and surfacing the exact active model more directly across Settings and shared provider summaries.
 - Completed the current search-controls slice by adding opaque cursor pagination, `visual_unit.kind` / `path_prefix` / `source_type` / `time_range` filtering, and richer `debug` search diagnostics in the Rust app, while tightening the shared `004/009` specs and adding narrow search-response / search-plan coverage.
 - Extended the shared search workspace with a lightweight search-filter dock, deterministic `Load more` pagination behavior backed by saved search snapshots, and UI coverage for filter payload wiring and local invalid-time-range rejection.
 

@@ -27,6 +27,8 @@ const TEST_ENV_KEYS: &[&str] = &[
     "SIDECAR_PORT",
     "QDRANT_URL",
     "FAUNI_ENV",
+    "TEXT_SEARCH_MODEL_ID",
+    "TEXT_SEARCH_MODEL_REVISION",
 ];
 
 pub struct TestEnv {
@@ -52,6 +54,8 @@ impl TestEnv {
         env::set_var("SIDECAR_PORT", "39011");
         env::set_var("QDRANT_URL", "http://127.0.0.1:63999");
         env::set_var("FAUNI_ENV", "test");
+        env::set_var("TEXT_SEARCH_MODEL_ID", "athrael-soju/colqwen3.5-4.5B-v3");
+        env::set_var("TEXT_SEARCH_MODEL_REVISION", "main");
 
         Self {
             _env_lock: lock,

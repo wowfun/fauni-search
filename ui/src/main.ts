@@ -2,17 +2,29 @@ import "./style.css";
 import type {
   ApiErrorPayload,
   AppState,
+  GlobalModelDefaultsData,
   ImportPathsData,
   InventorySummary,
   JobSnapshot,
   JobsListData,
+  LibraryModelOverridesData,
   LibrariesListData,
   LibraryObjectQueryDocument,
   LibraryObjectQueryImage,
   LibraryObjectQueryVideo,
   LibrarySnapshot,
+  ModelCatalogData,
+  ModelCatalogEntry,
+  ModelDefaultsPayload,
+  ModelOverridesPayload,
+  ModelSelectionOverridePayload,
+  ModelSelectionPayload,
   PreviewReference,
+  ProviderConfigSnapshot,
+  ProvidersListData,
   QueryAssetData,
+  ResolvedModelSelectionPayload,
+  ResolvedModelsData,
   SearchRequestSnapshot,
   SearchOutcomeState,
   SourceInventoryItem,
@@ -79,12 +91,31 @@ const JOB_POLL_INTERVAL_MS = 1000;
 const JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKSPACE_POLL_INTERVAL_MS = 3000;
 const SEARCH_PAGE_SIZE = 5;
+const PROVIDER_INDEX_LINE = "multivector";
+const PROVIDER_ID_LOCAL_SIDECAR = "local_sidecar";
+
+function emptyModelDefaults(): ModelDefaultsPayload {
+  return {
+    index_lines: {},
+  };
+}
+
+function emptyModelOverrides(): ModelOverridesPayload {
+  return {
+    index_lines: {},
+  };
+}
 
 const state: AppState = {
   libraries: [],
   jobs: [],
   videoSources: [],
   sourceRoots: [],
+  providerConfigs: [],
+  modelCatalog: [],
+  globalModelDefaults: emptyModelDefaults(),
+  libraryModelOverrides: emptyModelOverrides(),
+  resolvedModels: null,
   activeWorkspace: "search",
   inventoryFilters: {
     sourceRootId: "",
@@ -138,6 +169,9 @@ const state: AppState = {
   selectedVisualUnit: null,
   searchOutcome: null,
   lastSearchRequest: null,
+  editingProviderId: "",
+  providerEnabledDraft: true,
+  providerBaseUrlDraft: "",
   globalError: null,
   statusMessage: null,
 };
@@ -313,6 +347,79 @@ function resetSearchFilters() {
   };
 }
 
+function resetProviderEditor() {
+  state.editingProviderId = "";
+  state.providerEnabledDraft = true;
+  state.providerBaseUrlDraft = "";
+}
+
+function selectedProviderConfig(): ProviderConfigSnapshot | null {
+  return (
+    state.providerConfigs.find((provider) => provider.provider_id === state.editingProviderId) ??
+    null
+  );
+}
+
+function providerConfigLabel(providerId?: string | null) {
+  if (!providerId) {
+    return "inherit";
+  }
+  const provider = state.providerConfigs.find((item) => item.provider_id === providerId);
+  if (!provider) {
+    return `${providerId} (missing)`;
+  }
+  return `${provider.display_name} (${provider.provider_kind})`;
+}
+
+function providerSelectionPillClass(status: string) {
+  if (status === "available") {
+    return "ready";
+  }
+  if (status === "not_supported" || status === "runtime_unavailable") {
+    return "error";
+  }
+  if (status === "not_enabled") {
+    return "pending";
+  }
+  return "muted";
+}
+
+function providerProbePillClass(status?: string | null) {
+  if (status === "available") {
+    return "ready";
+  }
+  if (status === "runtime_unavailable" || status === "not_supported") {
+    return "error";
+  }
+  if (status === "not_enabled") {
+    return "pending";
+  }
+  return "muted";
+}
+
+function formatResolvedModel(selection: ResolvedModelSelectionPayload | undefined) {
+  if (!selection) {
+    return "未解析";
+  }
+  const parts = [selection.provider_id, selection.model_id];
+  if (selection.model_revision) {
+    parts.push(`@${selection.model_revision}`);
+  }
+  return parts.join(" · ");
+}
+
+function formatResolvedModelContext(selection: ResolvedModelSelectionPayload | undefined) {
+  if (!selection) {
+    return "未解析";
+  }
+  const parts = [selection.binding_source, selection.status];
+  const provider = state.providerConfigs.find((item) => item.provider_id === selection.provider_id);
+  if (provider?.base_url) {
+    parts.push(provider.base_url);
+  }
+  return parts.join(" · ");
+}
+
 function resetInventoryState() {
   state.librarySources = [];
   state.inventorySummary = emptyInventorySummary();
@@ -462,6 +569,83 @@ function sourceRootPayloadFromDraft() {
   };
 }
 
+function hydrateProviderEditor(provider: ProviderConfigSnapshot | null) {
+  if (!provider) {
+    resetProviderEditor();
+    return;
+  }
+
+  state.editingProviderId = provider.provider_id;
+  state.providerEnabledDraft = provider.enabled;
+  state.providerBaseUrlDraft = provider.base_url ?? "";
+}
+
+function selectedGlobalModelSelection(): ModelSelectionPayload {
+  return (
+    state.globalModelDefaults.index_lines[PROVIDER_INDEX_LINE] ?? {
+      provider_id: PROVIDER_ID_LOCAL_SIDECAR,
+      model_id: "",
+    }
+  );
+}
+
+function selectedLibraryModelOverride(): ModelSelectionOverridePayload {
+  return state.libraryModelOverrides.index_lines[PROVIDER_INDEX_LINE] ?? {};
+}
+
+function catalogEntriesForProvider(providerId: string | null | undefined): ModelCatalogEntry[] {
+  if (!providerId) {
+    return [];
+  }
+  return state.modelCatalog.filter(
+    (entry) => entry.provider_id === providerId && entry.supported_index_lines.includes(PROVIDER_INDEX_LINE)
+  );
+}
+
+function selectedCatalogEntryForProvider(
+  providerId: string | null | undefined,
+  modelId?: string | null
+): ModelCatalogEntry | null {
+  const entries = catalogEntriesForProvider(providerId);
+  if (!entries.length) {
+    return null;
+  }
+  if (modelId) {
+    return entries.find((entry) => entry.model_id === modelId) ?? null;
+  }
+  return entries[0] ?? null;
+}
+
+function normalizeModelSelectionForProvider(
+  providerId: string,
+  base: Partial<ModelSelectionPayload> = {}
+): ModelSelectionPayload {
+  const catalogEntry = selectedCatalogEntryForProvider(providerId, base.model_id ?? null);
+  const modelId = base.model_id ?? catalogEntry?.model_id ?? "";
+
+  return {
+    provider_id: providerId,
+    model_id: modelId,
+  };
+}
+
+function normalizeModelOverrideForProvider(
+  providerId?: string | null,
+  base: Partial<ModelSelectionOverridePayload> = {}
+): ModelSelectionOverridePayload {
+  if (!providerId) {
+    return {};
+  }
+  const normalized = normalizeModelSelectionForProvider(providerId, {
+    provider_id: providerId,
+    model_id: base.model_id ?? undefined,
+  });
+  return {
+    provider_id: normalized.provider_id,
+    model_id: normalized.model_id,
+  };
+}
+
 function sourceRootDisplayName(sourceRootId) {
   if (!sourceRootId) {
     return "全部来源根";
@@ -480,6 +664,14 @@ function currentWorkspaceMeta() {
       title: "Inventory workspace",
       summary:
         "来源清单、状态过滤与 coverage 核对集中到独立 Inventory 工作区；Search 回到查询、结果与详情的连续主任务流。",
+    };
+  }
+
+  if (state.activeWorkspace === "settings") {
+    return {
+      title: "Settings workspace",
+      summary:
+        "在同一处查看内建 provider、全局默认模型、库级 model override 和当前 resolved model 选择。",
     };
   }
 
@@ -1351,6 +1543,14 @@ function renderWorkspaceSwitcher() {
       >
         Inventory
       </button>
+      <button
+        type="button"
+        class="${state.activeWorkspace === "settings" ? "" : "secondary-button"}"
+        data-testid="workspace-tab-settings"
+        data-workspace="settings"
+      >
+        Settings
+      </button>
     </div>
   `;
 }
@@ -1415,6 +1615,318 @@ function renderInventorySummaryBar() {
           `
         )
         .join("")}
+    </div>
+  `;
+}
+
+function renderProviderOptions(currentValue = "", includeEmpty = false) {
+  const emptyOption = includeEmpty
+    ? `<option value="" ${!currentValue ? "selected" : ""}>inherit global default</option>`
+    : "";
+  return `${emptyOption}${state.providerConfigs
+    .map(
+      (provider) => `
+        <option value="${escapeHtml(provider.provider_id)}" ${provider.provider_id === currentValue ? "selected" : ""}>
+          ${escapeHtml(provider.display_name)} (${escapeHtml(provider.provider_kind)}${provider.enabled ? "" : " · disabled"})
+        </option>
+      `
+    )
+    .join("")}`;
+}
+
+function renderProviderBridge(library: LibrarySnapshot | null) {
+  if (!library) {
+    return "";
+  }
+
+  const selection = state.resolvedModels?.index_lines[PROVIDER_INDEX_LINE];
+  const summary = selection
+    ? `${formatResolvedModel(selection)} · ${formatResolvedModelContext(selection)}`
+    : "当前库的 resolved model 尚未加载。";
+
+  return `
+    <div class="workspace-bridge" data-testid="provider-bridge">
+      <p class="eyebrow">Providers</p>
+      <p class="helper" data-testid="provider-bridge-summary">${escapeHtml(summary)}</p>
+      <div class="inline-actions">
+        ${
+          state.activeWorkspace === "settings"
+            ? '<span class="pill ready" data-testid="provider-bridge-state">Settings active</span>'
+            : `<button
+                type="button"
+                class="secondary-button"
+                data-testid="provider-bridge-button"
+                data-workspace="settings"
+              >
+                查看 Settings
+              </button>`
+        }
+      </div>
+    </div>
+  `;
+}
+
+function renderProviderConfigsPanel() {
+  const editingProvider = selectedProviderConfig();
+  const listMarkup = state.providerConfigs.length
+    ? `
+      <ul class="provider-profile-list" data-testid="provider-config-list">
+        ${state.providerConfigs
+          .map(
+            (provider) => `
+              <li class="provider-profile-row" data-testid="provider-config-row">
+                <div class="provider-profile-main">
+                  <strong>${escapeHtml(provider.display_name)}</strong>
+                  <span class="helper">${escapeHtml(provider.provider_id)} · ${escapeHtml(provider.provider_kind)}</span>
+                </div>
+                <div class="provider-profile-meta">
+                  <span class="pill ${providerProbePillClass(provider.probe?.status)}">${escapeHtml(provider.probe?.status ?? "unknown")}</span>
+                  <button type="button" class="secondary-button" data-provider-edit-id="${escapeHtml(provider.provider_id)}">编辑</button>
+                </div>
+              </li>
+            `
+          )
+          .join("")}
+      </ul>
+    `
+    : `<p class="empty">当前还没有可见 provider。</p>`;
+
+  return `
+    <section class="panel settings-panel" data-testid="provider-configs-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Providers</p>
+          <h2>Built-in providers</h2>
+        </div>
+      </div>
+      <form id="provider-config-form" class="stack-form" data-testid="provider-config-form">
+        <label>
+          <span>Provider</span>
+          <select id="provider-config-id" data-testid="provider-config-id">
+            <option value="" ${!state.editingProviderId ? "selected" : ""}>选择一个 provider</option>
+            ${state.providerConfigs
+              .map(
+                (provider) => `
+                  <option value="${escapeHtml(provider.provider_id)}" ${provider.provider_id === state.editingProviderId ? "selected" : ""}>
+                    ${escapeHtml(provider.display_name)}
+                  </option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+        <div class="filter-grid settings-filter-grid">
+          <label class="checkbox-field">
+            <input
+              id="provider-enabled"
+              data-testid="provider-enabled"
+              type="checkbox"
+              ${state.providerEnabledDraft ? "checked" : ""}
+              ${!editingProvider ? "disabled" : ""}
+            />
+            <span>Enabled</span>
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input
+              id="provider-base-url"
+              data-testid="provider-base-url"
+              type="url"
+              value="${escapeHtml(state.providerBaseUrlDraft)}"
+              placeholder="https://dashscope.aliyuncs.com"
+              ${!editingProvider || editingProvider.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
+            />
+          </label>
+        </div>
+        ${
+          editingProvider?.readonly_reason
+            ? `<p class="helper" data-testid="provider-readonly-reason">${escapeHtml(editingProvider.readonly_reason)}</p>`
+            : ""
+        }
+        <div class="inline-actions">
+          <button type="submit" data-testid="provider-config-submit-button" ${!editingProvider ? "disabled" : ""}>
+            保存 provider 配置
+          </button>
+          <button
+            type="button"
+            id="provider-config-reset-button"
+            data-testid="provider-config-reset-button"
+            class="secondary-button"
+          >
+            重置
+          </button>
+        </div>
+      </form>
+      ${listMarkup}
+    </section>
+  `;
+}
+
+function renderGlobalModelDefaultsPanel() {
+  const selection = selectedGlobalModelSelection();
+  const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
+  const catalogEntries = catalogEntriesForProvider(selection.provider_id);
+
+  return `
+    <section class="panel settings-panel" data-testid="global-model-defaults-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Defaults</p>
+          <h2>Global model defaults</h2>
+        </div>
+      </div>
+      <form id="global-model-defaults-form" class="stack-form" data-testid="global-model-defaults-form">
+        <div class="filter-grid settings-filter-grid">
+          <label>
+            <span>multivector.provider</span>
+            <select id="global-model-provider-id" data-testid="global-model-provider-id">
+              ${renderProviderOptions(selection.provider_id)}
+            </select>
+          </label>
+          <label>
+            <span>model_id</span>
+            <select
+              id="global-model-id"
+              data-testid="global-model-id"
+              ${selection.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
+            >
+              ${catalogEntries
+                .map(
+                  (entry) => `
+                    <option value="${escapeHtml(entry.model_id)}" ${entry.model_id === selection.model_id ? "selected" : ""}>
+                      ${escapeHtml(entry.model_id)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+        </div>
+        ${
+          catalogEntry
+            ? `<p class="helper" data-testid="model-catalog-summary">${escapeHtml(catalogEntry.message)}</p>`
+            : ""
+        }
+        <div class="inline-actions">
+          <button type="submit" data-testid="global-model-defaults-submit-button">保存全局默认模型</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function renderLibraryModelOverridesPanel(library: LibrarySnapshot | null) {
+  if (!library) {
+    return `
+      <section class="panel settings-panel" data-testid="library-model-overrides-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Overrides</p>
+            <h2>Library model overrides</h2>
+          </div>
+        </div>
+        <p class="empty">先选择一个库，再编辑库级 model override。</p>
+      </section>
+    `;
+  }
+
+  const selection = selectedLibraryModelOverride();
+  const selectedProviderId = selection.provider_id ?? selectedGlobalModelSelection().provider_id;
+  const catalogEntries = catalogEntriesForProvider(selectedProviderId);
+
+  return `
+    <section class="panel settings-panel" data-testid="library-model-overrides-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Overrides</p>
+          <h2>Library model overrides</h2>
+        </div>
+      </div>
+      <form id="library-model-overrides-form" class="stack-form" data-testid="library-model-overrides-form">
+        <div class="filter-grid settings-filter-grid">
+          <label>
+            <span>multivector.provider</span>
+            <select id="library-model-provider-id" data-testid="library-model-provider-id">
+              ${renderProviderOptions(selection.provider_id ?? "", true)}
+            </select>
+          </label>
+          <label>
+            <span>model_id</span>
+            <select
+              id="library-model-id"
+              data-testid="library-model-id"
+              ${selectedProviderId === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
+            >
+              <option value="">inherit</option>
+              ${catalogEntries
+                .map(
+                  (entry) => `
+                    <option value="${escapeHtml(entry.model_id)}" ${entry.model_id === selection.model_id ? "selected" : ""}>
+                      ${escapeHtml(entry.model_id)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+        </div>
+        <div class="inline-actions">
+          <button type="submit" data-testid="library-model-overrides-submit-button">保存库级覆盖</button>
+          <button
+            type="button"
+            id="library-model-overrides-reset-button"
+            data-testid="library-model-overrides-reset-button"
+            class="secondary-button"
+          >
+            清空 overrides
+          </button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function renderResolvedModelsPanel(library: LibrarySnapshot | null) {
+  if (!library) {
+    return "";
+  }
+
+  const indexingRows = Object.entries(state.resolvedModels?.index_lines ?? {})
+    .map(
+      ([indexLine, selection]) => `
+        <li class="provider-resolution-row">
+          <div>
+            <strong>${escapeHtml(indexLine)}</strong>
+            <span class="helper">${escapeHtml(formatResolvedModel(selection))} · ${escapeHtml(selection.binding_source)}</span>
+            <span class="helper">${escapeHtml(formatResolvedModelContext(selection))}</span>
+            <span class="helper">${escapeHtml(selection.message)}</span>
+          </div>
+          <span class="pill ${providerSelectionPillClass(selection.status)}">${escapeHtml(selection.status)}</span>
+        </li>
+      `
+    )
+    .join("");
+
+  return `
+    <section class="panel settings-panel" data-testid="resolved-models-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Resolved</p>
+          <h2>Resolved models for ${escapeHtml(library.name)}</h2>
+        </div>
+      </div>
+      <ul class="provider-resolution-list">${indexingRows || '<li class="empty">暂无 resolved model selection。</li>'}</ul>
+    </section>
+  `;
+}
+
+function renderSettingsPanel(library: LibrarySnapshot | null) {
+  return `
+    <div class="settings-stack" data-testid="settings-workspace">
+      ${renderProviderConfigsPanel()}
+      ${renderGlobalModelDefaultsPanel()}
+      ${renderLibraryModelOverridesPanel(library)}
+      ${renderResolvedModelsPanel(library)}
     </div>
   `;
 }
@@ -2346,6 +2858,7 @@ function renderWorkspace() {
                       <div><dt>Latest job</dt><dd>${escapeHtml(library.latest_job_id ?? "none")}</dd></div>
                     </dl>
                     ${renderInventoryBridge(library)}
+                    ${renderProviderBridge(library)}
                   `
                   : `<p class="empty">先创建一个库，再进入导入和搜索步骤。</p>`
               }
@@ -2413,7 +2926,9 @@ function renderWorkspace() {
                   ${renderSearchOutcome()}
                 </section>
               `
-              : renderLibrarySourcesPanel(library)
+              : state.activeWorkspace === "inventory"
+                ? renderLibrarySourcesPanel(library)
+                : renderSettingsPanel(library)
           }
         </section>
 
@@ -2452,6 +2967,40 @@ function renderWorkspace() {
   document.querySelector("#create-library-form")?.addEventListener("submit", onCreateLibrary);
   document.querySelector("#library-name")?.addEventListener("input", onLibraryNameInput);
   document.querySelector("#library-select")?.addEventListener("change", onSelectLibrary);
+  document
+    .querySelector("#provider-config-form")
+    ?.addEventListener("submit", onSubmitProviderConfig);
+  document
+    .querySelector("#provider-config-reset-button")
+    ?.addEventListener("click", onResetProviderConfigForm);
+  document
+    .querySelector("#provider-config-id")
+    ?.addEventListener("change", onProviderConfigSelect);
+  document
+    .querySelector("#provider-enabled")
+    ?.addEventListener("change", onProviderEnabledChange);
+  document
+    .querySelector("#provider-base-url")
+    ?.addEventListener("input", onProviderBaseUrlInput);
+  document
+    .querySelector("#global-model-defaults-form")
+    ?.addEventListener("submit", onSubmitGlobalModelDefaults);
+  document
+    .querySelector("#global-model-provider-id")
+    ?.addEventListener("change", onGlobalModelProviderChange);
+  document
+    .querySelector("#global-model-id")
+    ?.addEventListener("change", onGlobalModelIdInput);
+  document
+    .querySelector("#library-model-overrides-form")
+    ?.addEventListener("submit", onSubmitLibraryModelOverrides);
+  document
+    .querySelector("#library-model-overrides-reset-button")
+    ?.addEventListener("click", onResetLibraryModelOverrides);
+  document
+    .querySelector("#library-model-provider-id")
+    ?.addEventListener("change", onLibraryModelProviderChange);
+  document.querySelector("#library-model-id")?.addEventListener("change", onLibraryModelIdInput);
   document.querySelector("#source-root-form")?.addEventListener("submit", onSubmitSourceRoot);
   document.querySelector("#source-root-reset-button")?.addEventListener("click", onResetSourceRootEditor);
   document.querySelector("#source-root-path")?.addEventListener("input", onSourceRootPathInput);
@@ -2488,6 +3037,9 @@ function renderWorkspace() {
   });
   document.querySelectorAll("[data-source-root-delete-id]").forEach((button) => {
     button.addEventListener("click", onDeleteSourceRoot);
+  });
+  document.querySelectorAll("[data-provider-edit-id]").forEach((button) => {
+    button.addEventListener("click", onEditProviderConfig);
   });
   document.querySelector("#import-form")?.addEventListener("submit", onImportPaths);
   document.querySelector("#import-paths")?.addEventListener("input", onImportPathsInput);
@@ -2756,6 +3308,55 @@ async function refreshVideoSources() {
   }
 }
 
+async function refreshProviderConfigs() {
+  const data = await apiRequest<ProvidersListData>("/settings/providers");
+  state.providerConfigs = data.providers;
+  if (
+    state.editingProviderId &&
+    !state.providerConfigs.some((provider) => provider.provider_id === state.editingProviderId)
+  ) {
+    resetProviderEditor();
+  }
+}
+
+async function refreshModelCatalog() {
+  const data = await apiRequest<ModelCatalogData>("/settings/model-catalog");
+  state.modelCatalog = data.entries;
+}
+
+async function refreshGlobalModelDefaults() {
+  const data = await apiRequest<GlobalModelDefaultsData>("/settings/model-defaults");
+  state.globalModelDefaults = data.defaults;
+}
+
+async function refreshLibraryModelSettings() {
+  if (!state.selectedLibraryId) {
+    state.libraryModelOverrides = emptyModelOverrides();
+    state.resolvedModels = null;
+    return;
+  }
+
+  const [overridesData, resolvedData] = await Promise.all([
+    apiRequest<LibraryModelOverridesData>(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/model-overrides`
+    ),
+    apiRequest<ResolvedModelsData>(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/resolved-models`
+    ),
+  ]);
+  state.libraryModelOverrides = overridesData.overrides;
+  state.resolvedModels = resolvedData;
+}
+
+async function refreshProviderSettingsData() {
+  await refreshProviderConfigs();
+  await refreshLibraryModelSettings();
+  if (state.activeWorkspace === "settings") {
+    await refreshModelCatalog();
+    await refreshGlobalModelDefaults();
+  }
+}
+
 async function refreshJob(jobId) {
   return apiRequest<JobSnapshot>(`/jobs/${encodeURIComponent(jobId)}`);
 }
@@ -2763,8 +3364,13 @@ async function refreshJob(jobId) {
 async function refreshWorkspace(options) {
   await refreshLibraries(options);
   await refreshSourceRoots();
+  await refreshProviderConfigs();
+  await refreshLibraryModelSettings();
   if (state.activeWorkspace === "inventory") {
     await refreshLibrarySources();
+  } else if (state.activeWorkspace === "settings") {
+    await refreshModelCatalog();
+    await refreshGlobalModelDefaults();
   }
   await refreshJobs();
   await refreshVideoSources();
@@ -2792,6 +3398,8 @@ async function onCreateLibrary(event) {
     resetInventoryFilters();
     resetSearchFilters();
     resetInventoryState();
+    state.libraryModelOverrides = emptyModelOverrides();
+    state.resolvedModels = null;
     state.importPathsDraft = "";
     state.searchTextDraft = "";
     state.libraryNameDraft = "";
@@ -2820,6 +3428,8 @@ async function onSelectLibrary(event) {
   resetInventoryFilters();
   resetSearchFilters();
   resetInventoryState();
+  state.libraryModelOverrides = emptyModelOverrides();
+  state.resolvedModels = null;
   clearQueryImageState();
   clearQueryVideoState();
   clearQueryDocumentState();
@@ -2830,6 +3440,148 @@ async function onSelectLibrary(event) {
   state.globalError = null;
   state.statusMessage = null;
   await refreshWorkspace({ keepSelection: true });
+}
+
+function onProviderConfigSelect(event) {
+  const providerId = event.target.value;
+  const provider = state.providerConfigs.find((item) => item.provider_id === providerId) ?? null;
+  hydrateProviderEditor(provider);
+  renderWorkspace();
+}
+
+function onProviderEnabledChange(event) {
+  state.providerEnabledDraft = event.target.checked;
+}
+
+function onProviderBaseUrlInput(event) {
+  state.providerBaseUrlDraft = event.target.value;
+}
+
+async function onSubmitProviderConfig(event) {
+  event.preventDefault();
+  if (!state.editingProviderId) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    await apiRequest(`/settings/providers/${encodeURIComponent(state.editingProviderId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        enabled: state.providerEnabledDraft,
+        base_url: state.providerBaseUrlDraft.trim() || null,
+      }),
+    });
+    await refreshProviderSettingsData();
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+function onResetProviderConfigForm() {
+  hydrateProviderEditor(selectedProviderConfig());
+  state.globalError = null;
+  renderWorkspace();
+}
+
+async function onEditProviderConfig(event) {
+  const providerId = event.currentTarget.dataset.providerEditId;
+  if (!providerId) {
+    return;
+  }
+  const provider = state.providerConfigs.find((item) => item.provider_id === providerId) ?? null;
+  hydrateProviderEditor(provider);
+  state.globalError = null;
+  renderWorkspace();
+}
+
+function onGlobalModelProviderChange(event) {
+  state.globalModelDefaults.index_lines[PROVIDER_INDEX_LINE] = normalizeModelSelectionForProvider(
+    event.target.value,
+    selectedGlobalModelSelection()
+  );
+  renderWorkspace();
+}
+
+function onGlobalModelIdInput(event) {
+  state.globalModelDefaults.index_lines[PROVIDER_INDEX_LINE] = {
+    ...selectedGlobalModelSelection(),
+    model_id: event.target.value,
+  };
+}
+
+async function onSubmitGlobalModelDefaults(event) {
+  event.preventDefault();
+
+  try {
+    state.globalError = null;
+    await apiRequest("/settings/model-defaults", {
+      method: "PATCH",
+      body: JSON.stringify(state.globalModelDefaults),
+    });
+    await refreshProviderSettingsData();
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+function onLibraryModelProviderChange(event) {
+  state.libraryModelOverrides.index_lines[PROVIDER_INDEX_LINE] = normalizeModelOverrideForProvider(
+    event.target.value || null,
+    selectedLibraryModelOverride()
+  );
+  renderWorkspace();
+}
+
+function onLibraryModelIdInput(event) {
+  state.libraryModelOverrides.index_lines[PROVIDER_INDEX_LINE] = {
+    ...selectedLibraryModelOverride(),
+    model_id: event.target.value || null,
+  };
+}
+
+async function onSubmitLibraryModelOverrides(event) {
+  event.preventDefault();
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/model-overrides`, {
+      method: "PATCH",
+      body: JSON.stringify(state.libraryModelOverrides),
+    });
+    await refreshLibraryModelSettings();
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+async function onResetLibraryModelOverrides() {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.libraryModelOverrides = emptyModelOverrides();
+    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/model-overrides`, {
+      method: "PATCH",
+      body: JSON.stringify(state.libraryModelOverrides),
+    });
+    await refreshLibraryModelSettings();
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
 }
 
 function onImportPathsInput(event) {
@@ -3602,6 +4354,8 @@ async function onSelectWorkspace(event) {
   try {
     if (nextWorkspace === "inventory") {
       await refreshLibrarySources();
+    } else if (nextWorkspace === "settings") {
+      await refreshProviderSettingsData();
     }
     renderWorkspace();
   } catch (error) {

@@ -2,6 +2,7 @@ use crate::{
     api::*,
     indexing::build_search_response,
     model::{ResolvedImageQueryInput, SourceActionKind, SourceActionScope, SourceActionTrigger},
+    provider::provider_context_payload,
     qdrant::query_qdrant,
     query_assets::*,
     runtime::{run_import_job, run_source_action_job},
@@ -23,8 +24,23 @@ pub fn build_app(state: SharedState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .route(
+            "/settings/providers",
+            get(list_provider_configs),
+        )
+        .route("/settings/providers/:provider_id", axum::routing::patch(update_provider_config))
+        .route("/settings/model-catalog", get(get_model_catalog))
+        .route(
+            "/settings/model-defaults",
+            get(get_global_model_defaults).patch(update_global_model_defaults),
+        )
         .route("/libraries", get(list_libraries).post(create_library))
         .route("/libraries/:library_id", get(get_library))
+        .route(
+            "/libraries/:library_id/model-overrides",
+            get(get_library_model_overrides).patch(update_library_model_overrides),
+        )
+        .route("/libraries/:library_id/resolved-models", get(get_resolved_models))
         .route("/libraries/:library_id/imports", post(import_paths))
         .route(
             "/libraries/:library_id/source-roots",
@@ -110,8 +126,16 @@ async fn root() -> Json<RootPayload> {
         stage: "search workspace",
         routes: vec![
             "GET /health",
+            "GET /settings/providers",
+            "PATCH /settings/providers/{provider_id}",
+            "GET /settings/model-catalog",
+            "GET /settings/model-defaults",
+            "PATCH /settings/model-defaults",
             "GET /libraries",
             "POST /libraries",
+            "GET /libraries/{library_id}/model-overrides",
+            "PATCH /libraries/{library_id}/model-overrides",
+            "GET /libraries/{library_id}/resolved-models",
             "GET /libraries/{library_id}/source-roots",
             "POST /libraries/{library_id}/source-roots",
             "GET /libraries/{library_id}/source-roots/{source_root_id}",
@@ -153,6 +177,53 @@ async fn health(State(state): State<SharedState>) -> Json<HealthPayload> {
     })
 }
 
+async fn list_provider_configs(
+    State(state): State<SharedState>,
+) -> Json<SuccessEnvelope<ProvidersListData>> {
+    let mut state = state.write().await;
+    state.refresh_boot_provider_probe_cache().await;
+    Json(SuccessEnvelope {
+        data: state.list_provider_configs(),
+    })
+}
+
+async fn update_provider_config(
+    State(state): State<SharedState>,
+    Path(provider_id): Path<String>,
+    Json(request): Json<UpdateProviderConfigRequest>,
+) -> Result<Json<SuccessEnvelope<ProviderConfigSnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state.update_provider_config(&provider_id, request).await?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn get_model_catalog(
+    State(state): State<SharedState>,
+) -> Json<SuccessEnvelope<ModelCatalogData>> {
+    let mut state = state.write().await;
+    Json(SuccessEnvelope {
+        data: state.list_model_catalog().await,
+    })
+}
+
+async fn get_global_model_defaults(
+    State(state): State<SharedState>,
+) -> Json<SuccessEnvelope<GlobalModelDefaultsData>> {
+    let state = state.read().await;
+    Json(SuccessEnvelope {
+        data: state.get_global_model_defaults(),
+    })
+}
+
+async fn update_global_model_defaults(
+    State(state): State<SharedState>,
+    Json(request): Json<ModelDefaultsPayload>,
+) -> Result<Json<SuccessEnvelope<GlobalModelDefaultsData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.update_global_model_defaults(request).await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
 async fn list_libraries(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<LibrariesListData>> {
@@ -181,6 +252,35 @@ async fn create_library(
         StatusCode::CREATED,
         Json(SuccessEnvelope { data: snapshot }),
     ))
+}
+
+async fn get_library_model_overrides(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<LibraryModelOverridesData>>, ApiError> {
+    let state = state.read().await;
+    Ok(Json(SuccessEnvelope {
+        data: state.get_library_model_overrides(&library_id)?,
+    }))
+}
+
+async fn update_library_model_overrides(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    Json(request): Json<ModelOverridesPayload>,
+) -> Result<Json<SuccessEnvelope<LibraryModelOverridesData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.update_library_model_overrides(&library_id, request).await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+async fn get_resolved_models(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<ResolvedModelsData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.get_resolved_models(&library_id).await?;
+    Ok(Json(SuccessEnvelope { data }))
 }
 
 async fn list_source_roots(
@@ -590,11 +690,15 @@ async fn search_text(
     Json(request): Json<TextSearchRequest>,
 ) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
     let plan = {
-        let state = state.read().await;
-        state.prepare_text_search(&request)?
+        let mut state = state.write().await;
+        state.prepare_text_search(&request).await?
     };
 
-    let query_embedding = embed_query_text(request.text.trim()).await?;
+    let query_embedding = embed_query_text(
+        request.text.trim(),
+        Some(provider_context_payload(&plan.resolved_query_model)),
+    )
+    .await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))
@@ -607,7 +711,7 @@ async fn search_image(
     let (plan, query_input) = {
         let mut state = state.write().await;
         state.prune_temp_query_assets();
-        state.prepare_image_search(&request)?
+        state.prepare_image_search(&request).await?
     };
 
     let (query_path, query_locator) = match &query_input {
@@ -617,7 +721,12 @@ async fn search_image(
             Some(visual_unit.locator.clone()),
         ),
     };
-    let query_embedding = embed_query_image(query_path, query_locator).await?;
+    let query_embedding = embed_query_image(
+        query_path,
+        query_locator,
+        Some(provider_context_payload(&plan.resolved_query_model)),
+    )
+    .await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))
@@ -630,11 +739,15 @@ async fn search_video(
     let (plan, query_input) = {
         let mut state = state.write().await;
         state.prune_temp_query_assets();
-        state.prepare_video_search(&request)?
+        state.prepare_video_search(&request).await?
     };
 
-    let query_embedding =
-        embed_query_video(query_input.path.as_str(), query_input.locator.clone()).await?;
+    let query_embedding = embed_query_video(
+        query_input.path.as_str(),
+        query_input.locator.clone(),
+        Some(provider_context_payload(&plan.resolved_query_model)),
+    )
+    .await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))
@@ -647,11 +760,15 @@ async fn search_document(
     let (plan, query_input) = {
         let mut state = state.write().await;
         state.prune_temp_query_assets();
-        state.prepare_document_search(&request)?
+        state.prepare_document_search(&request).await?
     };
 
-    let query_embedding =
-        embed_query_document(query_input.path.as_str(), query_input.locator).await?;
+    let query_embedding = embed_query_document(
+        query_input.path.as_str(),
+        query_input.locator,
+        Some(provider_context_payload(&plan.resolved_query_model)),
+    )
+    .await?;
     let candidates = query_qdrant(&plan, &query_embedding).await?;
     let response = build_search_response(plan, query_embedding, candidates)?;
     Ok(Json(SuccessEnvelope { data: response }))

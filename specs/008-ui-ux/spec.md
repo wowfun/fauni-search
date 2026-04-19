@@ -71,11 +71,19 @@
 - 来源根管理流至少应覆盖：查看、创建、编辑、启用、停用、删除，以及规则的最小管理能力
 - 来源清单视图至少应覆盖：库级聚合来源列表、按来源根 / 来源类型 / 状态筛选，以及最小状态摘要展示
 - 来源清单工作区可以作为搜索工作区之外的独立管理入口；当采用独立工作区时，搜索工作区最多保留来源管理摘要与跳转入口，不应继续以内嵌大列表挤占搜索入口
-- 设置界面至少应覆盖：库配置、启用索引线、提供方绑定、刷新策略与相关默认值的管理流
+- 设置界面至少应覆盖：内建 provider 配置、全局默认模型配置，以及库配置、启用索引线、库级模型覆盖、刷新策略与相关默认值的最小管理流
 - 应用必须提供导入、刷新、重扫、重建、清理与维护动作的明确用户入口，并能向用户表达动作已进入后台执行系统
 - 当前阶段来源管理至少应同时支持库级与来源根级 `refresh` / `rescan` 入口
 - 任务中心至少应支持：查看任务列表、查看阶段进度、取消、重试与恢复入口
 - 运行时健康界面至少应支持：查看本地运行时与远端提供方的健康摘要、诊断摘要与必要维护入口
+- 当前切片中，最小 Settings 工作区至少应提供：
+  - 内建 provider 配置查看与最小编辑入口
+  - 全局默认模型配置的最小编辑入口
+- 当前库上下文至少应提供：
+  - 库级 model override 的最小编辑入口
+  - 已解析模型选择（Resolved Model Selection）摘要
+- Settings 与库摘要都必须直接展示当前 exact `model_id`；用户不应需要理解内部选择字段才知道实际模型
+- Settings 的主编辑面只应承接 `provider_id` 与 `model_id`；`model_revision` 应作为只读运行时事实展示
 - 收藏管理与搜索历史管理至少应覆盖：查看与最小清理 / 删除能力
 - `favorites` 与 `search_history` 虽属于辅助状态，但一旦进入正式应用状态，就不应只存在于持久层而缺少管理入口
 
@@ -103,7 +111,7 @@
 - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义刷新、重扫、重建与启用索引线切换所依赖的摄取 / 索引语义
 - [140-library-source-management](../140-library-source-management/spec.md) 定义来源根生命周期、规则、来源清单与当前阶段来源管理能力域
 - [004-search](../004-search/spec.md) 定义搜索工作区中的搜索语义、结果语义、过滤分页规则与搜索交互
-- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义提供方绑定、能力与解析语义
+- [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义 provider config、模型选择与解析语义
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务、取消、恢复、健康摘要与维护执行的底层语义
 - [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义收藏、搜索历史、任务记录与应用工作区所依赖的物理持久化边界
 - [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义非搜索控制面接口族的请求 / 响应契约、动作回执与公开快照编码

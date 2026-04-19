@@ -1,4 +1,5 @@
 mod jobs;
+mod providers;
 mod search;
 mod sources;
 #[cfg(test)]
@@ -8,6 +9,7 @@ use crate::{
     api::*,
     model::*,
     persistence::*,
+    provider::*,
     qdrant::{probe_active_qdrant_namespace, stable_collection_name},
     source_roots::*,
     MULTIVECTOR_INDEX_LINE,
@@ -40,6 +42,10 @@ pub struct AppState {
     next_source_seq: u64,
     next_source_root_seq: u64,
     next_temp_asset_seq: u64,
+    provider_configs: BTreeMap<String, ProviderConfigRecord>,
+    global_model_defaults: ModelDefaultsPayload,
+    provider_probe_cache: BTreeMap<String, ProviderProbeSnapshot>,
+    provider_runtime_models: BTreeMap<String, ProviderRuntimeModelSnapshot>,
     libraries: BTreeMap<String, LibraryRecord>,
     library_order: Vec<String>,
     jobs: BTreeMap<String, JobRecord>,
@@ -57,6 +63,10 @@ impl Default for AppState {
             next_source_seq: 0,
             next_source_root_seq: 0,
             next_temp_asset_seq: 0,
+            provider_configs: default_provider_configs(),
+            global_model_defaults: default_global_model_defaults(),
+            provider_probe_cache: BTreeMap::new(),
+            provider_runtime_models: BTreeMap::new(),
             libraries: BTreeMap::new(),
             library_order: Vec::new(),
             jobs: BTreeMap::new(),
@@ -88,7 +98,9 @@ impl AppState {
     {
         let mut state = match durable_store_path.as_ref() {
             Some(path) => match load_durable_state_snapshot(path)? {
-                Some(snapshot) => Self::from_durable_snapshot(snapshot, durable_store_path.clone()),
+                Some(snapshot) => {
+                    Self::from_durable_snapshot(snapshot, durable_store_path.clone())
+                }
                 None => Self::with_durable_store_path(durable_store_path.clone()),
             },
             None => Self::with_durable_store_path(None),
@@ -99,6 +111,7 @@ impl AppState {
         state
             .reconcile_active_index_lines_on_boot_with_probe(probe_collection)
             .await;
+        state.refresh_boot_provider_probe_cache().await;
 
         Ok(state)
     }
@@ -111,7 +124,7 @@ impl AppState {
     }
 
     fn from_durable_snapshot(
-        snapshot: DurableAppStateSnapshot,
+        snapshot: LoadedDurableStateSnapshot,
         durable_store_path: Option<PathBuf>,
     ) -> Self {
         let mut state = Self::with_durable_store_path(durable_store_path);
@@ -121,8 +134,10 @@ impl AppState {
 
     fn durable_snapshot(&self) -> DurableAppStateSnapshot {
         DurableAppStateSnapshot {
-            version: 1,
+            version: 2,
             library_order: self.library_order.clone(),
+            provider_configs: self.provider_configs.clone(),
+            global_model_defaults: self.global_model_defaults.clone(),
             libraries: self
                 .libraries
                 .iter()
@@ -133,6 +148,7 @@ impl AppState {
                             id: library.id.clone(),
                             name: library.name.clone(),
                             config: library.config.clone(),
+                            model_overrides: library.model_overrides.clone(),
                             source_roots: library
                                 .source_roots
                                 .iter()
@@ -161,10 +177,19 @@ impl AppState {
         }
     }
 
-    fn apply_durable_snapshot(&mut self, snapshot: DurableAppStateSnapshot) {
-        self.library_order = snapshot.library_order;
-        self.libraries = snapshot
-            .libraries
+    fn apply_durable_snapshot(&mut self, snapshot: LoadedDurableStateSnapshot) {
+        let DurableAppStateSnapshot {
+            provider_configs,
+            global_model_defaults,
+            library_order,
+            libraries,
+            ..
+        } = snapshot.snapshot;
+
+        self.provider_configs = provider_configs;
+        self.global_model_defaults = global_model_defaults;
+        self.library_order = library_order;
+        self.libraries = libraries
             .into_iter()
             .map(|(library_id, library)| {
                 (
@@ -177,6 +202,7 @@ impl AppState {
                             MULTIVECTOR_INDEX_LINE,
                         ),
                         config: library.config,
+                        model_overrides: library.model_overrides,
                         source_roots: library
                             .source_roots
                             .into_iter()
@@ -211,6 +237,10 @@ impl AppState {
                 )
             })
             .collect();
+        ensure_default_model_config_state(
+            &mut self.provider_configs,
+            &mut self.global_model_defaults,
+        );
         self.rebuild_durable_sequences();
     }
 
@@ -245,6 +275,8 @@ impl AppState {
         self.jobs.clear();
         self.job_order.clear();
         self.temp_query_assets.clear();
+        self.provider_probe_cache.clear();
+        self.provider_runtime_models.clear();
         for library in self.libraries.values_mut() {
             library.latest_job_id = None;
             for root in library.source_roots.values_mut() {
@@ -390,6 +422,7 @@ impl AppState {
             }
         }
     }
+
 }
 
 impl AppState {
