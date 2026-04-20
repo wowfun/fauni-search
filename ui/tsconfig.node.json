@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "vite.config.ts",
+    "playwright.config.ts",
+    "playwright.global-setup.ts",
+    "playwright.global-teardown.ts",
+    "tests/e2e/**/*.ts",
+    "node-shims.d.ts"
+  ]
+}

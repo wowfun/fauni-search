@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { defineConfig } from "@playwright/test";
-import { getDevUiUrl } from "./tests/e2e/dev-runtime.js";
+import { getDevUiUrl } from "./tests/e2e/dev-runtime";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -13,8 +13,8 @@ export default defineConfig({
   },
   outputDir: path.join(os.tmpdir(), "fauni-search-playwright-results"),
   reporter: "list",
-  globalSetup: "./playwright.global-setup.js",
-  globalTeardown: "./playwright.global-teardown.js",
+  globalSetup: "./playwright.global-setup.ts",
+  globalTeardown: "./playwright.global-teardown.ts",
   use: {
     baseURL: getDevUiUrl(),
     headless: true,

@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv } from "vite";
 
-function requireEnv(env, name) {
+function requireEnv(env: Record<string, string>, name: string): string {
   const value = env[name];
   if (!value) {
     throw new Error(`Missing required environment variable ${name}`);
@@ -22,9 +22,9 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target: appTarget,
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api/, ""),
+          rewrite: (requestPath: string) => requestPath.replace(/^\/api/, ""),
         },
       },
-    }
+    },
   };
 });

@@ -28,11 +28,6 @@ export interface InventorySummary {
   out_of_scope: number;
 }
 
-export interface LibraryIndexLineStatus {
-  index_line: string;
-  status: string;
-}
-
 export interface LibraryCounts {
   accepted_items: number;
   pending_jobs: number;
@@ -67,8 +62,8 @@ export interface ModelCatalogEntry {
   provider_id: string;
   provider_kind: string;
   model_id: string;
+  model_version: string;
   model_revision?: string | null;
-  supported_index_lines: string[];
   embedding_capabilities: EmbeddingCapabilities;
   editable: boolean;
   status: string;
@@ -79,30 +74,27 @@ export interface ModelCatalogData {
   entries: ModelCatalogEntry[];
 }
 
+export interface ContentTypeBindingPayload {
+  enabled: boolean;
+  model: string;
+  vector_type: string;
+}
+
+export interface ContentTypesPayload {
+  content_types: Record<string, ContentTypeBindingPayload>;
+}
+
 export interface ModelSelectionPayload {
   provider_id: string;
   model_id: string;
 }
 
-export interface ModelSelectionOverridePayload {
-  provider_id?: string | null;
-  model_id?: string | null;
+export interface GlobalContentTypesData {
+  content_types: ContentTypesPayload;
 }
 
-export interface ModelDefaultsPayload {
-  index_lines: Record<string, ModelSelectionPayload>;
-}
-
-export interface ModelOverridesPayload {
-  index_lines: Record<string, ModelSelectionOverridePayload>;
-}
-
-export interface GlobalModelDefaultsData {
-  defaults: ModelDefaultsPayload;
-}
-
-export interface LibraryModelOverridesData {
-  overrides: ModelOverridesPayload;
+export interface LibraryContentTypesData {
+  content_types: ContentTypesPayload;
 }
 
 export interface ResolvedModelSelectionPayload {
@@ -110,6 +102,7 @@ export interface ResolvedModelSelectionPayload {
   provider_id: string;
   provider_kind: string;
   model_id: string;
+  model_version: string;
   model_revision?: string | null;
   embedding_capabilities: EmbeddingCapabilities;
   status: string;
@@ -117,8 +110,71 @@ export interface ResolvedModelSelectionPayload {
   last_probed_at?: string | null;
 }
 
-export interface ResolvedModelsData {
-  index_lines: Record<string, ResolvedModelSelectionPayload>;
+export interface ResolvedContentModelSelectionPayload {
+  binding_source: string;
+  content_type: string;
+  provider_id: string;
+  provider_kind: string;
+  model_id: string;
+  model_version: string;
+  model_revision?: string | null;
+  vector_type: string;
+  vector_space_id?: string | null;
+  embedding_capabilities: EmbeddingCapabilities;
+  status: string;
+  message: string;
+  last_probed_at?: string | null;
+}
+
+export interface ResolvedContentModelsData {
+  content_types: Record<string, ResolvedContentModelSelectionPayload>;
+}
+
+export interface VectorSpaceDiagnosticSnapshot {
+  vector_space_id: string;
+  lifecycle_state: string;
+  content_types: string[];
+  provider_id?: string | null;
+  provider_kind?: string | null;
+  model_id?: string | null;
+  model_version?: string | null;
+  vector_type?: string | null;
+  retired_at_ms?: number | null;
+}
+
+export interface VectorSpaceDiagnosticsData {
+  vector_spaces: VectorSpaceDiagnosticSnapshot[];
+}
+
+export interface RuntimeProcessHealthSnapshot {
+  component_id: string;
+  display_name: string;
+  status: string;
+  message: string;
+  last_checked_at: string;
+  details?: Record<string, unknown> | null;
+}
+
+export interface RuntimeProviderHealthSnapshot {
+  provider_id: string;
+  display_name: string;
+  provider_kind: string;
+  enabled: boolean;
+  status: string;
+  message: string;
+  last_probed_at?: string | null;
+  model_id?: string | null;
+  model_version?: string | null;
+  model_revision?: string | null;
+  embedding_capabilities?: EmbeddingCapabilities | null;
+  execution_input_types: string[];
+  runtime_adapters: string[];
+}
+
+export interface RuntimeHealthData {
+  app: RuntimeProcessHealthSnapshot;
+  qdrant: RuntimeProcessHealthSnapshot;
+  providers: RuntimeProviderHealthSnapshot[];
 }
 
 export interface EmbeddingCapabilities {
@@ -145,12 +201,23 @@ export interface ModelTestData {
   vectors: number[][];
   pooled_vector?: number[] | null;
   input_summary: ModelTestInputSummary;
+  comparison?: ModelTestComparisonData | null;
+}
+
+export interface ModelTestComparisonData {
+  input_modality: ModelTestModality | string;
+  operation_kind: string;
+  vector_shape: number[];
+  vectors: number[][];
+  pooled_vector?: number[] | null;
+  input_summary: ModelTestInputSummary;
+  similarity_to_primary: number;
 }
 
 export interface LibrarySnapshot {
   id: string;
-  name: string;
-  index_lines: LibraryIndexLineStatus[];
+  display_name: string;
+  name?: string;
   counts: LibraryCounts;
   latest_job_id?: string | null;
 }
@@ -256,8 +323,8 @@ export interface SearchResultItem extends VisualUnitSnapshot {
   cursor?: string | null;
 }
 
-export interface SearchErrorIndexLineDetail {
-  index_line: string;
+export interface SearchErrorContentTypeDetail {
+  content_type: string;
   status: string;
   job?: {
     job_id: string;
@@ -268,7 +335,14 @@ export interface SearchErrorIndexLineDetail {
 
 export interface ApiErrorDetails extends Record<string, unknown> {
   field?: string;
-  index_lines?: SearchErrorIndexLineDetail[];
+  content_types?: SearchErrorContentTypeDetail[];
+}
+
+export interface UnsupportedContentTypeSnapshot {
+  content_type: string;
+  model: string;
+  vector_type: string;
+  reason: string;
 }
 
 export interface ApiErrorPayload {
@@ -281,6 +355,7 @@ export interface ApiErrorPayload {
 export interface SearchOutcomeState {
   results?: SearchResultItem[];
   next_cursor?: string | null;
+  unsupported_content_types?: UnsupportedContentTypeSnapshot[];
   debug?: Record<string, unknown>;
   error?: ApiErrorPayload;
 }
@@ -392,15 +467,18 @@ export interface AppState {
   sourceRoots: SourceRootSnapshot[];
   providerConfigs: ProviderConfigSnapshot[];
   modelCatalog: ModelCatalogEntry[];
-  globalModelDefaults: ModelDefaultsPayload;
-  libraryModelOverrides: ModelOverridesPayload;
-  resolvedModels: ResolvedModelsData | null;
+  globalContentTypes: ContentTypesPayload;
+  libraryContentTypes: ContentTypesPayload;
+  resolvedContentModels: ResolvedContentModelsData | null;
+  vectorSpaceDiagnostics: VectorSpaceDiagnosticsData | null;
+  runtimeHealth: RuntimeHealthData | null;
   activeWorkspace: WorkspaceKind;
   inventoryFilters: InventoryFilters;
   searchFilters: SearchFilters;
   inventorySummary: InventorySummary;
   librarySources: SourceInventoryItem[];
-  libraryNameDraft: string;
+  libraryDisplayNameDraft: string;
+  libraryIdDraft: string;
   selectedLibraryId: string;
   editingSourceRootId: string;
   sourceRootPathDraft: string;
@@ -436,15 +514,23 @@ export interface AppState {
   editingProviderId: string;
   providerEnabledDraft: boolean;
   providerBaseUrlDraft: string;
+  selectedGlobalContentType: string;
+  selectedLibraryContentType: string;
   globalModelTestModalityDraft: ModelTestModality | "";
   globalModelTestTextDraft: string;
   globalModelTestFile: File | null;
+  globalModelTestComparisonModalityDraft: ModelTestModality | "";
+  globalModelTestComparisonTextDraft: string;
+  globalModelTestComparisonFile: File | null;
   globalModelTestResult: ModelTestData | null;
   globalModelTestError: ApiErrorPayload | null;
   globalModelTestPending: boolean;
   libraryModelTestModalityDraft: ModelTestModality | "";
   libraryModelTestTextDraft: string;
   libraryModelTestFile: File | null;
+  libraryModelTestComparisonModalityDraft: ModelTestModality | "";
+  libraryModelTestComparisonTextDraft: string;
+  libraryModelTestComparisonFile: File | null;
   libraryModelTestResult: ModelTestData | null;
   libraryModelTestError: ApiErrorPayload | null;
   libraryModelTestPending: boolean;

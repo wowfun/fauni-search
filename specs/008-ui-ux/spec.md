@@ -68,6 +68,11 @@
 ## 非搜索管理体验
 
 - 库管理流至少应覆盖：创建、删除、重命名、归档或等价生命周期操作
+- 库创建入口至少应提供：
+  - 必填或等价必填的 `display_name`
+  - 可选自定义 `library_id`
+  - 当未显式提供 `library_id` 时，界面可只收集 `display_name`，由系统按稳定 slug 规则生成 `library_id`
+- 应用界面在展示当前库、库选择器或与库相关的设置摘要时，必须以 `display_name` 作为主展示名；稳定 `library_id` 必须仍然可见或可明确获取，不得被 `display_name` 取代为身份字段
 - 来源根管理流至少应覆盖：查看、创建、编辑、启用、停用、删除，以及规则的最小管理能力
 - 来源清单视图至少应覆盖：库级聚合来源列表、按来源根 / 来源类型 / 状态筛选，以及最小状态摘要展示
 - 来源清单工作区可以作为搜索工作区之外的独立管理入口；当采用独立工作区时，搜索工作区最多保留来源管理摘要与跳转入口，不应继续以内嵌大列表挤占搜索入口
@@ -76,27 +81,52 @@
 - 当前阶段来源管理至少应同时支持库级与来源根级 `refresh` / `rescan` 入口
 - 任务中心至少应支持：查看任务列表、查看阶段进度、取消、重试与恢复入口
 - 运行时健康界面至少应支持：查看本地运行时与远端提供方的健康摘要、诊断摘要与必要维护入口
+- 当前切片中，最小运行时健康界面至少应聚合展示：
+  - app 自身健康摘要
+  - Qdrant 健康摘要
+  - provider 级 probe / 诊断摘要
+  - `local_sidecar` 当前 runtime-bound exact model、能力事实与工程增强 adapter 摘要
+  - `local_sidecar` 当前正式 Execution Input Types 摘要
 - 当前切片中，最小 Settings 工作区至少应提供：
   - 内建 provider 配置查看与最小编辑入口
-  - 全局默认模型配置的最小编辑入口
+  - 全局 `content_types` 配置的最小编辑入口
+- Settings 工作区中的 provider / model settings 保存语义固定为：
+  - 读取 repo 基线 `fauni.config.json` 与 `${APP_RUNTIME_DIR}/runtime-config.json` 的 merged 结果
+  - 用户侧写入默认只落 `${APP_RUNTIME_DIR}/runtime-config.json`
+  - Settings 不得把 provider config、全局 `content_types` 配置或库级内容类型覆盖重新写回 `state.sqlite`
 - Settings 工作区还应提供“测试当前 Provider + 模型配置”的最小诊断入口；该入口固定面向当前未保存草稿，而不是已保存配置
 - 当前库上下文至少应提供：
-  - 库级 model override 的最小编辑入口
-  - 已解析模型选择（Resolved Model Selection）摘要
-- Settings 与库摘要都必须直接展示当前 exact `model_id`；用户不应需要理解内部选择字段才知道实际模型
-- Settings 的主编辑面只应承接 `provider_id` 与 `model_id`；`model_revision` 应作为只读运行时事实展示
+  - 库级 `content_types` 覆盖的最小编辑入口
+  - 已解析内容模型（Resolved Content Model）摘要
+  - `vector_space` 生命周期摘要，至少区分当前 active 与处于延迟清理窗口内的 retired 空间
+- Settings 与库摘要都必须直接展示当前 exact `model_id`；用户不应需要理解内部执行线字段才知道实际模型
+- Settings 与库摘要都必须直接展示当前配置 `model_version`
+- Settings 的主编辑面应以内容类型为入口，承接：
+  - `enabled`
+  - `model`
+  - `vector_type`
+- `model_revision` 应作为只读运行时事实展示
+- `vector_space_id` 只允许出现在诊断 / 调试摘要中，不应成为主编辑面字段
+- 当前库上下文中的 `vector_space` 生命周期摘要属于诊断 / 调试面；它可以展示 `vector_space_id`、active / retired 状态与 retired 时间边界，但不承接主编辑语义
 - Settings 中的模型测试区必须根据当前模型的 `Embedding Capabilities.input_types` 动态渲染输入控件：
   - `text` 显示文本输入
   - `image` 显示单文件输入
+- Settings 中的模型测试区除主输入外，还必须支持一个可选的第二输入区域；第二输入的模态选择应与主输入独立，但同样必须受当前模型原生 `input_types` 约束
 - Settings 模型测试结果至少应展示：
   - 当前 resolved model 摘要
   - `operation_kind`
   - embedding `shape`
   - 向量结果
+- 当用户提供第二输入时，Settings 模型测试结果还必须展示：
+  - 第二输入的 `operation_kind`
+  - 第二输入的 embedding `shape`
+  - 第二输入的向量结果
+  - 第二输入与主输入之间的相似度
 - 当当前 provider / model 不支持测试时，Settings 必须明确展示 `not_supported` 或等价原因，而不是静默禁用
 - Settings、model-catalog 与 resolved model 摘要只应展示模型原生向量能力；`document` / `video` 这类工程增强输入不得作为模型原生能力或原生测试模态呈现
 - 工程增强能力若需暴露，只允许出现在运行时健康 / 诊断或调试面中，并且必须与模型原生能力分开展示
 - 运行时诊断面若展示工程增强能力，应使用命名 adapter 列表，而不是把底层 operation 名称或 `document` / `video` 伪装成模型原生能力
+- Settings 或独立 Runtime Health Surface 若承载运行时诊断摘要，应明确把“模型原生能力”、“Execution Input Types”和“runtime adapters”分成三个字段区块，不得把 adapter 列表或执行输入列表混入 `EmbeddingCapabilities`
 - 收藏管理与搜索历史管理至少应覆盖：查看与最小清理 / 删除能力
 - `favorites` 与 `search_history` 虽属于辅助状态，但一旦进入正式应用状态，就不应只存在于持久层而缺少管理入口
 

@@ -9,15 +9,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const fixtureImagePath = path.resolve(
   __dirname,
-  "../../../tests/fixtures/tatdqa-page-images/images/tatdqa-page-0001.png"
+  "../../../../tests/fixtures/tatdqa-page-images/images/tatdqa-page-0001.png"
 );
-const fixtureDocumentPath = path.resolve(__dirname, "../../../data/example/2025年中期报告.pdf");
+const fixtureDocumentPath = path.resolve(__dirname, "../../../../data/example/2025年中期报告.pdf");
 const fixtureVideoPath = path.resolve(
   __dirname,
-  "../../../data/example/generate_q2_report_from_csv_bank_data-720-512.mp4"
+  "../../../../data/example/generate_q2_report_from_csv_bank_data-720-512.mp4"
 );
-const invalidQueryUploadPath = path.resolve(__dirname, "../../../README.md");
-const venvPythonPath = path.resolve(__dirname, "../../../.venv/bin/python");
+const invalidQueryUploadPath = path.resolve(__dirname, "../../../../README.md");
+const venvPythonPath = path.resolve(__dirname, "../../../../.venv/bin/python");
 const workspacePollWaitMs = 3_500;
 
 async function pasteImageIntoQueryTarget(page, imagePath) {
@@ -55,6 +55,23 @@ async function createLibrary(page, suffix) {
   await page.getByTestId("create-library-button").click();
   await expect(page.getByTestId("current-library-name")).toHaveText(libraryName);
   return libraryName;
+}
+
+export function registerLibraryScenarios() {
+  test("library creation shows display name and custom library id separately", async ({ page }) => {
+    const displayName = `Invoice Demo ${Date.now()}`;
+    const libraryId = `invoice-demo-${Date.now()}`;
+
+    await page.goto("/");
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+    await page.getByTestId("library-name-input").fill(displayName);
+    await page.getByTestId("library-id-input").fill(libraryId);
+    await page.getByTestId("create-library-button").click();
+
+    await expect(page.getByTestId("current-library-name")).toHaveText(displayName);
+    await expect(page.getByTestId("current-library-id")).toHaveText(libraryId);
+    await expect(page.getByTestId("library-select")).toContainText(`${displayName} (${libraryId})`);
+  });
 }
 
 async function openInventoryWorkspace(page) {
@@ -335,218 +352,211 @@ async function setRangeValue(locator, value) {
   }, value);
 }
 
-test("demo import and search closes the current UI happy path", async ({ page }) => {
-  await createLibrary(page, "smoke");
-  await expect(page.getByTestId("run-demo-button")).toBeEnabled();
+export function registerSearchTextScenarios() {
+  test("demo import and search closes the current UI happy path", async ({ page }) => {
+    await createLibrary(page, "smoke");
+    await expect(page.getByTestId("run-demo-button")).toBeEnabled();
 
-  await page.getByTestId("run-demo-button").click();
-  await waitForFirstJobCompleted(page);
-
-  const firstResult = page.getByTestId("result-card").first();
-  await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
-  await expect(firstResult.getByTestId("result-score")).toBeVisible();
-
-  await expect(page.getByTestId("detail-panel")).toBeVisible();
-  await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
-  await expect(page.getByTestId("visual-preview")).toBeVisible();
-  await expect(page.getByTestId("preview-link")).toBeVisible();
-});
-
-test("search before import shows not_ready instead of an empty result", async ({ page }) => {
-  await createLibrary(page, "not-ready");
-
-  await page.getByTestId("search-text-input").fill("operating activities");
-  await page.getByTestId("search-submit-button").click();
-
-  await expect(page.getByTestId("search-error-notice")).toBeVisible();
-  await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
-  await expect(page.getByTestId("search-error-message")).toContainText("active index");
-});
-
-test("default workspace keeps search first and moves inventory out of the center flow", async ({ page }) => {
-  await createLibrary(page, "workspace-default");
-
-  await expect(page.getByTestId("workspace-tab-search")).toBeVisible();
-  await expect(page.getByTestId("workspace-tab-inventory")).toBeVisible();
-  await expect(page.getByTestId("search-panel")).toBeVisible();
-  await expect(page.getByTestId("inventory-panel")).toHaveCount(0);
-  await expect(page.getByTestId("inventory-bridge-button")).toBeVisible();
-});
-
-test("switching between search and inventory preserves search drafts results and detail selection", async ({ page }) => {
-  await createLibrary(page, "workspace-switch-preserve");
-  await page.getByTestId("run-demo-button").click();
-  await waitForFirstJobCompleted(page);
-
-  const firstResult = page.getByTestId("result-card").first();
-  await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
-  const visualUnitId = await firstResult.getAttribute("data-visual-unit-id");
-  await firstResult.locator(".result-select").click();
-  await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
-  await expect(page.getByTestId("search-text-input")).toHaveValue(
-    "What is the percentage change in the net cash provided from operating activities?"
-  );
-
-  await openInventoryWorkspace(page);
-  await expect(page.getByTestId("inventory-summary")).toBeVisible();
-  await expect(page.getByTestId("library-source-card").first()).toBeVisible();
-
-  await openSearchWorkspace(page);
-  await expect(page.getByTestId("search-text-input")).toHaveValue(
-    "What is the percentage change in the net cash provided from operating activities?"
-  );
-  await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
-  await expect(
-    page.locator(`[data-testid="result-card"][data-visual-unit-id="${visualUnitId}"]`)
-  ).toHaveClass(/active/);
-});
-
-test("workspace refresh preserves focused editable inputs and drafts", async ({ page }) => {
-  const libraryName = `playwright-focus-${Date.now()}`;
-  const secondLibraryName = `playwright-focus-next-${Date.now()}`;
-
-  await page.goto("/");
-  await expect(page.getByTestId("workspace-shell")).toBeVisible();
-
-  const libraryNameInput = page.getByTestId("library-name-input");
-  await libraryNameInput.click();
-  await page.keyboard.type(libraryName);
-  await expect(libraryNameInput).toBeFocused();
-  await expect(libraryNameInput).toHaveValue(libraryName);
-
-  await page.waitForTimeout(workspacePollWaitMs);
-  await expect(page.getByTestId("library-name-input")).toBeFocused();
-  await expect(page.getByTestId("library-name-input")).toHaveValue(libraryName);
-
-  await page.getByTestId("create-library-button").click();
-  await expect(page.getByTestId("current-library-name")).toHaveText(libraryName);
-
-  const secondLibraryNameInput = page.getByTestId("library-name-input");
-  await secondLibraryNameInput.click();
-  await page.keyboard.type(secondLibraryName);
-  await expect(page.getByTestId("library-name-input")).toBeFocused();
-  await expect(page.getByTestId("library-name-input")).toHaveValue(secondLibraryName);
-
-  await page.waitForTimeout(workspacePollWaitMs);
-  await expect(page.getByTestId("library-name-input")).toBeFocused();
-  await expect(page.getByTestId("library-name-input")).toHaveValue(secondLibraryName);
-
-  await page.getByTestId("search-mode-document").click();
-  const queryDocumentRangeStart = page.getByTestId("query-document-range-start");
-  await queryDocumentRangeStart.click();
-  await page.keyboard.type("12");
-  await expect(page.getByTestId("query-document-range-start")).toBeFocused();
-  await expect(page.getByTestId("query-document-range-start")).toHaveValue("12");
-
-  await page.waitForTimeout(workspacePollWaitMs);
-  await expect(page.getByTestId("query-document-range-start")).toBeFocused();
-  await expect(page.getByTestId("query-document-range-start")).toHaveValue("12");
-});
-
-test("workspace refresh preserves the open PDF detail preview element", async ({ page }) => {
-  const fixtures = createTempDocumentSearchFixtures();
-  try {
-    await createLibrary(page, "detail-preview-pdf-stability");
-
-    await page
-      .getByTestId("import-paths-input")
-      .fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
-    await page.getByTestId("import-submit-button").click();
+    await page.getByTestId("run-demo-button").click();
     await waitForFirstJobCompleted(page);
 
-    await page.getByTestId("search-mode-document").click();
-    await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
-    await expect(page.getByTestId("query-document-preview")).toBeVisible();
+    const firstResult = page.getByTestId("result-card").first();
+    await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await expect(firstResult.getByTestId("result-score")).toBeVisible();
 
+    await expect(page.getByTestId("detail-panel")).toBeVisible();
+    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+    await expect(page.getByTestId("visual-preview")).toBeVisible();
+    await expect(page.getByTestId("preview-link")).toBeVisible();
+  });
+
+  test("search before import shows not_ready instead of an empty result", async ({ page }) => {
+    await createLibrary(page, "not-ready");
+
+    await page.getByTestId("search-text-input").fill("operating activities");
     await page.getByTestId("search-submit-button").click();
 
-    const documentPageResult = page.locator('[data-testid="result-card"][data-kind="document_page"]').first();
-    await expect(documentPageResult).toBeVisible({ timeout: 2 * 60 * 1000 });
-    await documentPageResult.locator(".result-select").click();
+    await expect(page.getByTestId("search-error-notice")).toBeVisible();
+    await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
+    await expect(page.getByTestId("search-error-message")).toContainText("active index");
+  });
+}
 
-    const preview = page.locator('iframe[data-testid="visual-preview"]');
-    await expect(preview).toBeVisible();
+export function registerWorkspaceRegressionScenarios() {
+  test("default workspace keeps search first and moves inventory out of the center flow", async ({ page }) => {
+    await createLibrary(page, "workspace-default");
 
-    const probeValue = `pdf-preview-probe-${Date.now()}`;
-    await preview.evaluate((element, nextProbeValue) => {
-      element.setAttribute("data-preview-probe", nextProbeValue);
-    }, probeValue);
+    await expect(page.getByTestId("workspace-tab-search")).toBeVisible();
+    await expect(page.getByTestId("workspace-tab-inventory")).toBeVisible();
+    await expect(page.getByTestId("search-panel")).toBeVisible();
+    await expect(page.getByTestId("inventory-panel")).toHaveCount(0);
+    await expect(page.getByTestId("inventory-bridge-button")).toBeVisible();
+  });
+
+  test("switching between search and inventory preserves search drafts results and detail selection", async ({ page }) => {
+    await createLibrary(page, "workspace-switch-preserve");
+    await page.getByTestId("run-demo-button").click();
+    await waitForFirstJobCompleted(page);
+
+    const firstResult = page.getByTestId("result-card").first();
+    await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    const visualUnitId = await firstResult.getAttribute("data-visual-unit-id");
+    await firstResult.locator(".result-select").click();
+    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+    await expect(page.getByTestId("search-text-input")).toHaveValue(
+      "What is the percentage change in the net cash provided from operating activities?"
+    );
+
+    await openInventoryWorkspace(page);
+    await expect(page.getByTestId("inventory-summary")).toBeVisible();
+    await expect(page.getByTestId("library-source-card").first()).toBeVisible();
+
+    await openSearchWorkspace(page);
+    await expect(page.getByTestId("search-text-input")).toHaveValue(
+      "What is the percentage change in the net cash provided from operating activities?"
+    );
+    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+    await expect(
+      page.locator(`[data-testid="result-card"][data-visual-unit-id="${visualUnitId}"]`)
+    ).toHaveClass(/active/);
+  });
+
+  test("workspace refresh preserves focused editable inputs and drafts", async ({ page }) => {
+    const libraryName = `playwright-focus-${Date.now()}`;
+    const secondLibraryName = `playwright-focus-next-${Date.now()}`;
+
+    await page.goto("/");
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    const libraryNameInput = page.getByTestId("library-name-input");
+    await libraryNameInput.click();
+    await page.keyboard.type(libraryName);
+    await expect(libraryNameInput).toBeFocused();
+    await expect(libraryNameInput).toHaveValue(libraryName);
 
     await page.waitForTimeout(workspacePollWaitMs);
-    await expect(page.locator('iframe[data-testid="visual-preview"]')).toHaveAttribute(
-      "data-preview-probe",
-      probeValue
+    await expect(page.getByTestId("library-name-input")).toBeFocused();
+    await expect(page.getByTestId("library-name-input")).toHaveValue(libraryName);
+
+    await page.getByTestId("create-library-button").click();
+    await expect(page.getByTestId("current-library-name")).toHaveText(libraryName);
+
+    const secondLibraryNameInput = page.getByTestId("library-name-input");
+    await secondLibraryNameInput.click();
+    await page.keyboard.type(secondLibraryName);
+    await expect(page.getByTestId("library-name-input")).toBeFocused();
+    await expect(page.getByTestId("library-name-input")).toHaveValue(secondLibraryName);
+
+    await page.waitForTimeout(workspacePollWaitMs);
+    await expect(page.getByTestId("library-name-input")).toBeFocused();
+    await expect(page.getByTestId("library-name-input")).toHaveValue(secondLibraryName);
+
+    await page.getByTestId("search-mode-document").click();
+    const queryDocumentRangeStart = page.getByTestId("query-document-range-start");
+    await queryDocumentRangeStart.click();
+    await page.keyboard.type("12");
+    await expect(page.getByTestId("query-document-range-start")).toBeFocused();
+    await expect(page.getByTestId("query-document-range-start")).toHaveValue("12");
+
+    await page.waitForTimeout(workspacePollWaitMs);
+    await expect(page.getByTestId("query-document-range-start")).toBeFocused();
+    await expect(page.getByTestId("query-document-range-start")).toHaveValue("12");
+  });
+
+  test("workspace refresh preserves the open PDF detail preview element", async ({ page }) => {
+    const fixtures = createTempDocumentSearchFixtures();
+    try {
+      await createLibrary(page, "detail-preview-pdf-stability");
+
+      await page
+        .getByTestId("import-paths-input")
+        .fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
+      await page.getByTestId("import-submit-button").click();
+      await waitForFirstJobCompleted(page);
+
+      await page.getByTestId("search-mode-document").click();
+      await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
+      await expect(page.getByTestId("query-document-preview")).toBeVisible();
+
+      await page.getByTestId("search-submit-button").click();
+
+      const documentPageResult = page.locator('[data-testid="result-card"][data-kind="document_page"]').first();
+      await expect(documentPageResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+      await documentPageResult.locator(".result-select").click();
+
+      const preview = page.locator('iframe[data-testid="visual-preview"]');
+      await expect(preview).toBeVisible();
+
+      const probeValue = `pdf-preview-probe-${Date.now()}`;
+      await preview.evaluate((element, nextProbeValue) => {
+        element.setAttribute("data-preview-probe", nextProbeValue);
+      }, probeValue);
+
+      await page.waitForTimeout(workspacePollWaitMs);
+      await expect(page.locator('iframe[data-testid="visual-preview"]')).toHaveAttribute(
+        "data-preview-probe",
+        probeValue
+      );
+    } finally {
+      fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+    }
+  });
+}
+
+export function registerSettingsScenarios() {
+  test("settings workspace shows exact models and editable provider config", async ({ page }) => {
+    const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
+
+    await createLibrary(page, "provider-settings");
+    await expect(page.getByTestId("provider-bridge-summary")).toContainText(localModelId);
+
+    await openSettingsWorkspace(page);
+
+    await expect(page.getByTestId("provider-configs-panel")).toContainText("Local Sidecar");
+    await expect(page.getByTestId("provider-configs-panel")).toContainText("DashScope");
+    await expect(page.getByTestId("provider-configs-panel")).not.toContainText("qdrant");
+    await expect(page.getByTestId("settings-workspace")).not.toContainText("Region");
+    await expect(page.getByTestId("settings-workspace")).not.toContainText("Provider profiles");
+    await expect(page.getByTestId("settings-workspace")).not.toContainText("selection_kind");
+    await expect(page.getByTestId("settings-workspace")).not.toContainText("variant");
+    await expect(page.getByTestId("resolved-content-models-panel")).toContainText(localModelId);
+
+    await page.getByTestId("provider-config-id").selectOption("dashscope");
+    await page.getByTestId("provider-base-url").fill("https://dashscope.aliyuncs.com");
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().includes("/settings/providers/dashscope") &&
+          response.request().method() === "PATCH" &&
+          response.ok()
+      ),
+      page.getByTestId("provider-config-submit-button").click(),
+    ]);
+    await expect(page.getByTestId("provider-base-url")).toHaveValue(
+      "https://dashscope.aliyuncs.com"
     );
-  } finally {
-    fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
-  }
-});
+    await expect(page.getByTestId("resolved-content-models-panel")).toContainText(localModelId);
 
-test("settings workspace shows exact models and resolves library overrides", async ({ page }) => {
-  const dashscopeModelId = "qwen3-vl-embedding";
-  const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
+    await openSearchWorkspace(page);
+    await expect(page.getByTestId("provider-bridge-summary")).toContainText(localModelId);
+  });
 
-  await createLibrary(page, "provider-settings");
-  await expect(page.getByTestId("provider-bridge-summary")).toContainText(localModelId);
+  test("settings workspace tests only native embedding inputs and shows unsupported drafts", async ({
+    page,
+  }) => {
+    const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
+    const dashscopeModelId = "qwen3-vl-embedding";
 
-  await openSettingsWorkspace(page);
-
-  await expect(page.getByTestId("provider-configs-panel")).toContainText("Local Sidecar");
-  await expect(page.getByTestId("provider-configs-panel")).toContainText("DashScope");
-  await expect(page.getByTestId("provider-configs-panel")).not.toContainText("qdrant");
-  await expect(page.getByTestId("settings-workspace")).not.toContainText("Region");
-  await expect(page.getByTestId("settings-workspace")).not.toContainText("Provider profiles");
-  await expect(page.getByTestId("settings-workspace")).not.toContainText("selection_kind");
-  await expect(page.getByTestId("settings-workspace")).not.toContainText("variant");
-  await expect(page.getByTestId("resolved-models-panel")).toContainText(localModelId);
-
-  await page.getByTestId("provider-config-id").selectOption("dashscope");
-  await page.getByTestId("provider-base-url").fill("https://dashscope.aliyuncs.com");
-  await Promise.all([
-    page.waitForResponse(
-      (response) =>
-        response.url().includes("/settings/providers/dashscope") &&
-        response.request().method() === "PATCH" &&
-        response.ok()
-    ),
-    page.getByTestId("provider-config-submit-button").click(),
-  ]);
-
-  await page.getByTestId("library-model-provider-id").selectOption("dashscope");
-  await page.getByTestId("library-model-id").selectOption(dashscopeModelId);
-  await expect(page.getByTestId("library-model-id")).toHaveValue(dashscopeModelId);
-  await Promise.all([
-    page.waitForResponse(
-      (response) =>
-        response.url().includes("/model-overrides") &&
-        response.request().method() === "PATCH" &&
-        response.ok()
-    ),
-    page.getByTestId("library-model-overrides-submit-button").click(),
-  ]);
-
-  const resolvedModels = page.getByTestId("resolved-models-panel");
-  await expect(resolvedModels).toContainText(dashscopeModelId);
-  await expect(resolvedModels).toContainText("library_override");
-  await expect(resolvedModels).toContainText("not_supported");
-  await expect(page.getByTestId("provider-bridge-summary")).toContainText(dashscopeModelId);
-
-  await openSearchWorkspace(page);
-  await expect(page.getByTestId("provider-bridge-summary")).toContainText(dashscopeModelId);
-});
-
-test("settings workspace tests only native embedding inputs and shows unsupported drafts", async ({
-  page,
-}) => {
-  const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
-  const dashscopeModelId = "qwen3-vl-embedding";
-
-  await page.route("**/api/settings/model-tests", async (route) => {
+    await page.route("**/api/settings/model-tests", async (route) => {
     const body = route.request().postDataBuffer()?.toString("latin1") ?? "";
     const providerMatch = body.match(/name="provider_id"\r\n\r\n([a-z_]+)/);
     const providerId = providerMatch?.[1] ?? "local_sidecar";
     const modalityMatch = body.match(/name="input_modality"\r\n\r\n([a-z]+)/);
     const modality = modalityMatch?.[1] ?? "text";
+    const comparisonModalityMatch = body.match(
+      /name="comparison_input_modality"\r\n\r\n([a-z]+)/
+    );
+    const comparisonModality = comparisonModalityMatch?.[1] ?? null;
     if (providerId === "local_sidecar") {
       expect(body).not.toContain('name="provider_base_url"');
     }
@@ -557,6 +567,9 @@ test("settings workspace tests only native embedding inputs and shows unsupporte
     const vectorsByModality = {
       text: [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
       image: [[1, 2, 3]],
+    };
+    const similarityByPair = {
+      "text:image": 0.876543,
     };
 
     await route.fulfill({
@@ -601,50 +614,108 @@ test("settings workspace tests only native embedding inputs and shows unsupporte
                         : "application/pdf",
                   size_bytes: 1234,
                 },
+          comparison: comparisonModality
+            ? {
+                input_modality: comparisonModality,
+                operation_kind: operationKindByModality[comparisonModality],
+                vector_shape: [
+                  vectorsByModality[comparisonModality].length,
+                  vectorsByModality[comparisonModality][0].length,
+                ],
+                vectors: vectorsByModality[comparisonModality],
+                pooled_vector: vectorsByModality[comparisonModality][0],
+                input_summary: {
+                  kind: "file",
+                  original_filename: `query-${comparisonModality}`,
+                  content_type: comparisonModality === "image" ? "image/png" : "application/octet-stream",
+                  size_bytes: 4321,
+                },
+                similarity_to_primary: similarityByPair[`${modality}:${comparisonModality}`] ?? 0.5,
+              }
+            : null,
         },
       }),
     });
+    });
+
+    await createLibrary(page, "provider-settings-model-test");
+    await openSettingsWorkspace(page);
+
+    const globalPanel = page.getByTestId("global-model-test-panel");
+    await expect(globalPanel).toContainText(localModelId);
+    await expect(page.getByTestId("global-model-test-support-message")).toContainText("text, image");
+    await expect(page.getByTestId("global-model-capabilities")).toContainText("inputs text, image");
+    await expect(page.getByTestId("global-model-capabilities")).toContainText(
+      "vectors multi_vector_late_interaction"
+    );
+    await expect(page.locator('[data-testid="global-model-test-modality"] option')).toHaveCount(2);
+    await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(0)).toHaveText(
+      "text"
+    );
+    await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(1)).toHaveText(
+      "image"
+    );
+    await expect(page.getByTestId("global-model-test-modality")).toHaveValue("text");
+
+    await page.getByTestId("global-model-test-text").fill("Revenue 46 percent");
+    await page.getByTestId("global-model-test-submit-button").click();
+    await expect(page.getByTestId("global-model-test-shape")).toContainText("[2, 3]");
+    await expect(page.getByTestId("global-model-test-vectors")).toContainText("0.1");
+
+    await page.getByTestId("global-model-test-comparison-modality").selectOption("image");
+    await page.getByTestId("global-model-test-comparison-file").setInputFiles(fixtureImagePath);
+    await page.getByTestId("global-model-test-submit-button").click();
+    await expect(page.getByTestId("global-model-test-comparison-shape")).toContainText("[1, 3]");
+    await expect(page.getByTestId("global-model-test-comparison-vectors")).toContainText("1");
+    await expect(page.getByTestId("global-model-test-similarity")).toContainText("0.876543");
+
+    await page.getByTestId("global-model-test-modality").selectOption("image");
+    await expect(page.getByTestId("global-model-test-file")).toBeVisible();
+    await page.getByTestId("global-model-test-file").setInputFiles(fixtureImagePath);
+    await page.getByTestId("global-model-test-submit-button").click();
+    await expect(page.getByTestId("global-model-test-shape")).toContainText("[1, 3]");
+    await expect(page.getByTestId("global-model-test-vectors")).toContainText("1");
+
+    await page.getByTestId("library-content-type-provider-id").selectOption("dashscope");
+    await page.getByTestId("library-content-type-model-id").selectOption(dashscopeModelId);
+    await expect(page.getByTestId("library-model-test-support-message")).toContainText("not executable");
+    await expect(page.getByTestId("library-model-capabilities")).toContainText("inputs text, image");
+    await expect(page.getByTestId("library-model-test-submit-button")).toBeDisabled();
   });
+}
 
-  await createLibrary(page, "provider-settings-model-test");
-  await openSettingsWorkspace(page);
+export function registerRuntimeHealthScenarios() {
+  test("runtime health panel shows native capabilities execution inputs and vector-space diagnostics", async ({
+    page,
+  }) => {
+    const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
 
-  const globalPanel = page.getByTestId("global-model-test-panel");
-  await expect(globalPanel).toContainText(localModelId);
-  await expect(page.getByTestId("global-model-test-support-message")).toContainText("text, image");
-  await expect(page.getByTestId("global-model-capabilities")).toContainText("inputs text, image");
-  await expect(page.getByTestId("global-model-capabilities")).toContainText(
-    "vectors multi_vector_late_interaction"
-  );
-  await expect(page.locator('[data-testid="global-model-test-modality"] option')).toHaveCount(2);
-  await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(0)).toHaveText(
-    "text"
-  );
-  await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(1)).toHaveText(
-    "image"
-  );
-  await expect(page.getByTestId("global-model-test-modality")).toHaveValue("text");
+    await createLibrary(page, "runtime-health");
+    await page.getByTestId("run-demo-button").click();
+    await waitForFirstJobCompleted(page);
 
-  await page.getByTestId("global-model-test-text").fill("Revenue 46 percent");
-  await page.getByTestId("global-model-test-submit-button").click();
-  await expect(page.getByTestId("global-model-test-shape")).toContainText("[2, 3]");
-  await expect(page.getByTestId("global-model-test-vectors")).toContainText("0.1");
+    await openSettingsWorkspace(page);
 
-  await page.getByTestId("global-model-test-modality").selectOption("image");
-  await expect(page.getByTestId("global-model-test-file")).toBeVisible();
-  await page.getByTestId("global-model-test-file").setInputFiles(fixtureImagePath);
-  await page.getByTestId("global-model-test-submit-button").click();
-  await expect(page.getByTestId("global-model-test-shape")).toContainText("[1, 3]");
-  await expect(page.getByTestId("global-model-test-vectors")).toContainText("1");
+    const runtimeHealthPanel = page.getByTestId("runtime-health-panel");
+    await expect(runtimeHealthPanel).toContainText("Local Sidecar");
+    await expect(runtimeHealthPanel).toContainText(localModelId);
+    await expect(runtimeHealthPanel).toContainText("Embedding capabilities");
+    await expect(runtimeHealthPanel).toContainText("inputs text, image");
+    await expect(runtimeHealthPanel).toContainText("Execution inputs");
+    await expect(runtimeHealthPanel).toContainText("text, image, document, video");
+    await expect(runtimeHealthPanel).toContainText("runtime adapters");
+    await expect(runtimeHealthPanel).toContainText("document_query_via_page_images");
+    await expect(runtimeHealthPanel).toContainText("video_query_via_frame_images");
 
-  await page.getByTestId("library-model-provider-id").selectOption("dashscope");
-  await page.getByTestId("library-model-id").selectOption(dashscopeModelId);
-  await expect(page.getByTestId("library-model-test-support-message")).toContainText("not executable");
-  await expect(page.getByTestId("library-model-capabilities")).toContainText("inputs text, image");
-  await expect(page.getByTestId("library-model-test-submit-button")).toBeDisabled();
-});
+    const vectorSpacesPanel = page.getByTestId("vector-space-diagnostics-panel");
+    await expect(vectorSpacesPanel).toContainText("active");
+    await expect(vectorSpacesPanel).toContainText(localModelId);
+    await expect(vectorSpacesPanel).toContainText("multi_vector_late_interaction");
+  });
+}
 
-test("search workspace supports shared filters and load more pagination", async ({ page }) => {
+export function registerSearchTextControlScenarios() {
+  test("search workspace supports shared filters and load more pagination", async ({ page }) => {
   const searchRequests = [];
   let searchCallCount = 0;
   const sourcePathPrefix = "/tmp/search-fixtures/set-a";
@@ -753,9 +824,9 @@ test("search workspace supports shared filters and load more pagination", async 
       path_prefix: sourcePathPrefix,
     },
   });
-});
+  });
 
-test("search workspace rejects invalid time range filters before sending the request", async ({ page }) => {
+  test("search workspace rejects invalid time range filters before sending the request", async ({ page }) => {
   await createLibrary(page, "search-invalid-time-range");
 
   await page.getByTestId("search-text-input").fill("Revenue 46 percent");
@@ -766,9 +837,9 @@ test("search workspace rejects invalid time range filters before sending the req
   await expect(page.getByTestId("search-error-notice")).toBeVisible();
   await expect(page.getByTestId("search-error-code")).toHaveText("validation_failed");
   await expect(page.getByTestId("search-error-message")).toContainText("时间范围过滤器");
-});
+  });
 
-test("invalid import paths show explicit rejection feedback", async ({ page }) => {
+  test("invalid import paths show explicit rejection feedback", async ({ page }) => {
   await createLibrary(page, "invalid-import");
 
   await page.getByTestId("import-paths-input").fill("README.md");
@@ -779,9 +850,11 @@ test("invalid import paths show explicit rejection feedback", async ({ page }) =
   await expect(rejected).toBeVisible();
   await expect(rejected).toHaveAttribute("data-reason-code", "unsupported_type");
   await expect(page.getByTestId("import-no-job")).toBeVisible();
-});
+  });
+}
 
-test("image mode uploads a query image and returns real results", async ({ page }) => {
+export function registerSearchImageScenarios() {
+  test("image mode uploads a query image and returns real results", async ({ page }) => {
   await createLibrary(page, "image-search");
   await expect(page.getByTestId("run-demo-button")).toBeEnabled();
   await page.getByTestId("run-demo-button").click();
@@ -798,9 +871,9 @@ test("image mode uploads a query image and returns real results", async ({ page 
   await expect(firstResult.getByTestId("result-score")).toBeVisible();
   await expect(page.getByTestId("detail-panel")).toBeVisible();
   await expect(page.getByTestId("visual-preview")).toBeVisible();
-});
+  });
 
-test("image mode can paste a query image like a search box", async ({ page }) => {
+  test("image mode can paste a query image like a search box", async ({ page }) => {
   await createLibrary(page, "image-paste-search");
   await expect(page.getByTestId("run-demo-button")).toBeEnabled();
   await page.getByTestId("run-demo-button").click();
@@ -818,9 +891,9 @@ test("image mode can paste a query image like a search box", async ({ page }) =>
   await expect(firstResult.getByTestId("result-score")).toBeVisible();
   await expect(page.getByTestId("detail-panel")).toBeVisible();
   await expect(page.getByTestId("visual-preview")).toBeVisible();
-});
+  });
 
-test("image mode can reuse a library image object as the query image", async ({ page }) => {
+  test("image mode can reuse a library image object as the query image", async ({ page }) => {
   await createLibrary(page, "image-library-object");
   await expect(page.getByTestId("run-demo-button")).toBeEnabled();
   await page.getByTestId("run-demo-button").click();
@@ -839,9 +912,9 @@ test("image mode can reuse a library image object as the query image", async ({ 
   await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
   await expect(firstResult.getByTestId("result-score")).toBeVisible();
   await expect(page.getByTestId("detail-panel")).toBeVisible();
-});
+  });
 
-test("image mode can reuse a library document_page object as the query image", async ({ page }) => {
+  test("image mode can reuse a library document_page object as the query image", async ({ page }) => {
   const pdfPath = createTempPdfFixture();
   try {
     await createLibrary(page, "document-page-library-object");
@@ -871,9 +944,9 @@ test("image mode can reuse a library document_page object as the query image", a
   } finally {
     fs.rmSync(pdfPath, { force: true });
   }
-});
+  });
 
-test("image mode before import shows not_ready instead of an empty result", async ({ page }) => {
+  test("image mode before import shows not_ready instead of an empty result", async ({ page }) => {
   await createLibrary(page, "image-not-ready");
 
   await page.getByTestId("search-mode-image").click();
@@ -885,9 +958,9 @@ test("image mode before import shows not_ready instead of an empty result", asyn
   await expect(page.getByTestId("search-error-notice")).toBeVisible();
   await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
   await expect(page.getByTestId("search-error-message")).toContainText("active index");
-});
+  });
 
-test("image mode rejects non-image query uploads with explicit feedback", async ({ page }) => {
+  test("image mode rejects non-image query uploads with explicit feedback", async ({ page }) => {
   await createLibrary(page, "image-invalid-upload");
 
   await page.getByTestId("search-mode-image").click();
@@ -899,9 +972,11 @@ test("image mode rejects non-image query uploads with explicit feedback", async 
   await expect(page.getByTestId("search-error-message")).toContainText(
     "Only common image files are accepted as query images right now."
   );
-});
+  });
+}
 
-test("video mode uploads a query video and returns real results", async ({ page }) => {
+export function registerSearchVideoScenarios() {
+  test("video mode uploads a query video and returns real results", async ({ page }) => {
   const fixtures = createTempVideoSearchFixtures();
   try {
     await createLibrary(page, "video-search");
@@ -930,9 +1005,9 @@ test("video mode uploads a query video and returns real results", async ({ page 
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("video mode can reuse a library source as the query video and fall back to whole-video search", async ({ page }) => {
+  test("video mode can reuse a library source as the query video and fall back to whole-video search", async ({ page }) => {
   const fixtures = createTempVideoSearchFixtures();
   try {
     await createLibrary(page, "video-library-source");
@@ -966,9 +1041,9 @@ test("video mode can reuse a library source as the query video and fall back to 
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("video mode can reuse a library video_segment as the query video", async ({ page }) => {
+  test("video mode can reuse a library video_segment as the query video", async ({ page }) => {
   const fixtures = createTempVideoSearchFixtures();
   try {
     await createLibrary(page, "video-library-object");
@@ -1000,9 +1075,9 @@ test("video mode can reuse a library video_segment as the query video", async ({
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("video mode before import shows not_ready instead of an empty result", async ({ page }) => {
+  test("video mode before import shows not_ready instead of an empty result", async ({ page }) => {
   const fixtures = createTempVideoSearchFixtures();
   try {
     await createLibrary(page, "video-not-ready");
@@ -1019,9 +1094,9 @@ test("video mode before import shows not_ready instead of an empty result", asyn
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("video mode rejects non-video query uploads with explicit feedback", async ({ page }) => {
+  test("video mode rejects non-video query uploads with explicit feedback", async ({ page }) => {
   await createLibrary(page, "video-invalid-upload");
 
   await page.getByTestId("search-mode-video").click();
@@ -1033,9 +1108,11 @@ test("video mode rejects non-video query uploads with explicit feedback", async 
   await expect(page.getByTestId("search-error-message")).toContainText(
     "Only mp4, mov, or m4v files are accepted as query videos right now."
   );
-});
+  });
+}
 
-test("document mode uploads a query document and returns real mixed results", async ({ page }) => {
+export function registerSearchDocumentScenarios() {
+  test("document mode uploads a query document and returns real mixed results", async ({ page }) => {
   const fixtures = createTempDocumentSearchFixtures();
   try {
     await createLibrary(page, "document-search");
@@ -1062,9 +1139,9 @@ test("document mode uploads a query document and returns real mixed results", as
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("document mode can search a specific page range", async ({ page }) => {
+  test("document mode can search a specific page range", async ({ page }) => {
   const fixtures = createTempDocumentSearchFixtures();
   try {
     await createLibrary(page, "document-range-search");
@@ -1091,9 +1168,9 @@ test("document mode can search a specific page range", async ({ page }) => {
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("document mode can reuse a library document_page as the query document", async ({ page }) => {
+  test("document mode can reuse a library document_page as the query document", async ({ page }) => {
   const fixtures = createTempDocumentSearchFixtures();
   try {
     await createLibrary(page, "document-library-object");
@@ -1125,9 +1202,9 @@ test("document mode can reuse a library document_page as the query document", as
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("document mode before import shows not_ready instead of an empty result", async ({ page }) => {
+  test("document mode before import shows not_ready instead of an empty result", async ({ page }) => {
   const fixtures = createTempDocumentSearchFixtures();
   try {
     await createLibrary(page, "document-not-ready");
@@ -1144,9 +1221,9 @@ test("document mode before import shows not_ready instead of an empty result", a
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("document mode rejects non-pdf query uploads with explicit feedback", async ({ page }) => {
+  test("document mode rejects non-pdf query uploads with explicit feedback", async ({ page }) => {
   await createLibrary(page, "document-invalid-upload");
 
   await page.getByTestId("search-mode-document").click();
@@ -1158,9 +1235,11 @@ test("document mode rejects non-pdf query uploads with explicit feedback", async
   await expect(page.getByTestId("search-error-message")).toContainText(
     "Only PDF files are accepted as query documents right now."
   );
-});
+  });
+}
 
-test("source management can create edit toggle refresh rescan and filter inventory", async ({ page }) => {
+export function registerSourceManagementScenarios() {
+  test("source management can create edit toggle refresh rescan and filter inventory", async ({ page }) => {
   const fixtures = createTempSourceManagementFixtures();
   try {
     await createLibrary(page, "source-management");
@@ -1252,9 +1331,9 @@ test("source management can create edit toggle refresh rescan and filter invento
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
 
-test("source management watcher updates inventory for add modify and delete", async ({ page }) => {
+  test("source management watcher updates inventory for add modify and delete", async ({ page }) => {
   const fixtures = createTempSourceManagementFixtures();
   try {
     await createLibrary(page, "source-management-watcher");
@@ -1298,9 +1377,11 @@ test("source management watcher updates inventory for add modify and delete", as
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
+}
 
-test("inventory workspace stays usable on narrow screens", async ({ page }) => {
+export function registerInventoryWorkspaceScenarios() {
+  test("inventory workspace stays usable on narrow screens", async ({ page }) => {
   const fixtures = createTempSourceManagementFixtures();
   try {
     await page.setViewportSize({ width: 820, height: 1280 });
@@ -1325,4 +1406,5 @@ test("inventory workspace stays usable on narrow screens", async ({ page }) => {
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
-});
+  });
+}

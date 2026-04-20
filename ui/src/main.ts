@@ -2,13 +2,15 @@ import "./style.css";
 import type {
   ApiErrorPayload,
   AppState,
+  ContentTypeBindingPayload,
+  ContentTypesPayload,
   EmbeddingCapabilities,
-  GlobalModelDefaultsData,
+  GlobalContentTypesData,
   ImportPathsData,
   InventorySummary,
   JobSnapshot,
   JobsListData,
-  LibraryModelOverridesData,
+  LibraryContentTypesData,
   LibrariesListData,
   LibraryObjectQueryDocument,
   LibraryObjectQueryImage,
@@ -16,18 +18,17 @@ import type {
   LibrarySnapshot,
   ModelCatalogData,
   ModelCatalogEntry,
-  ModelDefaultsPayload,
   ModelTestData,
   ModelTestModality,
-  ModelOverridesPayload,
-  ModelSelectionOverridePayload,
   ModelSelectionPayload,
   PreviewReference,
   ProviderConfigSnapshot,
   ProvidersListData,
   QueryAssetData,
+  ResolvedContentModelSelectionPayload,
+  ResolvedContentModelsData,
   ResolvedModelSelectionPayload,
-  ResolvedModelsData,
+  RuntimeHealthData,
   SearchRequestSnapshot,
   SearchOutcomeState,
   SourceInventoryItem,
@@ -35,6 +36,7 @@ import type {
   SourceRootSnapshot,
   SourceRootsListData,
   SourcesListData,
+  VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
   VisualUnitDetailData,
@@ -94,19 +96,13 @@ const JOB_POLL_INTERVAL_MS = 1000;
 const JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKSPACE_POLL_INTERVAL_MS = 3000;
 const SEARCH_PAGE_SIZE = 5;
-const PROVIDER_INDEX_LINE = "multivector";
 const PROVIDER_ID_LOCAL_SIDECAR = "local_sidecar";
 const MODEL_TEST_MODALITIES: readonly ModelTestModality[] = ["text", "image"];
+const CONTENT_TYPE_ORDER = ["image", "document", "video", "text"] as const;
 
-function emptyModelDefaults(): ModelDefaultsPayload {
+function emptyContentTypes(): ContentTypesPayload {
   return {
-    index_lines: {},
-  };
-}
-
-function emptyModelOverrides(): ModelOverridesPayload {
-  return {
-    index_lines: {},
+    content_types: {},
   };
 }
 
@@ -117,9 +113,11 @@ const state: AppState = {
   sourceRoots: [],
   providerConfigs: [],
   modelCatalog: [],
-  globalModelDefaults: emptyModelDefaults(),
-  libraryModelOverrides: emptyModelOverrides(),
-  resolvedModels: null,
+  globalContentTypes: emptyContentTypes(),
+  libraryContentTypes: emptyContentTypes(),
+  resolvedContentModels: null,
+  vectorSpaceDiagnostics: null,
+  runtimeHealth: null,
   activeWorkspace: "search",
   inventoryFilters: {
     sourceRootId: "",
@@ -140,7 +138,8 @@ const state: AppState = {
     out_of_scope: 0,
   },
   librarySources: [],
-  libraryNameDraft: "",
+  libraryDisplayNameDraft: "",
+  libraryIdDraft: "",
   selectedLibraryId: "",
   editingSourceRootId: "",
   sourceRootPathDraft: "",
@@ -176,15 +175,23 @@ const state: AppState = {
   editingProviderId: "",
   providerEnabledDraft: true,
   providerBaseUrlDraft: "",
+  selectedGlobalContentType: "",
+  selectedLibraryContentType: "",
   globalModelTestModalityDraft: "",
   globalModelTestTextDraft: "",
   globalModelTestFile: null,
+  globalModelTestComparisonModalityDraft: "",
+  globalModelTestComparisonTextDraft: "",
+  globalModelTestComparisonFile: null,
   globalModelTestResult: null,
   globalModelTestError: null,
   globalModelTestPending: false,
   libraryModelTestModalityDraft: "",
   libraryModelTestTextDraft: "",
   libraryModelTestFile: null,
+  libraryModelTestComparisonModalityDraft: "",
+  libraryModelTestComparisonTextDraft: "",
+  libraryModelTestComparisonFile: null,
   libraryModelTestResult: null,
   libraryModelTestError: null,
   libraryModelTestPending: false,
@@ -336,6 +343,15 @@ function selectedLibrary(): LibrarySnapshot | null {
   return state.libraries.find((library) => library.id === state.selectedLibraryId) ?? null;
 }
 
+function libraryDisplayName(
+  library: Pick<LibrarySnapshot, "display_name" | "name" | "id"> | null | undefined
+): string {
+  if (!library) {
+    return "";
+  }
+  return library.display_name?.trim() || library.name?.trim() || library.id;
+}
+
 function emptyInventorySummary(): InventorySummary {
   return {
     total: 0,
@@ -417,11 +433,15 @@ function formatResolvedModel(selection: ResolvedModelSelectionPayload | undefine
   if (!selection) {
     return "未解析";
   }
-  const parts = [selection.provider_id, selection.model_id];
-  if (selection.model_revision) {
-    parts.push(`@${selection.model_revision}`);
+  const parts = [selection.provider_id, `${selection.model_id}@${selection.model_version}`];
+  if (selection.model_revision && selection.model_revision !== selection.model_version) {
+    parts.push(`runtime ${selection.model_revision}`);
   }
   return parts.join(" · ");
+}
+
+function formatResolvedContentModel(selection: ResolvedContentModelSelectionPayload | undefined) {
+  return formatResolvedModel(selection);
 }
 
 function formatResolvedModelContext(selection: ResolvedModelSelectionPayload | undefined) {
@@ -434,6 +454,12 @@ function formatResolvedModelContext(selection: ResolvedModelSelectionPayload | u
     parts.push(provider.base_url);
   }
   return parts.join(" · ");
+}
+
+function formatResolvedContentModelContext(
+  selection: ResolvedContentModelSelectionPayload | undefined
+) {
+  return formatResolvedModelContext(selection);
 }
 
 function formatEmbeddingCapabilityValues(values: string[] | undefined) {
@@ -457,6 +483,11 @@ function formatEmbeddingCapabilities(
     parts.unshift("Embedding capabilities");
   }
   return parts.join(" · ");
+}
+
+function formatExecutionInputTypes(inputTypes: string[] | undefined, options: { includePrefix?: boolean } = {}) {
+  const value = inputTypes?.length ? inputTypes.join(", ") : "none";
+  return options.includePrefix ? `Execution inputs · ${value}` : value;
 }
 
 function resetInventoryState() {
@@ -619,26 +650,22 @@ function hydrateProviderEditor(provider: ProviderConfigSnapshot | null) {
   state.providerBaseUrlDraft = provider.base_url ?? "";
 }
 
-function selectedGlobalModelSelection(): ModelSelectionPayload {
-  return (
-    state.globalModelDefaults.index_lines[PROVIDER_INDEX_LINE] ?? {
-      provider_id: PROVIDER_ID_LOCAL_SIDECAR,
-      model_id: "",
-    }
-  );
+function contentTypeOrderValue(contentType: string) {
+  const index = CONTENT_TYPE_ORDER.indexOf(contentType as (typeof CONTENT_TYPE_ORDER)[number]);
+  return index >= 0 ? index : CONTENT_TYPE_ORDER.length;
 }
 
-function selectedLibraryModelOverride(): ModelSelectionOverridePayload {
-  return state.libraryModelOverrides.index_lines[PROVIDER_INDEX_LINE] ?? {};
+function sortedContentTypeKeys(payload: ContentTypesPayload) {
+  return Object.keys(payload.content_types).sort((left, right) => {
+    return contentTypeOrderValue(left) - contentTypeOrderValue(right) || left.localeCompare(right);
+  });
 }
 
 function catalogEntriesForProvider(providerId: string | null | undefined): ModelCatalogEntry[] {
   if (!providerId) {
     return [];
   }
-  return state.modelCatalog.filter(
-    (entry) => entry.provider_id === providerId && entry.supported_index_lines.includes(PROVIDER_INDEX_LINE)
-  );
+  return state.modelCatalog.filter((entry) => entry.provider_id === providerId);
 }
 
 function selectedCatalogEntryForProvider(
@@ -661,33 +688,107 @@ function selectedCatalogEntryForSelection(
   return selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
 }
 
-function normalizeModelSelectionForProvider(
-  providerId: string,
-  base: Partial<ModelSelectionPayload> = {}
-): ModelSelectionPayload {
-  const catalogEntry = selectedCatalogEntryForProvider(providerId, base.model_id ?? null);
-  const modelId = base.model_id ?? catalogEntry?.model_id ?? "";
-
+function splitModelReference(modelReference: string): ModelSelectionPayload {
+  const slashIndex = modelReference.indexOf("/");
+  if (slashIndex <= 0) {
+    return {
+      provider_id: "",
+      model_id: modelReference,
+    };
+  }
   return {
-    provider_id: providerId,
-    model_id: modelId,
+    provider_id: modelReference.slice(0, slashIndex),
+    model_id: modelReference.slice(slashIndex + 1),
   };
 }
 
-function normalizeModelOverrideForProvider(
-  providerId?: string | null,
-  base: Partial<ModelSelectionOverridePayload> = {}
-): ModelSelectionOverridePayload {
-  if (!providerId) {
-    return {};
+function composeModelReference(selection: Pick<ModelSelectionPayload, "provider_id" | "model_id">) {
+  if (!selection.provider_id || !selection.model_id) {
+    return "";
   }
-  const normalized = normalizeModelSelectionForProvider(providerId, {
-    provider_id: providerId,
-    model_id: base.model_id ?? undefined,
-  });
+  return `${selection.provider_id}/${selection.model_id}`;
+}
+
+function defaultContentTypeBinding(): ContentTypeBindingPayload {
   return {
-    provider_id: normalized.provider_id,
-    model_id: normalized.model_id,
+    enabled: false,
+    model: "",
+    vector_type: "",
+  };
+}
+
+function selectedGlobalContentTypeKey() {
+  const selected = state.selectedGlobalContentType;
+  if (selected && state.globalContentTypes.content_types[selected]) {
+    return selected;
+  }
+  return sortedContentTypeKeys(state.globalContentTypes)[0] ?? "";
+}
+
+function selectedLibraryContentTypeKey() {
+  const selected = state.selectedLibraryContentType;
+  if (selected && state.libraryContentTypes.content_types[selected]) {
+    return selected;
+  }
+  return sortedContentTypeKeys(state.libraryContentTypes)[0] ?? "";
+}
+
+function selectedGlobalContentTypeBinding(): ContentTypeBindingPayload {
+  return (
+    state.globalContentTypes.content_types[selectedGlobalContentTypeKey()] ??
+    defaultContentTypeBinding()
+  );
+}
+
+function selectedLibraryContentTypeBinding(): ContentTypeBindingPayload {
+  return (
+    state.libraryContentTypes.content_types[selectedLibraryContentTypeKey()] ??
+    defaultContentTypeBinding()
+  );
+}
+
+function selectionFromBinding(binding: ContentTypeBindingPayload): ModelSelectionPayload {
+  const selection = splitModelReference(binding.model);
+  return {
+    provider_id: selection.provider_id || PROVIDER_ID_LOCAL_SIDECAR,
+    model_id: selection.model_id || "",
+  };
+}
+
+function selectedGlobalModelSelection(): ModelSelectionPayload {
+  return selectionFromBinding(selectedGlobalContentTypeBinding());
+}
+
+function selectedLibraryModelSelection(): ModelSelectionPayload {
+  return selectionFromBinding(selectedLibraryContentTypeBinding());
+}
+
+function vectorTypeOptionsForSelection(selection: ModelSelectionPayload, currentValue: string) {
+  const options = [
+    ...(selectedCatalogEntryForSelection(selection)?.embedding_capabilities.vector_types ?? []),
+  ];
+  if (currentValue && !options.includes(currentValue)) {
+    options.push(currentValue);
+  }
+  return options;
+}
+
+function normalizeContentTypeBindingForProvider(
+  providerId: string,
+  currentBinding: ContentTypeBindingPayload
+): ContentTypeBindingPayload {
+  const currentSelection = splitModelReference(currentBinding.model);
+  const catalogEntry = selectedCatalogEntryForProvider(providerId, currentSelection.model_id || null);
+  const modelId = currentSelection.model_id || catalogEntry?.model_id || "";
+  const vectorTypes = catalogEntry?.embedding_capabilities.vector_types ?? [];
+  const vectorType = vectorTypes.includes(currentBinding.vector_type)
+    ? currentBinding.vector_type
+    : vectorTypes[0] ?? currentBinding.vector_type;
+
+  return {
+    ...currentBinding,
+    model: composeModelReference({ provider_id: providerId, model_id: modelId }),
+    vector_type: vectorType,
   };
 }
 
@@ -720,30 +821,39 @@ function activeProviderDraftForSelection(providerId: string): {
 }
 
 function selectedGlobalTestModalities(): ModelTestModality[] {
-  const selection = selectedGlobalModelSelection();
+  const selection = selectionFromBinding(selectedGlobalContentTypeBinding());
   return supportedTestModalitiesForSelection(selection.provider_id, selection.model_id);
 }
 
 function selectedLibraryTestModalities(): ModelTestModality[] {
-  const selection = selectedLibraryModelSelection();
+  const selection = selectionFromBinding(selectedLibraryContentTypeBinding());
   return supportedTestModalitiesForSelection(selection.provider_id, selection.model_id);
 }
 
-function selectedLibraryModelSelection(): ModelSelectionPayload {
-  const override = selectedLibraryModelOverride();
-  const defaults = selectedGlobalModelSelection();
-  return {
-    provider_id: override.provider_id ?? defaults.provider_id,
-    model_id: override.model_id ?? defaults.model_id,
-  };
-}
-
 function ensureValidModelTestDrafts() {
+  const globalContentType = selectedGlobalContentTypeKey();
+  if (state.selectedGlobalContentType !== globalContentType) {
+    state.selectedGlobalContentType = globalContentType;
+  }
+  const libraryContentType = selectedLibraryContentTypeKey();
+  if (state.selectedLibraryContentType !== libraryContentType) {
+    state.selectedLibraryContentType = libraryContentType;
+  }
+
   const globalModalities = selectedGlobalTestModalities();
   if (!globalModalities.includes(state.globalModelTestModalityDraft as ModelTestModality)) {
     state.globalModelTestModalityDraft =
       (globalModalities.includes("text") ? "text" : globalModalities[0]) ?? "";
     state.globalModelTestFile = null;
+    state.globalModelTestResult = null;
+    state.globalModelTestError = null;
+  }
+  if (
+    state.globalModelTestComparisonModalityDraft &&
+    !globalModalities.includes(state.globalModelTestComparisonModalityDraft as ModelTestModality)
+  ) {
+    state.globalModelTestComparisonModalityDraft = "";
+    state.globalModelTestComparisonFile = null;
     state.globalModelTestResult = null;
     state.globalModelTestError = null;
   }
@@ -756,10 +866,20 @@ function ensureValidModelTestDrafts() {
     state.libraryModelTestResult = null;
     state.libraryModelTestError = null;
   }
+  if (
+    state.libraryModelTestComparisonModalityDraft &&
+    !libraryModalities.includes(state.libraryModelTestComparisonModalityDraft as ModelTestModality)
+  ) {
+    state.libraryModelTestComparisonModalityDraft = "";
+    state.libraryModelTestComparisonFile = null;
+    state.libraryModelTestResult = null;
+    state.libraryModelTestError = null;
+  }
 }
 
 function resetGlobalModelTestState() {
   state.globalModelTestFile = null;
+  state.globalModelTestComparisonFile = null;
   state.globalModelTestResult = null;
   state.globalModelTestError = null;
   state.globalModelTestPending = false;
@@ -768,6 +888,7 @@ function resetGlobalModelTestState() {
 
 function resetLibraryModelTestState() {
   state.libraryModelTestFile = null;
+  state.libraryModelTestComparisonFile = null;
   state.libraryModelTestResult = null;
   state.libraryModelTestError = null;
   state.libraryModelTestPending = false;
@@ -866,6 +987,49 @@ function renderModelTestResult(testIdPrefix: string, result: ModelTestData | nul
         <h5>Input summary</h5>
         <pre>${escapeHtml(JSON.stringify(result.input_summary, null, 2))}</pre>
       </div>
+      ${
+        result.comparison
+          ? `
+            <div class="detail-block">
+              <h5>Comparison</h5>
+              <div class="job-meta">
+                <span class="pill muted">${escapeHtml(result.comparison.operation_kind)}</span>
+                <span class="pill muted" data-testid="${testIdPrefix}-comparison-shape">${escapeHtml(
+                  formatModelTestShape(result.comparison.vector_shape)
+                )}</span>
+                <span class="pill ready" data-testid="${testIdPrefix}-similarity">${escapeHtml(
+                  result.comparison.similarity_to_primary.toFixed(6)
+                )}</span>
+              </div>
+              <p class="helper">input_modality: ${escapeHtml(result.comparison.input_modality)}</p>
+              <div class="detail-grid model-test-grid">
+                <div class="detail-block">
+                  <h5>Comparison vectors</h5>
+                  <pre data-testid="${testIdPrefix}-comparison-vectors">${escapeHtml(
+                    JSON.stringify(result.comparison.vectors, null, 2)
+                  )}</pre>
+                </div>
+                ${
+                  result.comparison.pooled_vector?.length
+                    ? `
+                      <div class="detail-block">
+                        <h5>Comparison pooled vector</h5>
+                        <pre data-testid="${testIdPrefix}-comparison-pooled-vector">${escapeHtml(
+                          JSON.stringify(result.comparison.pooled_vector, null, 2)
+                        )}</pre>
+                      </div>
+                    `
+                    : ""
+                }
+              </div>
+              <div class="detail-block">
+                <h5>Comparison input summary</h5>
+                <pre>${escapeHtml(JSON.stringify(result.comparison.input_summary, null, 2))}</pre>
+              </div>
+            </div>
+          `
+          : ""
+      }
     </div>
   `;
 }
@@ -877,15 +1041,31 @@ function renderSettingsModelTestPanel(options: {
   modalityDraft: ModelTestModality | "";
   textDraft: string;
   file: File | null;
+  comparisonModalityDraft: ModelTestModality | "";
+  comparisonTextDraft: string;
+  comparisonFile: File | null;
   result: ModelTestData | null;
   error: ApiErrorPayload | null;
   pending: boolean;
 }) {
-  const { scope, selection, supportedModalities, modalityDraft, textDraft, file, result, error, pending } =
-    options;
+  const {
+    scope,
+    selection,
+    supportedModalities,
+    modalityDraft,
+    textDraft,
+    file,
+    comparisonModalityDraft,
+    comparisonTextDraft,
+    comparisonFile,
+    result,
+    error,
+    pending,
+  } = options;
   const testIdPrefix = `${scope}-model-test`;
   const inputModality = modalityDraft || supportedModalities[0] || "";
   const fileRequired = inputModality === "image";
+  const comparisonFileRequired = comparisonModalityDraft === "image";
   const disabled =
     !supportedModalities.length || !canExecuteSettingsModelTest(selection) || pending;
 
@@ -906,7 +1086,7 @@ function renderSettingsModelTestPanel(options: {
       <form id="${testIdPrefix}-form" class="stack-form" data-testid="${testIdPrefix}-form">
         <div class="filter-grid settings-filter-grid">
           <label>
-            <span>input_modality</span>
+            <span>primary.input_modality</span>
             <select
               id="${testIdPrefix}-modality"
               data-testid="${testIdPrefix}-modality"
@@ -958,6 +1138,63 @@ function renderSettingsModelTestPanel(options: {
             ? `<p class="helper" data-testid="${testIdPrefix}-file-name">${escapeHtml(file.name)} · ${escapeHtml(file.type || "application/octet-stream")}</p>`
             : ""
         }
+        <div class="filter-grid settings-filter-grid">
+          <label>
+            <span>comparison.input_modality</span>
+            <select
+              id="${testIdPrefix}-comparison-modality"
+              data-testid="${testIdPrefix}-comparison-modality"
+              ${supportedModalities.length ? "" : "disabled"}
+            >
+              <option value="" ${comparisonModalityDraft ? "" : "selected"}>none</option>
+              ${supportedModalities
+                .map(
+                  (modality) => `
+                    <option value="${escapeHtml(modality)}" ${
+                      modality === comparisonModalityDraft ? "selected" : ""
+                    }>
+                      ${escapeHtml(modality)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          ${
+            comparisonModalityDraft
+              ? comparisonFileRequired
+                ? `
+                  <label>
+                    <span>${escapeHtml(modelTestFileLabel(comparisonModalityDraft))}</span>
+                    <input
+                      id="${testIdPrefix}-comparison-file"
+                      data-testid="${testIdPrefix}-comparison-file"
+                      type="file"
+                      accept="${escapeHtml(modelTestFileAccept(comparisonModalityDraft))}"
+                      ${supportedModalities.length ? "" : "disabled"}
+                    />
+                  </label>
+                `
+                : `
+                  <label class="model-test-textarea">
+                    <span>对照测试文本</span>
+                    <textarea
+                      id="${testIdPrefix}-comparison-text"
+                      data-testid="${testIdPrefix}-comparison-text"
+                      rows="4"
+                      placeholder="输入第二个用于比较的文本"
+                      ${supportedModalities.length ? "" : "disabled"}
+                    >${escapeHtml(comparisonTextDraft)}</textarea>
+                  </label>
+                `
+              : ""
+          }
+        </div>
+        ${
+          comparisonFileRequired && comparisonFile
+            ? `<p class="helper" data-testid="${testIdPrefix}-comparison-file-name">${escapeHtml(comparisonFile.name)} · ${escapeHtml(comparisonFile.type || "application/octet-stream")}</p>`
+            : ""
+        }
         ${
           error
             ? `<div class="notice error" data-testid="${testIdPrefix}-error"><h4>${escapeHtml(error.code)}</h4><p>${escapeHtml(error.message)}</p></div>`
@@ -1003,7 +1240,7 @@ function currentWorkspaceMeta() {
     return {
       title: "Settings workspace",
       summary:
-        "在同一处查看内建 provider、全局默认模型、库级 model override 和当前 resolved model 选择。",
+        "在同一处查看内建 provider、全局 content type 绑定、库级 content type 绑定和当前 resolved content model。",
     };
   }
 
@@ -1033,19 +1270,6 @@ function jobPillClass(status) {
     return "pending";
   }
   return "muted";
-}
-
-function formatIndexLines(indexLines) {
-  if (!indexLines.length) {
-    return '<span class="pill muted">No index lines</span>';
-  }
-
-  return indexLines
-    .map(
-      (line) =>
-        `<span class="pill ${line.status === "ready" ? "ready" : "pending"}">${escapeHtml(line.index_line)} · ${escapeHtml(line.status)}</span>`
-    )
-    .join("");
 }
 
 function selectedVisualUnitId() {
@@ -1953,9 +2177,15 @@ function renderInventorySummaryBar() {
 
 function renderProviderOptions(currentValue = "", includeEmpty = false) {
   const emptyOption = includeEmpty
-    ? `<option value="" ${!currentValue ? "selected" : ""}>inherit global default</option>`
+    ? `<option value="" ${!currentValue ? "selected" : ""}>none</option>`
     : "";
-  return `${emptyOption}${state.providerConfigs
+  const hasCurrentValue =
+    !!currentValue && state.providerConfigs.some((provider) => provider.provider_id === currentValue);
+  const missingOption =
+    currentValue && !hasCurrentValue
+      ? `<option value="${escapeHtml(currentValue)}" selected>${escapeHtml(currentValue)} (configured)</option>`
+      : "";
+  return `${emptyOption}${missingOption}${state.providerConfigs
     .map(
       (provider) => `
         <option value="${escapeHtml(provider.provider_id)}" ${provider.provider_id === currentValue ? "selected" : ""}>
@@ -1971,10 +2201,15 @@ function renderProviderBridge(library: LibrarySnapshot | null) {
     return "";
   }
 
-  const selection = state.resolvedModels?.index_lines[PROVIDER_INDEX_LINE];
-  const summary = selection
-    ? `${formatResolvedModel(selection)} · ${formatResolvedModelContext(selection)}`
-    : "当前库的 resolved model 尚未加载。";
+  const selections = Object.values(state.resolvedContentModels?.content_types ?? {});
+  const summary = selections.length
+    ? selections
+        .map(
+          (selection) =>
+            `${selection.content_type}: ${formatResolvedContentModel(selection)} · ${selection.status}`
+        )
+        .join(" | ")
+    : "当前库的 resolved content model 尚未加载。";
 
   return `
     <div class="workspace-bridge" data-testid="provider-bridge">
@@ -2094,44 +2329,104 @@ function renderProviderConfigsPanel() {
   `;
 }
 
-function renderGlobalModelDefaultsPanel() {
-  const selection = selectedGlobalModelSelection();
+function renderModelIdOptions(providerId: string, currentValue: string, includeEmpty = false) {
+  const entries = catalogEntriesForProvider(providerId);
+  const hasCurrentValue = !!currentValue && entries.some((entry) => entry.model_id === currentValue);
+  const emptyOption = includeEmpty
+    ? `<option value="" ${!currentValue ? "selected" : ""}>none</option>`
+    : "";
+  const missingOption =
+    currentValue && !hasCurrentValue
+      ? `<option value="${escapeHtml(currentValue)}" selected>${escapeHtml(currentValue)} (configured)</option>`
+      : "";
+  return `${emptyOption}${missingOption}${entries
+    .map(
+      (entry) => `
+        <option value="${escapeHtml(entry.model_id)}" ${entry.model_id === currentValue ? "selected" : ""}>
+          ${escapeHtml(`${entry.model_id}@${entry.model_version}`)}
+        </option>
+      `
+    )
+    .join("")}`;
+}
+
+function renderVectorTypeOptions(selection: ModelSelectionPayload, currentValue: string) {
+  return vectorTypeOptionsForSelection(selection, currentValue)
+    .map(
+      (value) => `
+        <option value="${escapeHtml(value)}" ${value === currentValue ? "selected" : ""}>
+          ${escapeHtml(value)}
+        </option>
+      `
+    )
+    .join("");
+}
+
+function renderGlobalContentTypesPanel() {
+  const contentType = selectedGlobalContentTypeKey();
+  const binding = selectedGlobalContentTypeBinding();
+  const selection = selectionFromBinding(binding);
   const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
-  const catalogEntries = catalogEntriesForProvider(selection.provider_id);
   const supportedModalities = selectedGlobalTestModalities();
 
   return `
-    <section class="panel settings-panel" data-testid="global-model-defaults-panel">
+    <section class="panel settings-panel" data-testid="global-content-types-panel">
       <div class="panel-head">
         <div>
           <p class="eyebrow">Defaults</p>
-          <h2>Global model defaults</h2>
+          <h2>Global content type bindings</h2>
         </div>
       </div>
-      <form id="global-model-defaults-form" class="stack-form" data-testid="global-model-defaults-form">
+      <form id="global-content-types-form" class="stack-form" data-testid="global-content-types-form">
         <div class="filter-grid settings-filter-grid">
           <label>
-            <span>multivector.provider</span>
-            <select id="global-model-provider-id" data-testid="global-model-provider-id">
+            <span>content_type</span>
+            <select id="global-content-type" data-testid="global-content-type">
+              ${sortedContentTypeKeys(state.globalContentTypes)
+                .map(
+                  (value) => `
+                    <option value="${escapeHtml(value)}" ${value === contentType ? "selected" : ""}>
+                      ${escapeHtml(value)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label class="checkbox-field">
+            <input
+              id="global-content-type-enabled"
+              data-testid="global-content-type-enabled"
+              type="checkbox"
+              ${binding.enabled ? "checked" : ""}
+            />
+            <span>Enabled</span>
+          </label>
+        </div>
+        <div class="filter-grid settings-filter-grid">
+          <label>
+            <span>provider</span>
+            <select id="global-content-type-provider-id" data-testid="global-content-type-provider-id">
               ${renderProviderOptions(selection.provider_id)}
             </select>
           </label>
           <label>
             <span>model_id</span>
             <select
-              id="global-model-id"
-              data-testid="global-model-id"
+              id="global-content-type-model-id"
+              data-testid="global-content-type-model-id"
               ${selection.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
             >
-              ${catalogEntries
-                .map(
-                  (entry) => `
-                    <option value="${escapeHtml(entry.model_id)}" ${entry.model_id === selection.model_id ? "selected" : ""}>
-                      ${escapeHtml(entry.model_id)}
-                    </option>
-                  `
-                )
-                .join("")}
+              ${renderModelIdOptions(selection.provider_id, selection.model_id)}
+            </select>
+          </label>
+          <label>
+            <span>vector_type</span>
+            <select
+              id="global-content-type-vector-type"
+              data-testid="global-content-type-vector-type"
+            >
+              ${renderVectorTypeOptions(selection, binding.vector_type)}
             </select>
           </label>
         </div>
@@ -2145,8 +2440,13 @@ function renderGlobalModelDefaultsPanel() {
             `
             : ""
         }
+        <p class="helper" data-testid="global-content-type-summary">
+          ${escapeHtml(
+            `${contentType} -> ${binding.model || "unconfigured"} · ${binding.vector_type || "no-vector-type"} · ${binding.enabled ? "enabled" : "disabled"}`
+          )}
+        </p>
         <div class="inline-actions">
-          <button type="submit" data-testid="global-model-defaults-submit-button">保存全局默认模型</button>
+          <button type="submit" data-testid="global-content-types-submit-button">保存全局 content type 绑定</button>
         </div>
       </form>
       ${renderSettingsModelTestPanel({
@@ -2156,6 +2456,9 @@ function renderGlobalModelDefaultsPanel() {
         modalityDraft: state.globalModelTestModalityDraft,
         textDraft: state.globalModelTestTextDraft,
         file: state.globalModelTestFile,
+        comparisonModalityDraft: state.globalModelTestComparisonModalityDraft,
+        comparisonTextDraft: state.globalModelTestComparisonTextDraft,
+        comparisonFile: state.globalModelTestComparisonFile,
         result: state.globalModelTestResult,
         error: state.globalModelTestError,
         pending: state.globalModelTestPending,
@@ -2164,64 +2467,85 @@ function renderGlobalModelDefaultsPanel() {
   `;
 }
 
-function renderLibraryModelOverridesPanel(library: LibrarySnapshot | null) {
+function renderLibraryContentTypesPanel(library: LibrarySnapshot | null) {
   if (!library) {
     return `
-      <section class="panel settings-panel" data-testid="library-model-overrides-panel">
+      <section class="panel settings-panel" data-testid="library-content-types-panel">
         <div class="panel-head">
           <div>
             <p class="eyebrow">Overrides</p>
-            <h2>Library model overrides</h2>
+            <h2>Library content type bindings</h2>
           </div>
         </div>
-        <p class="empty">先选择一个库，再编辑库级 model override。</p>
+        <p class="empty">先选择一个库，再编辑库级 content type binding。</p>
       </section>
     `;
   }
 
-  const selection = selectedLibraryModelOverride();
-  const selectedProviderId = selection.provider_id ?? selectedGlobalModelSelection().provider_id;
-  const effectiveSelection = selectedLibraryModelSelection();
-  const catalogEntry = selectedCatalogEntryForProvider(
-    effectiveSelection.provider_id,
-    effectiveSelection.model_id
-  );
-  const catalogEntries = catalogEntriesForProvider(selectedProviderId);
+  const contentType = selectedLibraryContentTypeKey();
+  const binding = selectedLibraryContentTypeBinding();
+  const selection = selectionFromBinding(binding);
+  const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
   const supportedModalities = selectedLibraryTestModalities();
 
   return `
-    <section class="panel settings-panel" data-testid="library-model-overrides-panel">
+    <section class="panel settings-panel" data-testid="library-content-types-panel">
       <div class="panel-head">
         <div>
           <p class="eyebrow">Overrides</p>
-          <h2>Library model overrides</h2>
+          <h2>Library content type bindings</h2>
         </div>
       </div>
-      <form id="library-model-overrides-form" class="stack-form" data-testid="library-model-overrides-form">
+      <form id="library-content-types-form" class="stack-form" data-testid="library-content-types-form">
         <div class="filter-grid settings-filter-grid">
           <label>
-            <span>multivector.provider</span>
-            <select id="library-model-provider-id" data-testid="library-model-provider-id">
-              ${renderProviderOptions(selection.provider_id ?? "", true)}
+            <span>content_type</span>
+            <select id="library-content-type" data-testid="library-content-type">
+              ${sortedContentTypeKeys(state.libraryContentTypes)
+                .map(
+                  (value) => `
+                    <option value="${escapeHtml(value)}" ${value === contentType ? "selected" : ""}>
+                      ${escapeHtml(value)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label class="checkbox-field">
+            <input
+              id="library-content-type-enabled"
+              data-testid="library-content-type-enabled"
+              type="checkbox"
+              ${binding.enabled ? "checked" : ""}
+            />
+            <span>Enabled</span>
+          </label>
+        </div>
+        <div class="filter-grid settings-filter-grid">
+          <label>
+            <span>provider</span>
+            <select id="library-content-type-provider-id" data-testid="library-content-type-provider-id">
+              ${renderProviderOptions(selection.provider_id)}
             </select>
           </label>
           <label>
             <span>model_id</span>
             <select
-              id="library-model-id"
-              data-testid="library-model-id"
-              ${selectedProviderId === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
+              id="library-content-type-model-id"
+              data-testid="library-content-type-model-id"
+              ${selection.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
             >
-              <option value="">inherit</option>
-              ${catalogEntries
-                .map(
-                  (entry) => `
-                    <option value="${escapeHtml(entry.model_id)}" ${entry.model_id === selection.model_id ? "selected" : ""}>
-                      ${escapeHtml(entry.model_id)}
-                    </option>
-                  `
-                )
-                .join("")}
+              ${renderModelIdOptions(selection.provider_id, selection.model_id)}
+            </select>
+          </label>
+          <label>
+            <span>vector_type</span>
+            <select
+              id="library-content-type-vector-type"
+              data-testid="library-content-type-vector-type"
+            >
+              ${renderVectorTypeOptions(selection, binding.vector_type)}
             </select>
           </label>
         </div>
@@ -2232,25 +2556,33 @@ function renderLibraryModelOverridesPanel(library: LibrarySnapshot | null) {
               )}</p>`
             : ""
         }
+        <p class="helper" data-testid="library-content-type-summary">
+          ${escapeHtml(
+            `${contentType} -> ${binding.model || "unconfigured"} · ${binding.vector_type || "no-vector-type"} · ${binding.enabled ? "enabled" : "disabled"}`
+          )}
+        </p>
         <div class="inline-actions">
-          <button type="submit" data-testid="library-model-overrides-submit-button">保存库级覆盖</button>
+          <button type="submit" data-testid="library-content-types-submit-button">保存库级 content type 绑定</button>
           <button
             type="button"
-            id="library-model-overrides-reset-button"
-            data-testid="library-model-overrides-reset-button"
+            id="library-content-types-reset-button"
+            data-testid="library-content-types-reset-button"
             class="secondary-button"
           >
-            清空 overrides
+            重置为全局默认
           </button>
         </div>
       </form>
       ${renderSettingsModelTestPanel({
         scope: "library",
-        selection: effectiveSelection,
+        selection,
         supportedModalities,
         modalityDraft: state.libraryModelTestModalityDraft,
         textDraft: state.libraryModelTestTextDraft,
         file: state.libraryModelTestFile,
+        comparisonModalityDraft: state.libraryModelTestComparisonModalityDraft,
+        comparisonTextDraft: state.libraryModelTestComparisonTextDraft,
+        comparisonFile: state.libraryModelTestComparisonFile,
         result: state.libraryModelTestResult,
         error: state.libraryModelTestError,
         pending: state.libraryModelTestPending,
@@ -2259,19 +2591,25 @@ function renderLibraryModelOverridesPanel(library: LibrarySnapshot | null) {
   `;
 }
 
-function renderResolvedModelsPanel(library: LibrarySnapshot | null) {
+function renderResolvedContentModelsPanel(library: LibrarySnapshot | null) {
   if (!library) {
     return "";
   }
 
-  const indexingRows = Object.entries(state.resolvedModels?.index_lines ?? {})
+  const rows = Object.entries(state.resolvedContentModels?.content_types ?? {})
     .map(
-      ([indexLine, selection]) => `
+      ([contentType, selection]) => `
         <li class="provider-resolution-row">
           <div>
-            <strong>${escapeHtml(indexLine)}</strong>
-            <span class="helper">${escapeHtml(formatResolvedModel(selection))} · ${escapeHtml(selection.binding_source)}</span>
-            <span class="helper">${escapeHtml(formatResolvedModelContext(selection))}</span>
+            <strong>${escapeHtml(contentType)}</strong>
+            <span class="helper">${escapeHtml(formatResolvedContentModel(selection))} · ${escapeHtml(selection.binding_source)}</span>
+            <span class="helper">${escapeHtml(formatResolvedContentModelContext(selection))}</span>
+            <span class="helper">${escapeHtml(`vector_type ${selection.vector_type}`)}</span>
+            ${
+              selection.vector_space_id
+                ? `<span class="helper">${escapeHtml(`vector_space ${selection.vector_space_id}`)}</span>`
+                : ""
+            }
             <span class="helper">${escapeHtml(
               formatEmbeddingCapabilities(selection.embedding_capabilities, { includePrefix: true })
             )}</span>
@@ -2284,14 +2622,158 @@ function renderResolvedModelsPanel(library: LibrarySnapshot | null) {
     .join("");
 
   return `
-    <section class="panel settings-panel" data-testid="resolved-models-panel">
+    <section class="panel settings-panel" data-testid="resolved-content-models-panel">
       <div class="panel-head">
         <div>
           <p class="eyebrow">Resolved</p>
-          <h2>Resolved models for ${escapeHtml(library.name)}</h2>
+          <h2>Resolved content models for ${escapeHtml(libraryDisplayName(library))}</h2>
         </div>
       </div>
-      <ul class="provider-resolution-list">${indexingRows || '<li class="empty">暂无 resolved model selection。</li>'}</ul>
+      <ul class="provider-resolution-list">${rows || '<li class="empty">暂无 resolved content model。</li>'}</ul>
+    </section>
+  `;
+}
+
+function renderVectorSpaceDiagnosticsPanel(library: LibrarySnapshot | null) {
+  if (!library) {
+    return "";
+  }
+
+  const rows = (state.vectorSpaceDiagnostics?.vector_spaces ?? [])
+    .map((vectorSpace) => {
+      const details = [
+        vectorSpace.provider_id && vectorSpace.model_id
+          ? `${vectorSpace.provider_id}/${vectorSpace.model_id}`
+          : null,
+        vectorSpace.model_version ? `version ${vectorSpace.model_version}` : null,
+        vectorSpace.vector_type ? `vector_type ${vectorSpace.vector_type}` : null,
+        vectorSpace.content_types.length
+          ? `content_types ${vectorSpace.content_types.join(", ")}`
+          : null,
+        typeof vectorSpace.retired_at_ms === "number"
+          ? `retired_at ${new Date(vectorSpace.retired_at_ms).toLocaleString()}`
+          : null,
+      ]
+        .filter(Boolean)
+        .map((value) => `<span class="helper">${escapeHtml(String(value))}</span>`)
+        .join("");
+
+      return `
+        <li class="provider-resolution-row">
+          <div>
+            <strong>${escapeHtml(vectorSpace.vector_space_id)}</strong>
+            ${details}
+          </div>
+          <span class="pill ${providerSelectionPillClass(
+            vectorSpace.lifecycle_state === "active" ? "available" : "degraded"
+          )}">${escapeHtml(vectorSpace.lifecycle_state)}</span>
+        </li>
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="panel settings-panel" data-testid="vector-space-diagnostics-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Diagnostics</p>
+          <h2>Vector spaces for ${escapeHtml(libraryDisplayName(library))}</h2>
+        </div>
+      </div>
+      <ul class="provider-resolution-list">${rows || '<li class="empty">暂无 vector space diagnostics。</li>'}</ul>
+    </section>
+  `;
+}
+
+function renderRuntimeHealthPanel() {
+  const runtimeHealth = state.runtimeHealth;
+  const processRows = runtimeHealth
+    ? [runtimeHealth.app, runtimeHealth.qdrant]
+        .map((snapshot) => {
+          const details = Object.entries(snapshot.details ?? {})
+            .map(
+              ([key, value]) =>
+                `<span class="helper">${escapeHtml(`${key} ${String(value)}`)}</span>`
+            )
+            .join("");
+          return `
+            <li class="provider-resolution-row">
+              <div>
+                <strong>${escapeHtml(snapshot.display_name)}</strong>
+                <span class="helper">${escapeHtml(snapshot.message)}</span>
+                <span class="helper">${escapeHtml(`checked ${snapshot.last_checked_at}`)}</span>
+                ${details}
+              </div>
+              <span class="pill ${providerSelectionPillClass(snapshot.status)}">${escapeHtml(snapshot.status)}</span>
+            </li>
+          `;
+        })
+        .join("")
+    : "";
+  const providerRows = runtimeHealth
+    ? runtimeHealth.providers
+        .map((provider) => {
+          const details = [
+            provider.model_id ? `${provider.provider_id}/${provider.model_id}` : provider.provider_id,
+            provider.model_version ? `version ${provider.model_version}` : null,
+            provider.model_revision ? `revision ${provider.model_revision}` : null,
+            provider.last_probed_at ? `probed ${provider.last_probed_at}` : null,
+          ]
+            .filter(Boolean)
+            .map((value) => `<span class="helper">${escapeHtml(String(value))}</span>`)
+            .join("");
+          const capabilities = provider.embedding_capabilities
+            ? `<span class="helper">${escapeHtml(
+                formatEmbeddingCapabilities(provider.embedding_capabilities, { includePrefix: true })
+              )}</span>`
+            : "";
+          const executionInputs = provider.execution_input_types.length
+            ? `<span class="helper" data-testid="runtime-provider-execution-input-types">${escapeHtml(
+                formatExecutionInputTypes(provider.execution_input_types, { includePrefix: true })
+              )}</span>`
+            : "";
+          const adapters = provider.runtime_adapters.length
+            ? `<span class="helper">${escapeHtml(
+                `runtime adapters ${provider.runtime_adapters.join(", ")}`
+              )}</span>`
+            : "";
+
+          return `
+            <li class="provider-resolution-row">
+              <div>
+                <strong>${escapeHtml(provider.display_name)}</strong>
+                <span class="helper">${escapeHtml(provider.message)}</span>
+                ${details}
+                ${capabilities}
+                ${executionInputs}
+                ${adapters}
+              </div>
+              <span class="pill ${providerSelectionPillClass(provider.status)}">${escapeHtml(provider.status)}</span>
+            </li>
+          `;
+        })
+        .join("")
+    : "";
+
+  return `
+    <section class="panel settings-panel" data-testid="runtime-health-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Runtime</p>
+          <h2>Runtime health</h2>
+        </div>
+      </div>
+      <ul class="provider-resolution-list">
+        ${processRows || '<li class="empty">暂无 runtime health 快照。</li>'}
+      </ul>
+      <div class="inline-actions">
+        <a href="${endpoints.appHealth}" target="_blank" rel="noreferrer">App health</a>
+        <a href="${endpoints.sidecarHealth}" target="_blank" rel="noreferrer">Sidecar health</a>
+        <a href="${endpoints.qdrantCollections}" target="_blank" rel="noreferrer">Qdrant</a>
+      </div>
+      <ul class="provider-resolution-list">
+        ${providerRows || '<li class="empty">暂无 provider runtime diagnostics。</li>'}
+      </ul>
     </section>
   `;
 }
@@ -2299,10 +2781,12 @@ function renderResolvedModelsPanel(library: LibrarySnapshot | null) {
 function renderSettingsPanel(library: LibrarySnapshot | null) {
   return `
     <div class="settings-stack" data-testid="settings-workspace">
+      ${renderRuntimeHealthPanel()}
       ${renderProviderConfigsPanel()}
-      ${renderGlobalModelDefaultsPanel()}
-      ${renderLibraryModelOverridesPanel(library)}
-      ${renderResolvedModelsPanel(library)}
+      ${renderGlobalContentTypesPanel()}
+      ${renderLibraryContentTypesPanel(library)}
+      ${renderResolvedContentModelsPanel(library)}
+      ${renderVectorSpaceDiagnosticsPanel(library)}
     </div>
   `;
 }
@@ -2542,7 +3026,7 @@ function renderSearchOutcome() {
   }
 
   if (state.searchOutcome.error) {
-    const details = state.searchOutcome.error.details?.index_lines ?? [];
+    const details = state.searchOutcome.error.details?.content_types ?? [];
     return `
       <div class="notice error" data-testid="search-error-notice">
         <h4 data-testid="search-error-code">${escapeHtml(state.searchOutcome.error.code)}</h4>
@@ -2554,7 +3038,7 @@ function renderSearchOutcome() {
                   .map(
                     (item) => `
                       <li>
-                        <strong>${escapeHtml(item.index_line)}</strong>
+                        <strong>${escapeHtml(item.content_type ?? "unknown")}</strong>
                         <span>${escapeHtml(item.job?.job_id ?? "no-job")} · ${escapeHtml(item.job?.phase ?? item.status)}</span>
                       </li>
                     `
@@ -2568,16 +3052,52 @@ function renderSearchOutcome() {
   }
 
   const results = state.searchOutcome.results ?? [];
+  const unsupportedContentTypes = state.searchOutcome.unsupported_content_types ?? [];
   if (!results.length) {
     return `
       <div class="notice success">
         <h4>No results</h4>
         <p>当前真实检索链路没有返回匹配结果。可以换一个查询词，或确认目标库已经导入相关内容。</p>
+        ${
+          unsupportedContentTypes.length
+            ? `<ul class="data-list" data-testid="search-unsupported-content-types">
+                ${unsupportedContentTypes
+                  .map(
+                    (item) => `
+                      <li>
+                        <strong>${escapeHtml(item.content_type)}</strong>
+                        <span>${escapeHtml(item.model)} · ${escapeHtml(item.reason)}</span>
+                      </li>
+                    `
+                  )
+                  .join("")}
+              </ul>`
+            : ""
+        }
       </div>
     `;
   }
 
   return `
+    ${
+      unsupportedContentTypes.length
+        ? `<div class="notice warning" data-testid="search-unsupported-content-types">
+            <h4>部分内容类型已跳过</h4>
+            <ul class="data-list">
+              ${unsupportedContentTypes
+                .map(
+                  (item) => `
+                    <li>
+                      <strong>${escapeHtml(item.content_type)}</strong>
+                      <span>${escapeHtml(item.model)} · ${escapeHtml(item.reason)}</span>
+                    </li>
+                  `
+                )
+                .join("")}
+            </ul>
+          </div>`
+        : ""
+    }
     <div class="results-summary">
       <div>
         <p class="eyebrow">Results</p>
@@ -3189,18 +3709,29 @@ function renderWorkspace() {
             </div>
             <form id="create-library-form" class="stack-form" data-testid="create-library-form">
               <label>
-                <span>新库名称</span>
+                <span>显示名称</span>
                 <input
                   id="library-name"
                   data-testid="library-name-input"
-                  name="libraryName"
+                  name="libraryDisplayName"
                   type="text"
-                  value="${escapeHtml(state.libraryNameDraft)}"
-                  placeholder="例如：demo-library"
+                  value="${escapeHtml(state.libraryDisplayNameDraft)}"
+                  placeholder="例如：Invoice Demo"
                   required
                 />
               </label>
-              <button type="submit" data-testid="create-library-button">创建 multivector 库</button>
+              <label>
+                <span>自定义 library_id（可选）</span>
+                <input
+                  id="library-id"
+                  data-testid="library-id-input"
+                  name="libraryId"
+                  type="text"
+                  value="${escapeHtml(state.libraryIdDraft)}"
+                  placeholder="例如：invoice-demo"
+                />
+              </label>
+              <button type="submit" data-testid="create-library-button">创建库</button>
             </form>
             <label class="stack-form">
               <span>当前库</span>
@@ -3211,7 +3742,7 @@ function renderWorkspace() {
                         .map(
                           (item) => `
                             <option value="${escapeHtml(item.id)}" ${item.id === state.selectedLibraryId ? "selected" : ""}>
-                              ${escapeHtml(item.name)} (${escapeHtml(item.id)})
+                              ${escapeHtml(libraryDisplayName(item))} (${escapeHtml(item.id)})
                             </option>
                           `
                         )
@@ -3225,9 +3756,8 @@ function renderWorkspace() {
                 library
                   ? `
                     <p class="eyebrow">Current</p>
-                    <h3 data-testid="current-library-name">${escapeHtml(library.name)}</h3>
-                    <p class="helper">${escapeHtml(library.id)}</p>
-                    <div class="pill-row">${formatIndexLines(library.index_lines)}</div>
+                    <h3 data-testid="current-library-name">${escapeHtml(libraryDisplayName(library))}</h3>
+                    <p class="helper" data-testid="current-library-id">${escapeHtml(library.id)}</p>
                     <dl class="stats">
                       <div><dt>Accepted items</dt><dd>${library.counts.accepted_items}</dd></div>
                       <div><dt>Pending jobs</dt><dd>${library.counts.pending_jobs}</dd></div>
@@ -3342,6 +3872,7 @@ function renderWorkspace() {
   });
   document.querySelector("#create-library-form")?.addEventListener("submit", onCreateLibrary);
   document.querySelector("#library-name")?.addEventListener("input", onLibraryNameInput);
+  document.querySelector("#library-id")?.addEventListener("input", onLibraryIdInput);
   document.querySelector("#library-select")?.addEventListener("change", onSelectLibrary);
   document
     .querySelector("#provider-config-form")
@@ -3359,14 +3890,23 @@ function renderWorkspace() {
     .querySelector("#provider-base-url")
     ?.addEventListener("input", onProviderBaseUrlInput);
   document
-    .querySelector("#global-model-defaults-form")
-    ?.addEventListener("submit", onSubmitGlobalModelDefaults);
+    .querySelector("#global-content-types-form")
+    ?.addEventListener("submit", onSubmitGlobalContentTypes);
   document
-    .querySelector("#global-model-provider-id")
-    ?.addEventListener("change", onGlobalModelProviderChange);
+    .querySelector("#global-content-type")
+    ?.addEventListener("change", onGlobalContentTypeChange);
   document
-    .querySelector("#global-model-id")
-    ?.addEventListener("change", onGlobalModelIdInput);
+    .querySelector("#global-content-type-enabled")
+    ?.addEventListener("change", onGlobalContentTypeEnabledChange);
+  document
+    .querySelector("#global-content-type-provider-id")
+    ?.addEventListener("change", onGlobalContentTypeProviderChange);
+  document
+    .querySelector("#global-content-type-model-id")
+    ?.addEventListener("change", onGlobalContentTypeModelIdInput);
+  document
+    .querySelector("#global-content-type-vector-type")
+    ?.addEventListener("change", onGlobalContentTypeVectorTypeChange);
   document
     .querySelector("#global-model-test-form")
     ?.addEventListener("submit", onSubmitGlobalModelTest);
@@ -3380,15 +3920,35 @@ function renderWorkspace() {
     .querySelector("#global-model-test-file")
     ?.addEventListener("change", onGlobalModelTestFileInput);
   document
-    .querySelector("#library-model-overrides-form")
-    ?.addEventListener("submit", onSubmitLibraryModelOverrides);
+    .querySelector("#global-model-test-comparison-modality")
+    ?.addEventListener("change", onGlobalModelTestComparisonModalityChange);
   document
-    .querySelector("#library-model-overrides-reset-button")
-    ?.addEventListener("click", onResetLibraryModelOverrides);
+    .querySelector("#global-model-test-comparison-text")
+    ?.addEventListener("input", onGlobalModelTestComparisonTextInput);
   document
-    .querySelector("#library-model-provider-id")
-    ?.addEventListener("change", onLibraryModelProviderChange);
-  document.querySelector("#library-model-id")?.addEventListener("change", onLibraryModelIdInput);
+    .querySelector("#global-model-test-comparison-file")
+    ?.addEventListener("change", onGlobalModelTestComparisonFileInput);
+  document
+    .querySelector("#library-content-types-form")
+    ?.addEventListener("submit", onSubmitLibraryContentTypes);
+  document
+    .querySelector("#library-content-types-reset-button")
+    ?.addEventListener("click", onResetLibraryContentTypes);
+  document
+    .querySelector("#library-content-type")
+    ?.addEventListener("change", onLibraryContentTypeChange);
+  document
+    .querySelector("#library-content-type-enabled")
+    ?.addEventListener("change", onLibraryContentTypeEnabledChange);
+  document
+    .querySelector("#library-content-type-provider-id")
+    ?.addEventListener("change", onLibraryContentTypeProviderChange);
+  document
+    .querySelector("#library-content-type-model-id")
+    ?.addEventListener("change", onLibraryContentTypeModelIdInput);
+  document
+    .querySelector("#library-content-type-vector-type")
+    ?.addEventListener("change", onLibraryContentTypeVectorTypeChange);
   document
     .querySelector("#library-model-test-form")
     ?.addEventListener("submit", onSubmitLibraryModelTest);
@@ -3401,6 +3961,15 @@ function renderWorkspace() {
   document
     .querySelector("#library-model-test-file")
     ?.addEventListener("change", onLibraryModelTestFileInput);
+  document
+    .querySelector("#library-model-test-comparison-modality")
+    ?.addEventListener("change", onLibraryModelTestComparisonModalityChange);
+  document
+    .querySelector("#library-model-test-comparison-text")
+    ?.addEventListener("input", onLibraryModelTestComparisonTextInput);
+  document
+    .querySelector("#library-model-test-comparison-file")
+    ?.addEventListener("change", onLibraryModelTestComparisonFileInput);
   document.querySelector("#source-root-form")?.addEventListener("submit", onSubmitSourceRoot);
   document.querySelector("#source-root-reset-button")?.addEventListener("click", onResetSourceRootEditor);
   document.querySelector("#source-root-path")?.addEventListener("input", onSourceRootPathInput);
@@ -3725,39 +4294,50 @@ async function refreshModelCatalog() {
   ensureValidModelTestDrafts();
 }
 
-async function refreshGlobalModelDefaults() {
-  const data = await apiRequest<GlobalModelDefaultsData>("/settings/model-defaults");
-  state.globalModelDefaults = data.defaults;
+async function refreshGlobalContentTypes() {
+  const data = await apiRequest<GlobalContentTypesData>("/settings/content-types");
+  state.globalContentTypes = data.content_types;
   ensureValidModelTestDrafts();
 }
 
-async function refreshLibraryModelSettings() {
+async function refreshRuntimeHealth() {
+  const data = await apiRequest<RuntimeHealthData>("/runtime-health");
+  state.runtimeHealth = data;
+}
+
+async function refreshLibraryContentSettings() {
   if (!state.selectedLibraryId) {
-    state.libraryModelOverrides = emptyModelOverrides();
-    state.resolvedModels = null;
+    state.libraryContentTypes = emptyContentTypes();
+    state.resolvedContentModels = null;
+    state.vectorSpaceDiagnostics = null;
     resetLibraryModelTestState();
     return;
   }
 
-  const [overridesData, resolvedData] = await Promise.all([
-    apiRequest<LibraryModelOverridesData>(
-      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/model-overrides`
+  const [contentTypesData, resolvedData, diagnosticsData] = await Promise.all([
+    apiRequest<LibraryContentTypesData>(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types`
     ),
-    apiRequest<ResolvedModelsData>(
-      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/resolved-models`
+    apiRequest<ResolvedContentModelsData>(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/resolved-content-models`
+    ),
+    apiRequest<VectorSpaceDiagnosticsData>(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/vector-space-diagnostics`
     ),
   ]);
-  state.libraryModelOverrides = overridesData.overrides;
-  state.resolvedModels = resolvedData;
+  state.libraryContentTypes = contentTypesData.content_types;
+  state.resolvedContentModels = resolvedData;
+  state.vectorSpaceDiagnostics = diagnosticsData;
   ensureValidModelTestDrafts();
 }
 
 async function refreshProviderSettingsData() {
   await refreshProviderConfigs();
-  await refreshLibraryModelSettings();
+  await refreshLibraryContentSettings();
   if (state.activeWorkspace === "settings") {
+    await refreshRuntimeHealth();
     await refreshModelCatalog();
-    await refreshGlobalModelDefaults();
+    await refreshGlobalContentTypes();
   }
 }
 
@@ -3769,12 +4349,15 @@ async function refreshWorkspace(options) {
   await refreshLibraries(options);
   await refreshSourceRoots();
   await refreshProviderConfigs();
-  await refreshLibraryModelSettings();
+  await refreshLibraryContentSettings();
   if (state.activeWorkspace === "inventory") {
     await refreshLibrarySources();
   } else if (state.activeWorkspace === "settings") {
+    await refreshRuntimeHealth();
     await refreshModelCatalog();
-    await refreshGlobalModelDefaults();
+    await refreshGlobalContentTypes();
+  } else {
+    state.runtimeHealth = null;
   }
   await refreshJobs();
   await refreshVideoSources();
@@ -3783,8 +4366,9 @@ async function refreshWorkspace(options) {
 
 async function onCreateLibrary(event) {
   event.preventDefault();
-  const name = state.libraryNameDraft.trim();
-  if (!name) {
+  const displayName = state.libraryDisplayNameDraft.trim();
+  const libraryId = state.libraryIdDraft.trim();
+  if (!displayName) {
     return;
   }
 
@@ -3793,8 +4377,8 @@ async function onCreateLibrary(event) {
     const library = await apiRequest("/libraries", {
       method: "POST",
       body: JSON.stringify({
-        name,
-        config: { enabled_index_lines: ["multivector"] },
+        display_name: displayName,
+        ...(libraryId ? { library_id: libraryId } : {}),
       }),
     });
     state.selectedLibraryId = library.id;
@@ -3802,11 +4386,11 @@ async function onCreateLibrary(event) {
     resetInventoryFilters();
     resetSearchFilters();
     resetInventoryState();
-    state.libraryModelOverrides = emptyModelOverrides();
-    state.resolvedModels = null;
+    state.libraryContentTypes = emptyContentTypes();
+    state.resolvedContentModels = null;
+    state.vectorSpaceDiagnostics = null;
     state.importPathsDraft = "";
     state.searchTextDraft = "";
-    state.libraryNameDraft = "";
     clearQueryImageState();
     clearQueryVideoState();
     clearQueryDocumentState();
@@ -3816,6 +4400,8 @@ async function onCreateLibrary(event) {
     state.searchOutcome = null;
     state.lastSearchRequest = null;
     state.statusMessage = null;
+    state.libraryDisplayNameDraft = "";
+    state.libraryIdDraft = "";
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
     state.globalError = toApiError(error);
@@ -3824,7 +4410,11 @@ async function onCreateLibrary(event) {
 }
 
 function onLibraryNameInput(event) {
-  state.libraryNameDraft = event.target.value;
+  state.libraryDisplayNameDraft = event.target.value;
+}
+
+function onLibraryIdInput(event) {
+  state.libraryIdDraft = event.target.value;
 }
 
 async function onSelectLibrary(event) {
@@ -3833,8 +4423,9 @@ async function onSelectLibrary(event) {
   resetInventoryFilters();
   resetSearchFilters();
   resetInventoryState();
-  state.libraryModelOverrides = emptyModelOverrides();
-  state.resolvedModels = null;
+  state.libraryContentTypes = emptyContentTypes();
+  state.resolvedContentModels = null;
+  state.vectorSpaceDiagnostics = null;
   clearQueryImageState();
   clearQueryVideoState();
   clearQueryDocumentState();
@@ -3903,32 +4494,79 @@ async function onEditProviderConfig(event) {
   renderWorkspace();
 }
 
-function onGlobalModelProviderChange(event) {
-  state.globalModelDefaults.index_lines[PROVIDER_INDEX_LINE] = normalizeModelSelectionForProvider(
-    event.target.value,
-    selectedGlobalModelSelection()
+function updateGlobalContentTypeBinding(
+  updater: (binding: ContentTypeBindingPayload) => ContentTypeBindingPayload
+) {
+  const contentType = selectedGlobalContentTypeKey();
+  if (!contentType) {
+    return;
+  }
+  state.globalContentTypes.content_types[contentType] = updater(selectedGlobalContentTypeBinding());
+}
+
+function updateLibraryContentTypeBinding(
+  updater: (binding: ContentTypeBindingPayload) => ContentTypeBindingPayload
+) {
+  const contentType = selectedLibraryContentTypeKey();
+  if (!contentType) {
+    return;
+  }
+  state.libraryContentTypes.content_types[contentType] = updater(selectedLibraryContentTypeBinding());
+}
+
+function onGlobalContentTypeChange(event) {
+  state.selectedGlobalContentType = event.target.value;
+  resetGlobalModelTestState();
+  renderWorkspace();
+}
+
+function onGlobalContentTypeEnabledChange(event) {
+  updateGlobalContentTypeBinding((binding) => ({
+    ...binding,
+    enabled: event.target.checked,
+  }));
+  renderWorkspace();
+}
+
+function onGlobalContentTypeProviderChange(event) {
+  updateGlobalContentTypeBinding((binding) =>
+    normalizeContentTypeBindingForProvider(event.target.value, binding)
   );
   resetGlobalModelTestState();
   renderWorkspace();
 }
 
-function onGlobalModelIdInput(event) {
-  state.globalModelDefaults.index_lines[PROVIDER_INDEX_LINE] = {
-    ...selectedGlobalModelSelection(),
-    model_id: event.target.value,
-  };
+function onGlobalContentTypeModelIdInput(event) {
+  updateGlobalContentTypeBinding((binding) => {
+    const selection = selectedGlobalModelSelection();
+    return {
+      ...binding,
+      model: composeModelReference({
+        provider_id: selection.provider_id,
+        model_id: event.target.value,
+      }),
+    };
+  });
   resetGlobalModelTestState();
   renderWorkspace();
 }
 
-async function onSubmitGlobalModelDefaults(event) {
+function onGlobalContentTypeVectorTypeChange(event) {
+  updateGlobalContentTypeBinding((binding) => ({
+    ...binding,
+    vector_type: event.target.value,
+  }));
+  renderWorkspace();
+}
+
+async function onSubmitGlobalContentTypes(event) {
   event.preventDefault();
 
   try {
     state.globalError = null;
-    await apiRequest("/settings/model-defaults", {
+    await apiRequest("/settings/content-types", {
       method: "PATCH",
-      body: JSON.stringify(state.globalModelDefaults),
+      body: JSON.stringify(state.globalContentTypes),
     });
     await refreshProviderSettingsData();
     renderWorkspace();
@@ -3938,25 +4576,52 @@ async function onSubmitGlobalModelDefaults(event) {
   }
 }
 
-function onLibraryModelProviderChange(event) {
-  state.libraryModelOverrides.index_lines[PROVIDER_INDEX_LINE] = normalizeModelOverrideForProvider(
-    event.target.value || null,
-    selectedLibraryModelOverride()
+function onLibraryContentTypeChange(event) {
+  state.selectedLibraryContentType = event.target.value;
+  resetLibraryModelTestState();
+  renderWorkspace();
+}
+
+function onLibraryContentTypeEnabledChange(event) {
+  updateLibraryContentTypeBinding((binding) => ({
+    ...binding,
+    enabled: event.target.checked,
+  }));
+  renderWorkspace();
+}
+
+function onLibraryContentTypeProviderChange(event) {
+  updateLibraryContentTypeBinding((binding) =>
+    normalizeContentTypeBindingForProvider(event.target.value, binding)
   );
   resetLibraryModelTestState();
   renderWorkspace();
 }
 
-function onLibraryModelIdInput(event) {
-  state.libraryModelOverrides.index_lines[PROVIDER_INDEX_LINE] = {
-    ...selectedLibraryModelOverride(),
-    model_id: event.target.value || null,
-  };
+function onLibraryContentTypeModelIdInput(event) {
+  updateLibraryContentTypeBinding((binding) => {
+    const selection = selectedLibraryModelSelection();
+    return {
+      ...binding,
+      model: composeModelReference({
+        provider_id: selection.provider_id,
+        model_id: event.target.value,
+      }),
+    };
+  });
   resetLibraryModelTestState();
   renderWorkspace();
 }
 
-async function onSubmitLibraryModelOverrides(event) {
+function onLibraryContentTypeVectorTypeChange(event) {
+  updateLibraryContentTypeBinding((binding) => ({
+    ...binding,
+    vector_type: event.target.value,
+  }));
+  renderWorkspace();
+}
+
+async function onSubmitLibraryContentTypes(event) {
   event.preventDefault();
   if (!state.selectedLibraryId) {
     return;
@@ -3964,11 +4629,11 @@ async function onSubmitLibraryModelOverrides(event) {
 
   try {
     state.globalError = null;
-    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/model-overrides`, {
+    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types`, {
       method: "PATCH",
-      body: JSON.stringify(state.libraryModelOverrides),
+      body: JSON.stringify(state.libraryContentTypes),
     });
-    await refreshLibraryModelSettings();
+    await refreshLibraryContentSettings();
     renderWorkspace();
   } catch (error) {
     state.globalError = toApiError(error);
@@ -3976,20 +4641,20 @@ async function onSubmitLibraryModelOverrides(event) {
   }
 }
 
-async function onResetLibraryModelOverrides() {
+async function onResetLibraryContentTypes() {
   if (!state.selectedLibraryId) {
     return;
   }
 
   try {
     state.globalError = null;
-    state.libraryModelOverrides = emptyModelOverrides();
+    state.libraryContentTypes = emptyContentTypes();
     resetLibraryModelTestState();
-    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/model-overrides`, {
+    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types`, {
       method: "PATCH",
-      body: JSON.stringify(state.libraryModelOverrides),
+      body: JSON.stringify(state.libraryContentTypes),
     });
-    await refreshLibraryModelSettings();
+    await refreshLibraryContentSettings();
     renderWorkspace();
   } catch (error) {
     state.globalError = toApiError(error);
@@ -4018,6 +4683,27 @@ function onGlobalModelTestFileInput(event) {
   renderWorkspace();
 }
 
+function onGlobalModelTestComparisonModalityChange(event) {
+  state.globalModelTestComparisonModalityDraft = event.target.value;
+  state.globalModelTestComparisonFile = null;
+  state.globalModelTestResult = null;
+  state.globalModelTestError = null;
+  renderWorkspace();
+}
+
+function onGlobalModelTestComparisonTextInput(event) {
+  state.globalModelTestComparisonTextDraft = event.target.value;
+  state.globalModelTestResult = null;
+  state.globalModelTestError = null;
+}
+
+function onGlobalModelTestComparisonFileInput(event) {
+  state.globalModelTestComparisonFile = event.target.files?.[0] ?? null;
+  state.globalModelTestResult = null;
+  state.globalModelTestError = null;
+  renderWorkspace();
+}
+
 function onLibraryModelTestModalityChange(event) {
   state.libraryModelTestModalityDraft = event.target.value;
   state.libraryModelTestFile = null;
@@ -4039,6 +4725,27 @@ function onLibraryModelTestFileInput(event) {
   renderWorkspace();
 }
 
+function onLibraryModelTestComparisonModalityChange(event) {
+  state.libraryModelTestComparisonModalityDraft = event.target.value;
+  state.libraryModelTestComparisonFile = null;
+  state.libraryModelTestResult = null;
+  state.libraryModelTestError = null;
+  renderWorkspace();
+}
+
+function onLibraryModelTestComparisonTextInput(event) {
+  state.libraryModelTestComparisonTextDraft = event.target.value;
+  state.libraryModelTestResult = null;
+  state.libraryModelTestError = null;
+}
+
+function onLibraryModelTestComparisonFileInput(event) {
+  state.libraryModelTestComparisonFile = event.target.files?.[0] ?? null;
+  state.libraryModelTestResult = null;
+  state.libraryModelTestError = null;
+  renderWorkspace();
+}
+
 async function submitSettingsModelTest(scope: "global" | "library") {
   const selection =
     scope === "global" ? selectedGlobalModelSelection() : selectedLibraryModelSelection();
@@ -4051,6 +4758,18 @@ async function submitSettingsModelTest(scope: "global" | "library") {
   const textDraft =
     scope === "global" ? state.globalModelTestTextDraft : state.libraryModelTestTextDraft;
   const file = scope === "global" ? state.globalModelTestFile : state.libraryModelTestFile;
+  const comparisonModalityDraft =
+    scope === "global"
+      ? state.globalModelTestComparisonModalityDraft
+      : state.libraryModelTestComparisonModalityDraft;
+  const comparisonTextDraft =
+    scope === "global"
+      ? state.globalModelTestComparisonTextDraft
+      : state.libraryModelTestComparisonTextDraft;
+  const comparisonFile =
+    scope === "global"
+      ? state.globalModelTestComparisonFile
+      : state.libraryModelTestComparisonFile;
   const providerDraft = activeProviderDraftForSelection(selection.provider_id);
   const setPending = (value: boolean) => {
     if (scope === "global") {
@@ -4110,6 +4829,24 @@ async function submitSettingsModelTest(scope: "global" | "library") {
     return;
   }
 
+  if (comparisonModalityDraft === "text" && !comparisonTextDraft.trim()) {
+    setError({
+      code: "validation_failed",
+      message: "请先输入用于比较的第二个测试文本。",
+    });
+    renderWorkspace();
+    return;
+  }
+
+  if (comparisonModalityDraft === "image" && !comparisonFile) {
+    setError({
+      code: "validation_failed",
+      message: "请先选择一个用于比较的第二个测试文件。",
+    });
+    renderWorkspace();
+    return;
+  }
+
   try {
     setPending(true);
     setError(null);
@@ -4129,6 +4866,14 @@ async function submitSettingsModelTest(scope: "global" | "library") {
       formData.append("text", textDraft.trim());
     } else if (file) {
       formData.append("file", file);
+    }
+    if (comparisonModalityDraft) {
+      formData.append("comparison_input_modality", comparisonModalityDraft);
+      if (comparisonModalityDraft === "text") {
+        formData.append("comparison_text", comparisonTextDraft.trim());
+      } else if (comparisonFile) {
+        formData.append("comparison_file", comparisonFile);
+      }
     }
 
     const result = await apiRequest<ModelTestData>("/settings/model-tests", {
@@ -4472,7 +5217,7 @@ async function onImportPaths(event) {
 
   try {
     state.globalError = null;
-    state.statusMessage = "正在导入并建立 multivector 索引...";
+    state.statusMessage = "正在导入并建立索引...";
     renderWorkspace();
     await importPaths(paths);
     state.importPathsDraft = "";
@@ -4644,7 +5389,7 @@ async function runTextSearch() {
     return;
   }
 
-  state.statusMessage = "正在执行真实 multivector 文本搜索...";
+  state.statusMessage = "正在执行真实文本搜索...";
   renderWorkspace();
   await searchText(text);
 }
@@ -4667,7 +5412,7 @@ async function runImageSearch() {
     await uploadQueryImage(state.queryImageFile);
   }
 
-  state.statusMessage = "正在执行真实 multivector 图片搜索...";
+  state.statusMessage = "正在执行真实图片搜索...";
   renderWorkspace();
   if (state.queryImageAsset) {
     await searchImage({
@@ -4708,7 +5453,7 @@ async function runVideoSearch() {
     await uploadQueryVideo(state.queryVideoFile);
   }
 
-  state.statusMessage = "正在执行真实 multivector 视频搜索...";
+  state.statusMessage = "正在执行真实视频搜索...";
   renderWorkspace();
   const locator = queryVideoLocatorPayload();
   if (state.queryVideoAsset) {
@@ -4755,7 +5500,7 @@ async function runDocumentSearch() {
     await uploadQueryDocument(state.queryDocumentFile);
   }
 
-  state.statusMessage = "正在执行真实 multivector 文档搜索...";
+  state.statusMessage = "正在执行真实文档搜索...";
   renderWorkspace();
   const locator = queryDocumentLocatorPayload();
   if (state.queryDocumentAsset) {

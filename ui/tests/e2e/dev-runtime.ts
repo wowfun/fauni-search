@@ -14,8 +14,30 @@ const DEV_ENV_PATH = path.join(REPO_ROOT, ".env.dev");
 const DEV_ENV_EXAMPLE_PATH = path.join(REPO_ROOT, ".env.dev.example");
 const RUNTIME_STATE_PATH = path.join(os.tmpdir(), "fauni-search-playwright-dev-runtime.json");
 
-function parseEnvFile(contents) {
-  const values = {};
+interface SelectedDevEnv {
+  envPath: string;
+  env: Record<string, string>;
+  isConcreteEnv: boolean;
+}
+
+interface DevServiceStatus {
+  ready?: boolean;
+  pid?: number | null;
+  pids?: number[] | null;
+  url?: string | null;
+}
+
+interface DevRuntimeStatus {
+  services?: Record<string, DevServiceStatus>;
+}
+
+interface DevRuntimeState {
+  startedByUs: boolean;
+  uiUrl: string;
+}
+
+function parseEnvFile(contents: string): Record<string, string> {
+  const values: Record<string, string> = {};
 
   for (const rawLine of contents.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -42,7 +64,7 @@ function parseEnvFile(contents) {
   return values;
 }
 
-function readSelectedDevEnv() {
+function readSelectedDevEnv(): SelectedDevEnv {
   const envPath = fs.existsSync(DEV_ENV_PATH) ? DEV_ENV_PATH : DEV_ENV_EXAMPLE_PATH;
   if (!envPath || !fs.existsSync(envPath)) {
     throw new Error("Missing .env.dev and .env.dev.example; bootstrap the repo first.");
@@ -67,7 +89,7 @@ export function getDevUiUrl() {
   return `http://${env.UI_HOST}:${env.UI_PORT}/`;
 }
 
-async function runLocalScript(scriptName, args = []) {
+async function runLocalScript(scriptName: string, args: string[] = []) {
   const scriptPath = path.join(REPO_ROOT, "scripts/local", scriptName);
   return execFileAsync("bash", [scriptPath, "--dev", ...args], {
     cwd: REPO_ROOT,
@@ -75,20 +97,20 @@ async function runLocalScript(scriptName, args = []) {
   });
 }
 
-export async function getDevStatus() {
+export async function getDevStatus(): Promise<DevRuntimeStatus> {
   const { stdout } = await runLocalScript("status.sh", ["--json"]);
   return JSON.parse(stdout);
 }
 
-function isReady(service) {
+function isReady(service?: DevServiceStatus | null) {
   return Boolean(service?.ready);
 }
 
-function hasPid(service) {
+function hasPid(service?: DevServiceStatus | null) {
   return Boolean(service?.pid || (service?.pids ?? []).length);
 }
 
-function hasPartialAppRuntime(status) {
+function hasPartialAppRuntime(status: DevRuntimeStatus) {
   const services = status?.services ?? {};
   const names = ["app", "sidecar", "ui"];
   const anyPresent = names.some((name) => isReady(services[name]) || hasPid(services[name]));
@@ -96,7 +118,7 @@ function hasPartialAppRuntime(status) {
   return anyPresent && !allReady;
 }
 
-function allDevServicesReady(status) {
+function allDevServicesReady(status: DevRuntimeStatus) {
   const services = status?.services ?? {};
   return ["app", "sidecar", "ui", "qdrant"].every((name) => isReady(services[name]));
 }
@@ -140,11 +162,11 @@ export async function stopDevRuntime() {
   await runLocalScript("stop.sh", ["--all"]);
 }
 
-export function writeRuntimeState(payload) {
+export function writeRuntimeState(payload: DevRuntimeState) {
   fs.writeFileSync(RUNTIME_STATE_PATH, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
-export function readRuntimeState() {
+export function readRuntimeState(): DevRuntimeState | null {
   if (!fs.existsSync(RUNTIME_STATE_PATH)) {
     return null;
   }

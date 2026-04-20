@@ -2,9 +2,9 @@ import {
   clearRuntimeState,
   ensureDevRuntime,
   writeRuntimeState,
-} from "./tests/e2e/dev-runtime.js";
+} from "./tests/e2e/dev-runtime";
 
-export default async function globalSetup() {
+export default async function globalSetup(): Promise<void> {
   clearRuntimeState();
   const runtime = await ensureDevRuntime();
   writeRuntimeState({
