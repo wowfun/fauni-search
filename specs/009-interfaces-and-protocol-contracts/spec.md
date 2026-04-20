@@ -71,7 +71,7 @@
   - `POST /search/image`
   - `POST /search/video`
   - `POST /search/document`
-- 这三类端点共享同一搜索请求封套，至少包含：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_index_lines`
+- 这三类端点共享同一搜索请求封套，至少包含：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_content_types`
 - `/search/text` 的请求载荷必须携带 `text`
 - `/search/image` 的请求载荷必须携带 `image_input`
 - `/search/video` 的请求载荷必须携带 `video_input`
@@ -96,6 +96,7 @@
 - 搜索响应载荷通过响应封套中的 `data` 返回，至少包含：
   - 有序 `results`
   - 可选 `next_cursor`
+  - 可选 `unsupported_content_types`
   - 可选 `debug`
 - 当前切片中，`cursor` 必须编码为来自上一页 `next_cursor` 或上一页最后一个结果项 `cursor` 的不透明字符串；客户端不得依赖其内部格式
 - 当前切片中，若启用了 `filters`，正式稳定编码至少包括：
@@ -113,18 +114,40 @@
 - 当前切片中，`debug` 载荷的稳定最小结构至少应支持：
   - `backend`
   - `repr_kind`
-  - `resolved_model`
-  - `index_lines`
-- 搜索请求若同时携带多种查询输入、显式请求未启用索引线，或命中已启用但未就绪的目标索引线，应通过统一错误载荷返回失败
-- `not_ready` 错误的 `details` 至少应支持按索引线返回结构化条目；每个条目至少可表达 `index_line`，并可附带相关 `job` / `phase` 摘要
+  - `content_types`
+  - `vector_spaces`
+- 搜索请求若同时携带多种查询输入、显式请求未启用内容类型，或命中已启用但未就绪的目标内容类型，应通过统一错误载荷返回失败
+- `unsupported_content_types` 的稳定最小编码应为对象数组；每项至少应支持：
+  - `content_type`
+  - `model`
+  - `vector_type`
+  - `reason`
+- `debug.vector_spaces` 的稳定最小编码应为对象数组；每项至少应支持：
+  - `vector_space_id`
+  - `provider_id`
+  - `provider_kind`
+  - `model_id`
+  - `model_version`
+  - 可选 `model_revision`
+  - `vector_type`
+  - `content_types`
+  - 可选 `execution_input_types`
+- `not_ready` 错误的 `details` 至少应支持按内容类型返回结构化条目；每个条目至少可表达 `content_type`，并可附带相关 `job` / `phase` 摘要
 - 搜索结果字段的含义、过滤 / 排序规则、邻近上下文语义与显式拒绝规则由 [004-search](../004-search/spec.md) 定义
 
 ## 非搜索控制面接口契约
 
 - 非搜索控制面接口族由 [008-ui-ux](../008-ui-ux/spec.md) 定义其存在与职责；本专题固定这些接口族的公开编码
 - 若通过 HTTP 暴露，库创建接口的稳定入口应包括 `POST /libraries`
-- `POST /libraries` 的请求载荷至少包含：`name` 与 `config`
-- `config` 作为稳定扩展对象，承接例如 `enabled_index_lines` 一类库级配置；本专题不固定其完整字段集
+- `POST /libraries` 的请求载荷至少应支持：
+  - 可选 `library_id`
+  - 可选 `display_name`
+- 当前切片中，若仍保留旧 `name` 输入字段，它只能作为 `display_name` 的兼容别名，不得再承担稳定身份语义
+- 若未提供 `library_id`，服务端必须从 `display_name` 生成 slug 风格稳定标识，并在冲突时自动追加后缀
+- `GET /libraries` 与 `GET /libraries/{library_id}` 的库快照至少应返回：
+  - 稳定 `id`
+  - `display_name`
+  - 当前切片可附带旧 `name` 兼容别名，但客户端不应再依赖它承接稳定身份
 - 库管理、来源根与规则管理、配置与绑定管理、收藏管理、搜索历史管理等资源型接口，应采用统一的资源快照载荷与列表 / 详情 / 变更响应形状
 - 若通过 HTTP 暴露，来源根资源接口的稳定入口应包括：
   - `GET /libraries/{library_id}/source-roots`
@@ -143,13 +166,15 @@
   - `GET /settings/providers`
   - `PATCH /settings/providers/{provider_id}`
   - `GET /settings/model-catalog`
-  - `GET /settings/model-defaults`
-  - `PATCH /settings/model-defaults`
+  - `GET /settings/content-types`
+  - `PATCH /settings/content-types`
   - `POST /settings/model-tests`
+  - `GET /runtime-health`
 - 若通过 HTTP 暴露，库级 model 接口的稳定入口应包括：
-  - `GET /libraries/{library_id}/model-overrides`
-  - `PATCH /libraries/{library_id}/model-overrides`
-  - `GET /libraries/{library_id}/resolved-models`
+  - `GET /libraries/{library_id}/content-types`
+  - `PATCH /libraries/{library_id}/content-types`
+  - `GET /libraries/{library_id}/resolved-content-models`
+  - `GET /libraries/{library_id}/vector-space-diagnostics`
 - provider 资源快照至少应支持：
   - `provider_id`
   - `display_name`
@@ -158,32 +183,78 @@
   - 可选 `base_url`
   - 可选 `readonly_reason`
   - 可选 `probe`
-- model defaults 与 library model overrides 的稳定最小编码应支持：
-  - `index_lines.{index_line}.provider_id`
-  - `index_lines.{index_line}.model_id`
+- `GET /runtime-health` 的稳定最小返回应支持：
+  - `app`
+  - `qdrant`
+  - `providers`
+- `app` 与 `qdrant` 都应编码为运行时组件健康快照；每个快照至少应支持：
+  - `component_id`
+  - `display_name`
+  - `status`
+  - `message`
+  - `last_checked_at`
+  - 可选 `details`
+- `providers` 应编码为 provider 级运行时诊断条目数组；每个条目至少应支持：
+  - `provider_id`
+  - `display_name`
+  - `provider_kind`
+  - `enabled`
+  - `status`
+  - `message`
+  - 可选 `last_probed_at`
+  - 可选 `model_id`
+  - 可选 `model_version`
+  - 可选 `model_revision`
+  - 可选 `embedding_capabilities`
+  - 可选 `execution_input_types`
+  - 可选 `runtime_adapters`
+- `execution_input_types` 与 `runtime_adapters` 都只属于运行时诊断摘要；它们不得出现在 `model-catalog`、`resolved-content-models` 或 `EmbeddingCapabilities` 中
+- 全局与库级 `content_types` 的稳定最小编码应支持：
+  - `content_types.{content_type}.enabled`
+  - `content_types.{content_type}.model`
+  - `content_types.{content_type}.vector_type`
+- `GET /settings/providers`、`PATCH /settings/providers/{provider_id}`、`GET /settings/content-types`、`PATCH /settings/content-types`、`GET /libraries/{library_id}/content-types` 与 `PATCH /libraries/{library_id}/content-types` 的 durable truth 固定为 merged config，而不是 `state.sqlite`
+- 这些 settings 接口在当前切片中默认只写 `${APP_RUNTIME_DIR}/runtime-config.json`；若写入后的 merged config 无效，接口必须整体拒绝而不是留下部分更新
 - model catalog 条目至少应支持：
   - `provider_id`
   - `provider_kind`
   - `model_id`
+  - `model_version`
   - 可选 `model_revision`
-  - `supported_index_lines`
   - `embedding_capabilities`
   - `editable`
   - `status`
   - `message`
-- 当前切片中，库级 `model-overrides` 作为库级 overrides 入口公开；缺失字段表示回退到全局默认
-- `resolved-models` 的稳定最小返回至少应覆盖：
-  - `index_lines.multivector`
-- 每个 resolved model 条目至少应支持：
+- `resolved-content-models` 的稳定最小返回至少应覆盖当前全部正式内容类型
+- 每个 resolved content model 条目至少应支持：
   - `binding_source`
+  - `content_type`
   - `provider_id`
   - `provider_kind`
   - `model_id`
+  - `model_version`
   - 可选 `model_revision`
+  - `vector_type`
+  - 可选 `vector_space_id`
   - `embedding_capabilities`
   - `status`
   - `message`
   - `last_probed_at`
+- `GET /libraries/{library_id}/vector-space-diagnostics` 的稳定最小返回应支持 `vector_spaces` 数组
+- 每个 vector-space diagnostics 条目至少应支持：
+  - `vector_space_id`
+  - `lifecycle_state`
+  - `content_types`
+  - 可选 `provider_id`
+  - 可选 `provider_kind`
+  - 可选 `model_id`
+  - 可选 `model_version`
+  - 可选 `vector_type`
+  - 可选 `retired_at_ms`
+- 当前切片中：
+  - active `vector_space` 应返回当前仍受配置与结构化真相共同承认的执行空间摘要
+  - retired `vector_space` 应返回仍处于延迟清理窗口内、尚未被后台维护循环成功清理的空间摘要
+  - retired 条目若无法安全反推出旧绑定细节，可以只返回 `vector_space_id`、`lifecycle_state` 与 `retired_at_ms`
 - `POST /settings/model-tests` 的稳定输入应采用 `multipart/form-data`，至少支持：
   - `provider_id`
   - `model_id`
@@ -192,6 +263,10 @@
   - 可选 `provider_base_url`
   - 文本测试时的 `text`
   - 文件测试时的单个 `file`
+- `POST /settings/model-tests` 还应支持一个可选的第二输入：
+  - `comparison_input_modality`
+  - 文本比较输入时的 `comparison_text`
+  - 文件比较输入时的单个 `comparison_file`
 - `provider_base_url` 仅适用于当前允许编辑连接信息的 provider；`local_sidecar` 这类 runtime-derived provider 不得把展示用连接地址重新回传为测试草稿
 - `input_modality` 必须受目标模型的 `embedding_capabilities.input_types` 约束；当前切片只要求承接 `text` 与 `image`
 - `POST /settings/model-tests` 的成功响应至少应支持：
@@ -202,7 +277,15 @@
   - `vectors`
   - 可选 `pooled_vector`
   - `input_summary`
-- `POST /settings/model-tests` 是纯诊断接口，不创建 job，不修改已持久化的 provider config、model defaults 或 library model overrides
+- 若提供第二输入，成功响应还至少应支持一个可选 `comparison` 对象，其中包含：
+  - `input_modality`
+  - `operation_kind`
+  - `vector_shape`
+  - `vectors`
+  - 可选 `pooled_vector`
+  - `input_summary`
+  - `similarity_to_primary`
+- `POST /settings/model-tests` 是纯诊断接口，不创建 job，不修改已持久化的 provider config、全局 `content_types` 或库级内容类型覆盖
 - `GET /libraries/{library_id}/sources` 当前阶段至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
 - 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与当前路径或等价来源定位摘要
 - 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
@@ -257,7 +340,9 @@
 - 能力 / 可用性探测响应必须能表达：声明能力、当前可用能力裁剪结果，以及是否可服务目标操作
 - 能力 / 可用性探测响应必须显式区分：
   - `embedding_capabilities`：模型原生向量能力事实
+  - `execution_input_types`：当前执行面可承接的查询输入
   - `runtime_adapters`：工程增强后的输入适配能力
+- `execution_input_types` 必须由 `operations + runtime_adapters` 派生，而不是由 `embedding_capabilities` 反推
 - 若某个能力响应项可用于 Settings 模型测试，其可测试模态必须由 `embedding_capabilities.input_types` 推导，而不是由工程增强操作列表反推
 - 推理 / 编码请求至少应显式携带：
   - `operation_kind`

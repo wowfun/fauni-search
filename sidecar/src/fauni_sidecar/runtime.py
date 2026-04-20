@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import importlib.util
 import os
+import json
 import subprocess
 import threading
 import time
@@ -63,8 +64,10 @@ class ColQwenRuntime:
 
     @classmethod
     def from_env(cls) -> "ColQwenRuntime":
-        model_id = require_env("TEXT_SEARCH_MODEL_ID")
-        model_revision = require_env("TEXT_SEARCH_MODEL_REVISION")
+        model_id = os.environ.get("EMBEDDING_MODEL_ID")
+        model_revision = os.environ.get("EMBEDDING_MODEL_REVISION")
+        if not model_id or not model_revision:
+            model_id, model_revision = resolve_local_sidecar_model_from_runtime_config()
         return cls(model_id=model_id, model_revision=model_revision)
 
     def health_snapshot(self) -> dict[str, Any]:
@@ -122,6 +125,7 @@ class ColQwenRuntime:
                 "vector_types": ["multi_vector_late_interaction"],
                 "supports_mixed_inputs": False,
             },
+            "execution_input_types": ["text", "image", "document", "video"],
             "runtime_adapters": [
                 "document_query_via_page_images",
                 "video_query_via_frame_images",
@@ -531,6 +535,60 @@ class ColQwenRuntime:
 
 def module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
+
+
+def resolve_local_sidecar_model_from_runtime_config() -> tuple[str, str]:
+    config_path = os.environ.get("FAUNI_CONFIG_PATH")
+    repo_path = Path(config_path) if config_path else Path.cwd() / "fauni.config.json"
+    runtime_dir = os.environ.get("APP_RUNTIME_DIR")
+    if not runtime_dir:
+        raise RuntimeError(
+            "Missing required environment variable APP_RUNTIME_DIR; source .env or use scripts/local/run.sh"
+        )
+
+    repo_config = load_json_config(repo_path, required=True)
+    runtime_config = load_json_config(Path(runtime_dir) / "runtime-config.json", required=False)
+    merged = deep_merge_config(repo_config, runtime_config)
+    providers = merged.get("provider")
+    if not isinstance(providers, dict):
+        raise RuntimeError("Fauni config must define provider.local_sidecar.")
+    provider = providers.get("local_sidecar")
+    if not isinstance(provider, dict):
+        raise RuntimeError("Fauni config must define provider.local_sidecar.")
+    active_model = str(provider.get("active_model", "")).strip()
+    if not active_model:
+        raise RuntimeError("provider.local_sidecar.active_model must be a non-empty string.")
+    models = provider.get("models")
+    if not isinstance(models, dict):
+        raise RuntimeError("provider.local_sidecar.models must be an object.")
+    model = models.get(active_model)
+    if not isinstance(model, dict):
+        raise RuntimeError(
+            f"provider.local_sidecar.active_model points to missing model {active_model}."
+        )
+    version = str(model.get("version", "main")).strip() or "main"
+    return active_model, version
+
+
+def load_json_config(path: Path, *, required: bool) -> dict[str, Any]:
+    if not path.exists():
+        if required:
+            raise RuntimeError(f"Fauni config file was not found: {path}")
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Fauni config file must decode to an object: {path}")
+    return payload
+
+
+def deep_merge_config(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def load_document_image(document: dict[str, Any]) -> tuple[Any, str, str, dict[str, Any]]:

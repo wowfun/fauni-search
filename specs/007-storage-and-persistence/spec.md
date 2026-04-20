@@ -41,6 +41,9 @@
 ## 物理持久化分层
 
 - 结构化真相默认进入单一主结构化存储；当前默认实现为单一主 SQLite，路径固定为 `${APP_RUNTIME_DIR}/state.sqlite`
+- provider / model settings 的稳定事实源不再进入主结构化存储；当前固定采用双层 JSON 配置：
+  - repo 基线：`fauni.config.json`
+  - runtime 覆盖：`${APP_RUNTIME_DIR}/runtime-config.json`
 - 检索载荷进入检索后端命名空间；检索后端只承载索引、向量与最小检索载荷，不承载结构化业务真相
 - 派生资产载荷进入应用数据根下的派生资产存储区，并通过结构化记录引用
 - 临时查询资产进入应用数据根下的临时资产存储区，按短生命周期管理，不作为长期迁移保护对象
@@ -61,9 +64,7 @@
   - `sources`
   - `visual_units`
   - `active_index_references`
-  - `provider_configs`
-  - `global_model_defaults`
-  - `library_model_overrides`
+  - `retired_vector_space_inventory`
 - 当前 v1 采用“单个 durable snapshot + 事务性整份重写”的写入方式，而不是 row-by-row live sync
 - 为承接 [002-state-and-data-model](../002-state-and-data-model/spec.md) 中的稳定关系，可以存在必要的关联记录族；但这些记录不得改变上游定义的事实源归属
 - `jobs`、`job_attempts`、`search_history` 与 `favorites` 不属于当前 v1 的 restart-durable subset；它们在重启后清空或缺失，不构成持久恢复失败
@@ -72,14 +73,16 @@
 ## 检索命名空间与文件载荷
 
 - 检索命名空间是检索后端内承载某次索引构建结果的稳定命名与映射边界
-- 对同一库中的某条索引线，至少应区分 active 与 staging 两类命名空间角色
-- 检索命名空间的稳定映射边界至少包含：`library_id`、`index_line`、`content_version` 与命名空间角色
-- 当前 v1 stable active logical namespace naming 固定为 `index_{library_id}_{index_line}`
-- 当前实现中，`index_{library_id}_{index_line}` 由 active alias 或等价逻辑命名承接，而不是要求对应单一固定物理 collection；staging 命名空间在验证通过前不承担公开检索真相
+- 对同一库中的某个 `vector_space`，至少应区分 active 与 staging 两类命名空间角色
+- 检索命名空间的稳定映射边界至少包含：`library_id`、`vector_space_id`、`content_version` 与命名空间角色
+- 当前 v1 stable active logical namespace naming 固定为 `vector_space_{library_id}_{vector_space_id}`
+- 当前实现中，`vector_space_{library_id}_{vector_space_id}` 由 active alias 或等价逻辑命名承接，而不是要求对应单一固定物理 collection；staging 命名空间在验证通过前不承担公开检索真相
 - 新建的物理检索 collection 必须使用 disk-backed vector 配置；当前 v1 要求其 named vectors 使用 `on_disk: true`
 - 失败或中断留下的 staging 命名空间，以及因替换而退役的旧 active 命名空间，在延迟清理窗口内保留，用于诊断、恢复与安全回收
+- 当内容类型配置改绑到新的执行签名时，主结构化存储中的 active vector space reference 必须先移除旧 `vector_space`，随后旧命名空间才作为 retired 命名空间进入延迟清理窗口
+- retired `vector_space` inventory 属于主结构化存储中的 durable truth；在后台清理实际成功前，不得只因为进程重启或一次清理失败就丢失这些待清理记录
 - 检索命名空间的具体产品实现可以是 collection、alias 或等价机制，但这些后端私有机制不作为本专题中的稳定事实
-- 旧 runtime-token collection、更早的 `text_search_*` collection，以及把 `index_{library_id}_{index_line}` 直接占成物理 collection 的旧实现，都与当前 stable naming 不兼容；本专题只要求 operator/manual cleanup，不要求应用启动或 `run.sh` 自动迁移或自动清理
+- 旧 runtime-token collection、更早的 `text_search_*` collection，以及把旧 `index_*` 或新 `vector_space_*` stable logical name 直接占成物理 collection 的实现，都与当前 stable naming 不兼容；本专题只要求 operator/manual cleanup，不要求应用启动或 `run.sh` 自动迁移或自动清理
 - 派生资产存储区承载预览图、视频分段、关键帧拼图等可重建载荷；其长期身份由结构化存储中的 `derived_assets` 记录与载荷引用承接
 - 临时资产存储区承载图片 / 视频查询的上传输入、裁剪结果与短期中间载荷；这些载荷过期后可以直接删除，不承诺迁移保留
 - 运行时工作区承载 scratch 文件、临时导出和诊断中间文件；即使被清空，也不得破坏结构化真相与激活索引引用
@@ -95,8 +98,8 @@
 | 派生资产载荷 | 派生资产存储区 | 可重建文件载荷，不替代结构化真相 |
 | 激活索引引用 | 主结构化存储 | 指向当前 active / staging 检索命名空间 |
 | 索引与向量载荷 | 检索命名空间 | 仅承载检索事实，不承载业务元数据真相 |
-| provider configs | 主结构化存储 | 承载内建 provider 的平台、base_url 与启用状态 |
-| 全局模型默认与库级模型覆盖 | 主结构化存储 | 承载按 index line 的模型选择配置 |
+| provider configs | 配置文件事实源 | repo 基线 `fauni.config.json` 与 runtime 覆盖 `${APP_RUNTIME_DIR}/runtime-config.json` 深合并后的结果 |
+| 全局 `content_types` 与库级内容类型覆盖 | 配置文件事实源 | 当前仍由 settings 接口公开，但其 durable truth 不再进入 `state.sqlite` |
 | 任务状态、任务尝试、检查点引用 | 运行时进程自身 | 当前 v1 只作为进程内执行状态；重启后清空 |
 | 搜索历史记录、收藏记录 | 非当前 v1 durable subset | 当前切片不要求跨 restart 恢复 |
 | 临时查询资产 | 临时资产存储区 | 纯临时输入，不构成长期共享事实源 |
@@ -112,7 +115,7 @@
 - 应用数据根的 layout version 必须能表达派生资产存储区、临时资产存储区与运行时工作区的布局兼容性
 - 当检索命名空间的物理命名或后端兼容要求发生变化时，应通过显式兼容代际或重建路径处理，而不是直接改写结构化真相含义
 - 当前 active index reference 在应用启动时必须重新对照 stable active namespace naming 探测可用性；若 active alias 缺失、alias target 缺失，或只剩同名旧物理 collection，该引用应失活并让搜索返回 `not_ready`
-- provider configs、global model defaults 与 library model overrides 在旧 `state.sqlite` 中缺失时，应用必须按向后兼容路径自动补齐最小默认值，而不是把旧 durable store 视为损坏
+- provider configs、全局 `content_types` 与库级内容类型覆盖不再以 `state.sqlite` 为事实源；旧 `state.sqlite` 中即使残留这些字段，也不得覆盖 merged config 的解析结果
 - 升级过程中，`library_id`、`source_id`、`visual_unit_id`、`content_version_id` 等稳定身份不得被重写
 - 派生资产载荷、临时资产与检索命名空间若与新版本不兼容，可以按规则重建；主结构化存储中的稳定记录与持久队列记录不得依赖“删掉重建”作为默认升级手段
 - 若派生资产载荷或检索命名空间被判定为需要重建，主结构化存储中的引用、检查点与激活关系应继续作为恢复入口，而不是被隐式清空

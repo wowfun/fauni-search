@@ -13,17 +13,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(crate) fn normalize_index_lines(lines: Option<Vec<String>>) -> Vec<String> {
-    let mut unique = BTreeSet::new();
-    for line in lines.unwrap_or_default() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            unique.insert(trimmed.to_string());
-        }
-    }
-    unique.into_iter().collect()
-}
-
 pub(crate) fn normalize_source_root_rules(rules: SourceRootRulesPayload) -> SourceRootRulesPayload {
     SourceRootRulesPayload {
         include_globs: normalize_rule_globs(rules.include_globs),
@@ -554,7 +543,7 @@ pub(crate) fn read_string_filter(filters: Option<&Value>, key: &str) -> Option<B
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_pattern_matches, normalize_index_lines};
+    use super::glob_pattern_matches;
 
     #[test]
     fn glob_pattern_matches_double_star_and_wildcards() {
@@ -564,15 +553,5 @@ mod tests {
         ));
         assert!(glob_pattern_matches("*.png", "chart.png"));
         assert!(!glob_pattern_matches("*.png", "chart.jpg"));
-    }
-
-    #[test]
-    fn normalize_index_lines_deduplicates_trimmed_values() {
-        let lines = normalize_index_lines(Some(vec![
-            " multivector ".to_string(),
-            "".to_string(),
-            "multivector".to_string(),
-        ]));
-        assert_eq!(lines, vec!["multivector".to_string()]);
     }
 }

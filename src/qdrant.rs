@@ -1,6 +1,6 @@
 use crate::{
     api::ApiError,
-    model::{ActiveNamespaceProbeResult, SearchPlan, VisualUnitRecord},
+    model::{ActiveNamespaceProbeResult, VisualUnitRecord},
     sidecar::{QueryEmbeddingResult, SidecarEmbeddingItem},
     DEFAULT_QDRANT_MAX_UPSERT_BODY_BYTES, QDRANT_UPSERT_BODY_OVERHEAD_BYTES,
 };
@@ -51,8 +51,12 @@ pub(crate) struct QdrantNamespaceWritePlan {
     pub(crate) stage_strategy: StageCollectionStrategy,
 }
 
-pub(crate) fn staging_collection_name(library_id: &str, index_line: &str, job_id: &str) -> String {
-    format!("index_stage_{library_id}_{index_line}_{job_id}")
+pub(crate) fn staging_vector_space_collection_name(
+    library_id: &str,
+    vector_space_id: &str,
+    job_id: &str,
+) -> String {
+    format!("vector_space_stage_{library_id}_{vector_space_id}_{job_id}")
 }
 
 pub(crate) async fn resolve_qdrant_namespace_write_plan(
@@ -71,7 +75,7 @@ pub(crate) async fn resolve_qdrant_namespace_write_plan(
         ActiveNamespaceProbeResult::Missing => {
             if !allow_fresh_without_active {
                 return Err(
-                    "The active multivector namespace is missing. Run a full library rescan to rebuild the index before applying incremental updates."
+                    "The active vector space namespace is missing. Run a full library rescan to rebuild the index before applying incremental updates."
                         .to_string(),
                 );
             }
@@ -86,7 +90,7 @@ pub(crate) async fn resolve_qdrant_namespace_write_plan(
         ActiveNamespaceProbeResult::MissingTarget { target_collection } => {
             if !allow_fresh_without_active {
                 return Err(format!(
-                    "The active multivector namespace alias points to missing collection {target_collection}. Run a full library rescan to rebuild the index before applying incremental updates."
+                    "The active vector space namespace alias points to missing collection {target_collection}. Run a full library rescan to rebuild the index before applying incremental updates."
                 ));
             }
             Ok(QdrantNamespaceWritePlan {
@@ -332,6 +336,41 @@ pub(crate) async fn list_qdrant_collections() -> Result<Vec<String>, String> {
         .collect())
 }
 
+pub(crate) async fn probe_qdrant_runtime_health() -> Result<usize, String> {
+    let response = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("qdrant health probe client should be constructible")
+        .get(format!(
+            "{}/collections",
+            qdrant_base_url().map_err(|error| error.payload.message)?
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant runtime health probe failed: {error}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "Qdrant runtime health probe failed with {}: {}.",
+            status,
+            qdrant_error_detail(&body)
+        ));
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Qdrant runtime health probe returned invalid JSON: {error}"))?;
+    Ok(payload
+        .pointer("/result/collections")
+        .and_then(Value::as_array)
+        .map(|collections| collections.len())
+        .unwrap_or(0))
+}
+
 pub(crate) async fn qdrant_alias_target(alias_name: &str) -> Result<Option<String>, String> {
     for alias in list_qdrant_aliases().await? {
         let matches = alias
@@ -401,6 +440,36 @@ pub(crate) async fn switch_qdrant_active_alias(
         Err(format!(
             "Qdrant alias activation for {} failed with {}: {}.",
             write_plan.alias_name,
+            status,
+            qdrant_error_detail(&body)
+        ))
+    }
+}
+
+pub(crate) async fn delete_qdrant_alias(alias_name: &str) -> Result<(), String> {
+    let response = qdrant_client()
+        .post(format!(
+            "{}/collections/aliases",
+            qdrant_base_url().map_err(|error| error.payload.message)?
+        ))
+        .json(&json!({
+            "actions": [{
+                "delete_alias": {
+                    "alias_name": alias_name,
+                }
+            }]
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("Qdrant alias deletion failed: {error}"))?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(format!(
+            "Qdrant alias deletion for {alias_name} failed with {}: {}.",
             status,
             qdrant_error_detail(&body)
         ))
@@ -480,10 +549,38 @@ pub(crate) async fn best_effort_cleanup_retired_stage_collections(
         keep.insert(previous_target_collection);
     }
 
-    let Some(namespace_tail) = write_plan.alias_name.strip_prefix("index_") else {
+    let Some(namespace_tail) = write_plan.alias_name.strip_prefix("vector_space_") else {
         return;
     };
-    let prefix = format!("index_stage_{namespace_tail}_");
+    let prefix = format!("vector_space_stage_{namespace_tail}_");
+    cleanup_qdrant_collection_prefix(&prefix, &keep).await;
+}
+
+pub(crate) async fn cleanup_retired_vector_space_namespace(
+    library_id: &str,
+    vector_space_id: &str,
+) -> Result<(), String> {
+    let alias_name = stable_vector_space_name(library_id, vector_space_id);
+    match probe_active_qdrant_namespace(&alias_name).await? {
+        ActiveNamespaceProbeResult::Ready { target_collection }
+        | ActiveNamespaceProbeResult::MissingTarget { target_collection } => {
+            delete_qdrant_alias(&alias_name).await?;
+            delete_qdrant_collection(&target_collection).await?;
+        }
+        ActiveNamespaceProbeResult::Missing => {}
+        ActiveNamespaceProbeResult::LegacyDirectCollection => {
+            return Err(format!(
+                "Legacy direct Qdrant collection {alias_name} blocks retired vector-space cleanup. Remove it manually."
+            ));
+        }
+    }
+
+    let prefix = format!("vector_space_stage_{library_id}_{vector_space_id}_");
+    cleanup_qdrant_collection_prefix(&prefix, &BTreeSet::new()).await;
+    Ok(())
+}
+
+async fn cleanup_qdrant_collection_prefix(prefix: &str, keep: &BTreeSet<String>) {
     let collections = match list_qdrant_collections().await {
         Ok(collections) => collections,
         Err(error) => {
@@ -659,14 +756,13 @@ pub(crate) fn qdrant_error_detail(body: &str) -> String {
 }
 
 pub(crate) async fn query_qdrant(
-    plan: &SearchPlan,
+    library_id: &str,
+    vector_space_id: &str,
+    active_visual_unit_count: usize,
+    cursor_limit: usize,
     embedding: &QueryEmbeddingResult,
 ) -> Result<Vec<QdrantScoredPoint>, ApiError> {
-    let prefetch_limit = plan
-        .active_visual_unit_ids
-        .len()
-        .max(plan.cursor_offset.saturating_add(plan.top_k))
-        .max(20);
+    let prefetch_limit = active_visual_unit_count.max(cursor_limit).max(20);
     let payload = json!({
         "prefetch": {
             "query": embedding.pooled_vector,
@@ -682,7 +778,7 @@ pub(crate) async fn query_qdrant(
         .post(format!(
             "{}/collections/{}/points/query",
             qdrant_base_url()?.trim_end_matches('/'),
-            plan.collection_name
+            stable_vector_space_name(library_id, vector_space_id)
         ))
         .json(&payload)
         .send()
@@ -724,8 +820,30 @@ pub(crate) fn read_optional_usize_env(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-pub(crate) fn stable_collection_name(library_id: &str, index_line: &str) -> String {
-    format!("index_{library_id}_{index_line}")
+pub(crate) fn stable_vector_space_name(library_id: &str, vector_space_id: &str) -> String {
+    format!("vector_space_{library_id}_{vector_space_id}")
+}
+
+pub(crate) fn vector_space_id(
+    provider_id: &str,
+    model_id: &str,
+    version: &str,
+    vector_type: &str,
+) -> String {
+    let signature = format!("{provider_id}\n{model_id}\n{version}\n{vector_type}");
+    format!("{:016x}", stable_fnv1a64(signature.as_bytes()))
+}
+
+fn stable_fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x00000100000001b3;
+
+    let mut hash = OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 pub(crate) fn read_required_env(name: &'static str) -> Result<String, ApiError> {

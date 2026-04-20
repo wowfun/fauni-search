@@ -1,4 +1,8 @@
 use super::*;
+use crate::config::{
+    update_runtime_overlay_content_types, update_runtime_overlay_library_content_types,
+    update_runtime_overlay_provider_config, ContentTypeConfigRecord, ContentTypeOverrideRecord,
+};
 use crate::*;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -16,6 +20,119 @@ impl AppState {
                 .then_with(|| left.provider_id.cmp(&right.provider_id))
         });
         ProvidersListData { providers }
+    }
+
+    pub(crate) async fn get_runtime_health(&mut self) -> RuntimeHealthData {
+        self.refresh_boot_provider_probe_cache().await;
+
+        let now = current_rfc3339_timestamp();
+        let app = RuntimeProcessHealthSnapshot {
+            component_id: "app".to_string(),
+            display_name: "App".to_string(),
+            status: "available".to_string(),
+            message: "FauniSearch app is serving control-plane requests.".to_string(),
+            last_checked_at: now.clone(),
+            details: Some(json!({
+                "env": std::env::var("FAUNI_ENV").unwrap_or_else(|_| "development".to_string()),
+                "libraries": self.libraries.len(),
+                "jobs": self.jobs.len(),
+            })),
+        };
+
+        let qdrant = match crate::qdrant::probe_qdrant_runtime_health().await {
+            Ok(collection_count) => RuntimeProcessHealthSnapshot {
+                component_id: "qdrant".to_string(),
+                display_name: "Qdrant".to_string(),
+                status: "available".to_string(),
+                message: format!(
+                    "Qdrant is reachable with {} collection(s) visible.",
+                    collection_count
+                ),
+                last_checked_at: now.clone(),
+                details: Some(json!({
+                    "collection_count": collection_count,
+                })),
+            },
+            Err(error) => RuntimeProcessHealthSnapshot {
+                component_id: "qdrant".to_string(),
+                display_name: "Qdrant".to_string(),
+                status: "runtime_unavailable".to_string(),
+                message: error,
+                last_checked_at: now.clone(),
+                details: None,
+            },
+        };
+
+        let mut providers = self
+            .provider_configs
+            .values()
+            .map(|provider| {
+                let probe = self
+                    .provider_probe_cache
+                    .get(&provider.provider_id)
+                    .cloned();
+                let runtime_model = self
+                    .provider_runtime_models
+                    .get(&provider.provider_id)
+                    .cloned();
+                let embedding_capabilities = self
+                    .provider_embedding_capabilities
+                    .get(&provider.provider_id)
+                    .cloned()
+                    .filter(|capabilities| {
+                        !capabilities.input_types.is_empty()
+                            || !capabilities.vector_types.is_empty()
+                            || capabilities.supports_mixed_inputs
+                    });
+                let execution_input_types = self
+                    .provider_execution_input_types
+                    .get(&provider.provider_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let runtime_adapters = self
+                    .provider_runtime_adapters
+                    .get(&provider.provider_id)
+                    .cloned()
+                    .unwrap_or_default();
+
+                RuntimeProviderHealthSnapshot {
+                    provider_id: provider.provider_id.clone(),
+                    display_name: provider.display_name.clone(),
+                    provider_kind: provider.provider_kind.clone(),
+                    enabled: provider.enabled,
+                    status: probe
+                        .as_ref()
+                        .map(|snapshot| snapshot.status.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    message: probe
+                        .as_ref()
+                        .map(|snapshot| snapshot.message.clone())
+                        .unwrap_or_else(|| "Provider probe has not run yet.".to_string()),
+                    last_probed_at: probe
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.last_probed_at.clone()),
+                    model_id: runtime_model.as_ref().map(|model| model.model_id.clone()),
+                    model_version: runtime_model.as_ref().map(|model| {
+                        self.configured_model_version(&provider.provider_id, &model.model_id)
+                    }),
+                    model_revision: runtime_model.and_then(|model| model.model_revision),
+                    embedding_capabilities,
+                    execution_input_types,
+                    runtime_adapters,
+                }
+            })
+            .collect::<Vec<_>>();
+        providers.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.provider_id.cmp(&right.provider_id))
+        });
+
+        RuntimeHealthData {
+            app,
+            qdrant,
+            providers,
+        }
     }
 
     pub(crate) async fn update_provider_config(
@@ -39,17 +156,21 @@ impl AppState {
         let base_url = normalize_optional_string(request.base_url).or(existing.base_url.clone());
         let enabled = request.enabled.unwrap_or(existing.enabled);
 
-        self.commit_durable_api(|state| {
-            let provider = state
-                .provider_configs
-                .get_mut(provider_id)
-                .ok_or_else(|| ApiError::not_found("Provider was not found."))?;
-            provider.enabled = enabled;
-            if provider.provider_id == DASHSCOPE_PROVIDER_ID {
-                provider.base_url = base_url.clone();
-            }
-            Ok(())
-        })?;
+        let loaded =
+            update_runtime_overlay_provider_config(provider_id, enabled, base_url.as_deref())
+                .map_err(|error| {
+                    ApiError::runtime_unavailable(
+                        format!("Failed to write runtime config: {error}"),
+                        Some(json!({ "config": "runtime-config.json" })),
+                    )
+                })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
 
         self.refresh_provider_probe_snapshot(provider_id).await;
         Ok(self
@@ -60,7 +181,11 @@ impl AppState {
     }
 
     pub(crate) async fn list_model_catalog(&mut self) -> ModelCatalogData {
-        if self.provider_runtime_models.get(LOCAL_SIDECAR_PROVIDER_ID).is_none() {
+        if self
+            .provider_runtime_models
+            .get(LOCAL_SIDECAR_PROVIDER_ID)
+            .is_none()
+        {
             self.refresh_provider_probe_snapshot(LOCAL_SIDECAR_PROVIDER_ID)
                 .await;
         }
@@ -80,10 +205,18 @@ impl AppState {
             .get(LOCAL_SIDECAR_PROVIDER_ID)
             .cloned()
             .unwrap_or_else(fallback_local_sidecar_runtime_model);
-        if self.provider_probe_cache.get(DASHSCOPE_PROVIDER_ID).is_none() {
-            self.refresh_provider_probe_snapshot(DASHSCOPE_PROVIDER_ID).await;
+        if self
+            .provider_probe_cache
+            .get(DASHSCOPE_PROVIDER_ID)
+            .is_none()
+        {
+            self.refresh_provider_probe_snapshot(DASHSCOPE_PROVIDER_ID)
+                .await;
         }
-        let local_probe = self.provider_probe_cache.get(LOCAL_SIDECAR_PROVIDER_ID).cloned();
+        let local_probe = self
+            .provider_probe_cache
+            .get(LOCAL_SIDECAR_PROVIDER_ID)
+            .cloned();
         let dashscope_provider = self
             .provider_configs
             .get(DASHSCOPE_PROVIDER_ID)
@@ -94,14 +227,20 @@ impl AppState {
                     .cloned()
                     .expect("default dashscope provider should exist")
             });
-        let dashscope_probe = self.provider_probe_cache.get(DASHSCOPE_PROVIDER_ID).cloned();
+        let dashscope_probe = self
+            .provider_probe_cache
+            .get(DASHSCOPE_PROVIDER_ID)
+            .cloned();
 
+        let runtime_model_id = runtime.model_id.clone();
+        let runtime_model_version =
+            self.configured_model_version(LOCAL_SIDECAR_PROVIDER_ID, &runtime_model_id);
         let mut entries = vec![ModelCatalogEntry {
             provider_id: LOCAL_SIDECAR_PROVIDER_ID.to_string(),
             provider_kind: local_provider.provider_kind,
             model_id: runtime.model_id,
+            model_version: runtime_model_version,
             model_revision: runtime.model_revision,
-            supported_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
             embedding_capabilities: self
                 .provider_embedding_capabilities
                 .get(LOCAL_SIDECAR_PROVIDER_ID)
@@ -135,13 +274,13 @@ impl AppState {
                 .unwrap_or_else(|| "DashScope catalog metadata is available.".to_string())
         };
 
-        for model_id in dashscope_multivector_model_ids() {
+        for model_id in dashscope_supported_content_model_ids() {
             entries.push(ModelCatalogEntry {
                 provider_id: DASHSCOPE_PROVIDER_ID.to_string(),
                 provider_kind: dashscope_provider.provider_kind.clone(),
                 model_id: (*model_id).to_string(),
+                model_version: self.configured_model_version(DASHSCOPE_PROVIDER_ID, model_id),
                 model_revision: None,
-                supported_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
                 embedding_capabilities: dashscope_embedding_capabilities(model_id),
                 editable: true,
                 status: dashscope_status.clone(),
@@ -152,82 +291,303 @@ impl AppState {
         ModelCatalogData { entries }
     }
 
-    pub(crate) fn get_global_model_defaults(&self) -> GlobalModelDefaultsData {
-        GlobalModelDefaultsData {
-            defaults: self.global_model_defaults.clone(),
+    pub(crate) fn get_global_content_types(&self) -> GlobalContentTypesData {
+        GlobalContentTypesData {
+            content_types: ContentTypesPayload {
+                content_types: self
+                    .global_content_types
+                    .iter()
+                    .map(|(content_type, binding)| {
+                        (
+                            content_type.clone(),
+                            ContentTypeBindingPayload {
+                                enabled: binding.enabled,
+                                model: binding.model.clone(),
+                                vector_type: binding.vector_type.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            },
         }
     }
 
-    pub(crate) async fn update_global_model_defaults(
+    pub(crate) async fn update_global_content_types(
         &mut self,
-        payload: ModelDefaultsPayload,
-    ) -> Result<GlobalModelDefaultsData, ApiError> {
-        let normalized = normalize_model_defaults(payload)?;
-        self.validate_model_defaults(&normalized)?;
+        payload: ContentTypesPayload,
+    ) -> Result<GlobalContentTypesData, ApiError> {
+        let normalized = normalize_content_types_payload(payload)?;
+        self.validate_content_types_payload(&normalized)?;
 
-        self.commit_durable_api(|state| {
-            state.global_model_defaults = normalized.clone();
-            Ok(())
+        let loaded = update_runtime_overlay_content_types(&normalized).map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Failed to write runtime config: {error}"),
+                Some(json!({ "config": "runtime-config.json" })),
+            )
         })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
 
-        for provider_id in referenced_global_provider_ids(&self.global_model_defaults) {
+        for provider_id in referenced_content_type_provider_ids(&normalized.content_types) {
             self.refresh_provider_probe_snapshot(&provider_id).await;
         }
 
-        Ok(self.get_global_model_defaults())
+        Ok(self.get_global_content_types())
     }
 
-    pub(crate) fn get_library_model_overrides(
+    pub(crate) fn get_library_content_types(
         &self,
         library_id: &str,
-    ) -> Result<LibraryModelOverridesData, ApiError> {
+    ) -> Result<LibraryContentTypesData, ApiError> {
         let library = self
             .libraries
             .get(library_id)
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
-        Ok(LibraryModelOverridesData {
-            overrides: effective_library_model_overrides_payload(&library.model_overrides),
+        Ok(LibraryContentTypesData {
+            content_types: ContentTypesPayload {
+                content_types: effective_library_content_type_bindings(
+                    &self.global_content_types,
+                    &library.content_type_overrides,
+                ),
+            },
         })
     }
 
-    pub(crate) async fn update_library_model_overrides(
+    pub(crate) async fn update_library_content_types(
         &mut self,
         library_id: &str,
-        payload: ModelOverridesPayload,
-    ) -> Result<LibraryModelOverridesData, ApiError> {
-        let normalized = normalize_model_overrides(payload)?;
+        payload: ContentTypesPayload,
+    ) -> Result<LibraryContentTypesData, ApiError> {
         self.validate_library_exists(library_id)?;
-        self.validate_model_overrides(&normalized)?;
+        let normalized = normalize_content_types_payload(payload)?;
+        self.validate_content_types_payload(&normalized)?;
 
-        self.commit_durable_api(|state| {
-            let library = state
-                .libraries
-                .get_mut(library_id)
-                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
-            library.model_overrides = normalized.clone();
-            Ok(())
-        })?;
+        let loaded = update_runtime_overlay_library_content_types(library_id, &normalized)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to write runtime config: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
 
-        for provider_id in referenced_library_provider_ids(&normalized) {
+        for provider_id in referenced_content_type_provider_ids(&normalized.content_types) {
             self.refresh_provider_probe_snapshot(&provider_id).await;
         }
 
-        self.get_library_model_overrides(library_id)
+        self.get_library_content_types(library_id)
     }
 
-    pub(crate) async fn get_resolved_models(
+    pub(crate) async fn get_resolved_content_models(
         &mut self,
         library_id: &str,
-    ) -> Result<ResolvedModelsData, ApiError> {
-        self.validate_library_exists(library_id)?;
-        let mut index_lines = BTreeMap::new();
-        for index_line in supported_index_lines() {
-            index_lines.insert(
-                index_line.to_string(),
-                self.inspect_index_model_selection(library_id, index_line).await?,
+    ) -> Result<ResolvedContentModelsData, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        let effective = effective_library_content_type_bindings(
+            &self.global_content_types,
+            &library.content_type_overrides,
+        );
+
+        let mut content_types = BTreeMap::new();
+        for (content_type, binding) in effective {
+            let binding_source = if library.content_type_overrides.contains_key(&content_type) {
+                "library_override"
+            } else {
+                "global_default"
+            };
+            content_types.insert(
+                content_type.clone(),
+                self.resolve_content_type_selection(binding_source, &content_type, &binding)
+                    .await,
             );
         }
-        Ok(ResolvedModelsData { index_lines })
+
+        Ok(ResolvedContentModelsData { content_types })
+    }
+
+    pub(crate) async fn get_vector_space_diagnostics(
+        &mut self,
+        library_id: &str,
+    ) -> Result<VectorSpaceDiagnosticsData, ApiError> {
+        let library = self
+            .libraries
+            .get(library_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        let resolved = self.get_resolved_content_models(library_id).await?;
+
+        let mut active_vector_spaces = BTreeMap::<String, VectorSpaceDiagnosticSnapshot>::new();
+        for selection in resolved.content_types.into_values() {
+            let Some(vector_space_id) = selection.vector_space_id.clone() else {
+                continue;
+            };
+            if !library.active_vector_spaces.contains(&vector_space_id) {
+                continue;
+            }
+
+            let entry = active_vector_spaces
+                .entry(vector_space_id.clone())
+                .or_insert_with(|| VectorSpaceDiagnosticSnapshot {
+                    vector_space_id: vector_space_id.clone(),
+                    lifecycle_state: "active".to_string(),
+                    content_types: Vec::new(),
+                    provider_id: Some(selection.provider_id.clone()),
+                    provider_kind: Some(selection.provider_kind.clone()),
+                    model_id: Some(selection.model_id.clone()),
+                    model_version: Some(selection.model_version.clone()),
+                    vector_type: Some(selection.vector_type.clone()),
+                    retired_at_ms: None,
+                });
+            entry.content_types.push(selection.content_type);
+        }
+
+        let mut vector_spaces = active_vector_spaces.into_values().collect::<Vec<_>>();
+        for snapshot in &mut vector_spaces {
+            snapshot.content_types.sort();
+            snapshot.content_types.dedup();
+        }
+
+        let mut retired_vector_spaces = library
+            .retired_vector_spaces
+            .into_iter()
+            .filter(|(vector_space_id, _)| !library.active_vector_spaces.contains(vector_space_id))
+            .map(|(vector_space_id, retired)| VectorSpaceDiagnosticSnapshot {
+                vector_space_id,
+                lifecycle_state: "retired".to_string(),
+                content_types: Vec::new(),
+                provider_id: None,
+                provider_kind: None,
+                model_id: None,
+                model_version: None,
+                vector_type: None,
+                retired_at_ms: Some(retired.retired_at_ms),
+            })
+            .collect::<Vec<_>>();
+
+        vector_spaces.append(&mut retired_vector_spaces);
+        vector_spaces.sort_by(|left, right| {
+            left.lifecycle_state
+                .cmp(&right.lifecycle_state)
+                .then_with(|| left.vector_space_id.cmp(&right.vector_space_id))
+        });
+
+        Ok(VectorSpaceDiagnosticsData { vector_spaces })
+    }
+
+    async fn resolve_content_type_selection(
+        &mut self,
+        binding_source: &str,
+        content_type: &str,
+        binding: &ContentTypeBindingPayload,
+    ) -> ResolvedContentModelSelectionPayload {
+        let Some((provider_id, model_id)) = split_model_reference(&binding.model) else {
+            return ResolvedContentModelSelectionPayload {
+                binding_source: binding_source.to_string(),
+                content_type: content_type.to_string(),
+                provider_id: "invalid".to_string(),
+                provider_kind: "invalid".to_string(),
+                model_id: binding.model.clone(),
+                model_version: default_model_version(),
+                model_revision: None,
+                vector_type: binding.vector_type.clone(),
+                vector_space_id: None,
+                embedding_capabilities: empty_embedding_capabilities(),
+                status: "conflict".to_string(),
+                message: "Configured model reference must use provider_id/model_id.".to_string(),
+                last_probed_at: None,
+            };
+        };
+
+        if !binding.enabled {
+            let model_version = self.configured_model_version(provider_id, model_id);
+            return ResolvedContentModelSelectionPayload {
+                binding_source: binding_source.to_string(),
+                content_type: content_type.to_string(),
+                provider_id: provider_id.to_string(),
+                provider_kind: self
+                    .provider_configs
+                    .get(provider_id)
+                    .map(|provider| provider.provider_kind.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                model_id: model_id.to_string(),
+                model_version: model_version.clone(),
+                model_revision: None,
+                vector_type: binding.vector_type.clone(),
+                vector_space_id: Some(vector_space_id(
+                    provider_id,
+                    model_id,
+                    &model_version,
+                    &binding.vector_type,
+                )),
+                embedding_capabilities: self
+                    .provider_embedding_capabilities
+                    .get(provider_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if provider_id == DASHSCOPE_PROVIDER_ID {
+                            dashscope_embedding_capabilities(model_id)
+                        } else {
+                            empty_embedding_capabilities()
+                        }
+                    }),
+                status: "not_enabled".to_string(),
+                message: format!("content_type={content_type} is disabled."),
+                last_probed_at: self
+                    .provider_probe_cache
+                    .get(provider_id)
+                    .and_then(|probe| probe.last_probed_at.clone()),
+            };
+        }
+
+        let summary = self
+            .build_resolved_model_selection(
+                binding_source,
+                ModelSelectionPayload {
+                    provider_id: provider_id.to_string(),
+                    model_id: model_id.to_string(),
+                },
+                content_type,
+            )
+            .await;
+
+        let provider_id = summary.provider_id.clone();
+        let model_id = summary.model_id.clone();
+        let model_version = summary.model_version.clone();
+        ResolvedContentModelSelectionPayload {
+            binding_source: summary.binding_source,
+            content_type: content_type.to_string(),
+            provider_id: provider_id.clone(),
+            provider_kind: summary.provider_kind,
+            model_id: model_id.clone(),
+            model_version: model_version.clone(),
+            model_revision: summary.model_revision,
+            vector_type: binding.vector_type.clone(),
+            vector_space_id: Some(vector_space_id(
+                &provider_id,
+                &model_id,
+                &model_version,
+                &binding.vector_type,
+            )),
+            embedding_capabilities: summary.embedding_capabilities,
+            status: summary.status,
+            message: summary.message,
+            last_probed_at: summary.last_probed_at,
+        }
     }
 
     pub(crate) async fn test_model_selection(
@@ -239,10 +599,16 @@ impl AppState {
         provider_base_url: Option<String>,
         text_input: Option<&str>,
         file_input: Option<&StagedSettingsModelTestFile>,
+        comparison_input_modality: Option<&str>,
+        comparison_text_input: Option<&str>,
+        comparison_file_input: Option<&StagedSettingsModelTestFile>,
     ) -> Result<ModelTestData, ApiError> {
         let provider_id = normalize_provider_id(provider_id, "provider")?;
         let model_id = normalize_required_string(model_id, "model_id")?;
         let input_modality = normalize_model_test_modality(input_modality)?;
+        let comparison_input_modality = comparison_input_modality
+            .map(normalize_model_test_modality)
+            .transpose()?;
         let mut provider = self
             .provider_configs
             .get(&provider_id)
@@ -284,7 +650,11 @@ impl AppState {
 
         match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
-                if self.provider_probe_cache.get(LOCAL_SIDECAR_PROVIDER_ID).is_none() {
+                if self
+                    .provider_probe_cache
+                    .get(LOCAL_SIDECAR_PROVIDER_ID)
+                    .is_none()
+                {
                     self.refresh_provider_probe_snapshot(LOCAL_SIDECAR_PROVIDER_ID)
                         .await;
                 }
@@ -313,8 +683,7 @@ impl AppState {
                 if !embedding_capabilities_supports_input_type(
                     &embedding_capabilities,
                     &input_modality,
-                )
-                {
+                ) {
                     return Err(ApiError::validation_failed(
                         "The selected local_sidecar runtime does not support the requested model test input type.",
                         Some(json!({
@@ -330,11 +699,18 @@ impl AppState {
                     .get(LOCAL_SIDECAR_PROVIDER_ID)
                     .cloned()
                     .unwrap_or_else(fallback_local_sidecar_runtime_model);
+                let vector_type = embedding_capabilities
+                    .vector_types
+                    .first()
+                    .cloned()
+                    .unwrap_or_default();
                 let resolved_model = ResolvedModelSelectionPayload {
                     binding_source: "settings_draft".to_string(),
                     provider_id: provider.provider_id.clone(),
                     provider_kind: provider.provider_kind.clone(),
                     model_id: runtime_model.model_id,
+                    model_version: self
+                        .configured_model_version(LOCAL_SIDECAR_PROVIDER_ID, &selection.model_id),
                     model_revision: runtime_model.model_revision,
                     embedding_capabilities,
                     status: "available".to_string(),
@@ -344,69 +720,67 @@ impl AppState {
                     ),
                     last_probed_at: probe.last_probed_at.clone(),
                 };
-                let provider_context = Some(provider_context_payload(&ResolvedExecutionModelSelection {
-                    summary: resolved_model.clone(),
-                }));
+                let provider_context =
+                    Some(provider_context_payload(&ResolvedExecutionModelSelection {
+                        summary: resolved_model.clone(),
+                        vector_type,
+                        vector_space_id: "settings_draft".to_string(),
+                        execution_input_types: self
+                            .provider_execution_input_types
+                            .get(LOCAL_SIDECAR_PROVIDER_ID)
+                            .cloned()
+                            .unwrap_or_default(),
+                    }));
 
-                let (vectors, pooled_vector, input_summary) = match input_modality.as_str() {
-                    QUERY_KIND_TEXT => {
-                        let text = normalize_required_string(
-                            text_input.unwrap_or_default(),
-                            "text",
-                        )?;
-                        let result = embed_query_text(&text, provider_context).await?;
-                        (
-                            result.vectors,
-                            result.pooled_vector,
-                            ModelTestInputSummary {
-                                kind: "text".to_string(),
-                                text_preview: Some(truncate_text_preview(&text)),
-                                original_filename: None,
-                                content_type: None,
-                                size_bytes: Some(text.len()),
-                            },
-                        )
-                    }
-                    QUERY_KIND_IMAGE => {
-                        let file = file_input.ok_or_else(|| {
-                            ApiError::validation_failed(
-                                "image model test requires one file input.",
-                                Some(json!({ "field": "file" })),
-                            )
-                        })?;
-                        let result =
-                            embed_query_image(&file.path, None, provider_context).await?;
-                        (
-                            result.vectors,
-                            result.pooled_vector,
-                            ModelTestInputSummary {
-                                kind: "file".to_string(),
-                                text_preview: None,
-                                original_filename: file.original_filename.clone(),
-                                content_type: Some(file.content_type.clone()),
-                                size_bytes: Some(file.size_bytes),
-                            },
-                        )
-                    }
-                    _ => {
-                        return Err(ApiError::validation_failed(
-                            "input_modality is not supported by the selected model's embedding capabilities.",
-                            Some(json!({
-                                "field": "input_modality",
-                                "received": input_modality,
-                            })),
-                        ));
-                    }
+                let primary = run_settings_model_test_input(
+                    input_modality.as_str(),
+                    text_input,
+                    file_input,
+                    provider_context.clone(),
+                    "input_modality",
+                )
+                .await?;
+
+                let comparison = if let Some(comparison_modality) =
+                    comparison_input_modality.as_deref()
+                {
+                    let comparison = run_settings_model_test_input(
+                        comparison_modality,
+                        comparison_text_input,
+                        comparison_file_input,
+                        provider_context,
+                        "comparison_input_modality",
+                    )
+                    .await?;
+                    let similarity_to_primary =
+                        cosine_similarity(&primary.pooled_vector, &comparison.pooled_vector)?;
+                    Some(ModelTestComparisonData {
+                        input_modality: comparison_modality.to_string(),
+                        operation_kind: model_test_operation_kind(comparison_modality).to_string(),
+                        vector_shape: vector_shape(&comparison.vectors),
+                        vectors: comparison.vectors,
+                        pooled_vector: comparison.pooled_vector,
+                        input_summary: comparison.input_summary,
+                        similarity_to_primary,
+                    })
+                } else if comparison_text_input.is_some() || comparison_file_input.is_some() {
+                    return Err(ApiError::validation_failed(
+                        "comparison_input_modality is required when providing a second model test input.",
+                        Some(json!({ "field": "comparison_input_modality" })),
+                    ));
+                } else {
+                    None
                 };
 
                 Ok(ModelTestData {
                     resolved_model,
                     input_modality: input_modality.clone(),
                     operation_kind: model_test_operation_kind(&input_modality).to_string(),
-                    vector_shape: vector_shape(&vectors),
-                    vectors,
-                    pooled_vector,
-                    input_summary,
+                    vector_shape: vector_shape(&primary.vectors),
+                    vectors: primary.vectors,
+                    pooled_vector: primary.pooled_vector,
+                    input_summary: primary.input_summary,
+                    comparison,
                 })
             }
             DASHSCOPE_PROVIDER_ID => Err(ApiError::not_supported(
@@ -423,24 +797,49 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn resolve_index_model_for_execution(
-        &mut self,
+    pub(crate) fn configured_vector_space_bindings_for_library(
+        &self,
         library_id: &str,
-        index_line: &str,
-    ) -> Result<ResolvedExecutionModelSelection, ApiError> {
-        let summary = self.inspect_index_model_selection(library_id, index_line).await?;
-        if summary.status != "available" {
-            return Err(model_selection_error(&summary));
-        }
-        Ok(ResolvedExecutionModelSelection { summary })
+    ) -> Result<Vec<ConfiguredVectorSpaceBinding>, ApiError> {
+        let content_types = self.get_library_content_types(library_id)?;
+        self.configured_vector_space_bindings_from_payload(
+            &content_types.content_types.content_types,
+        )
     }
 
-    pub(crate) async fn resolve_query_model_for_execution(
+    pub(crate) async fn resolve_execution_groups_for_library(
         &mut self,
         library_id: &str,
-    ) -> Result<ResolvedExecutionModelSelection, ApiError> {
-        self.resolve_index_model_for_execution(library_id, MULTIVECTOR_INDEX_LINE)
-            .await
+    ) -> Result<Vec<VectorSpaceExecutionGroup>, ApiError> {
+        let bindings = self.configured_vector_space_bindings_for_library(library_id)?;
+        let mut groups = Vec::new();
+        for binding in bindings {
+            let summary = self
+                .build_resolved_model_selection(
+                    "content_type_execution",
+                    binding.selection.clone(),
+                    "vector_space",
+                )
+                .await;
+            if summary.status != "available" {
+                return Err(model_selection_error(&summary));
+            }
+            groups.push(VectorSpaceExecutionGroup {
+                vector_space_id: binding.vector_space_id.clone(),
+                content_types: binding.content_types.clone(),
+                resolved_model: ResolvedExecutionModelSelection {
+                    summary,
+                    vector_type: binding.vector_type.clone(),
+                    vector_space_id: binding.vector_space_id,
+                    execution_input_types: self
+                        .provider_execution_input_types
+                        .get(&binding.selection.provider_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                },
+            });
+        }
+        Ok(groups)
     }
 
     pub(crate) async fn refresh_boot_provider_probe_cache(&mut self) {
@@ -462,25 +861,31 @@ impl AppState {
                     provider_id.to_string(),
                     snapshot.embedding_capabilities.clone(),
                 );
+                self.provider_execution_input_types.insert(
+                    provider_id.to_string(),
+                    snapshot.execution_input_types.clone(),
+                );
+                self.provider_runtime_adapters
+                    .insert(provider_id.to_string(), snapshot.runtime_adapters.clone());
                 (snapshot.probe, Some(snapshot.runtime_model))
             }
             DASHSCOPE_PROVIDER_ID => {
-                self.provider_embedding_capabilities.insert(
-                    provider_id.to_string(),
-                    empty_embedding_capabilities(),
-                );
+                self.provider_embedding_capabilities
+                    .insert(provider_id.to_string(), empty_embedding_capabilities());
+                self.provider_execution_input_types.remove(provider_id);
+                self.provider_runtime_adapters.remove(provider_id);
                 (
                     static_not_supported_probe(
-                    "dashscope is configurable in the current slice but not executable yet.",
+                        "dashscope is configurable in the current slice but not executable yet.",
                     ),
                     None,
                 )
             }
             _ => {
-                self.provider_embedding_capabilities.insert(
-                    provider_id.to_string(),
-                    empty_embedding_capabilities(),
-                );
+                self.provider_embedding_capabilities
+                    .insert(provider_id.to_string(), empty_embedding_capabilities());
+                self.provider_execution_input_types.remove(provider_id);
+                self.provider_runtime_adapters.remove(provider_id);
                 (
                     ProviderProbeSnapshot {
                         status: "not_supported".to_string(),
@@ -505,7 +910,10 @@ impl AppState {
         if provider.provider_id == LOCAL_SIDECAR_PROVIDER_ID {
             snapshot.base_url = sidecar_base_url().ok();
         }
-        snapshot.probe = self.provider_probe_cache.get(&provider.provider_id).cloned();
+        snapshot.probe = self
+            .provider_probe_cache
+            .get(&provider.provider_id)
+            .cloned();
         snapshot
     }
 
@@ -516,69 +924,82 @@ impl AppState {
         Ok(())
     }
 
-    fn validate_model_defaults(
+    pub(crate) fn validate_content_types_payload(
         &self,
-        defaults: &ModelDefaultsPayload,
+        payload: &ContentTypesPayload,
     ) -> Result<(), ApiError> {
-        let selection = defaults.index_lines.get(MULTIVECTOR_INDEX_LINE).ok_or_else(|| {
-            ApiError::validation_failed(
-                "model defaults must include index_lines.multivector.",
-                Some(json!({ "field": "index_lines.multivector" })),
-            )
-        })?;
-        self.validate_provider_selection(selection)?;
-        Ok(())
-    }
-
-    fn validate_model_overrides(
-        &self,
-        overrides: &ModelOverridesPayload,
-    ) -> Result<(), ApiError> {
-        if let Some(selection) = overrides.index_lines.get(MULTIVECTOR_INDEX_LINE) {
-            let defaults = self
-                .global_model_defaults
-                .index_lines
-                .get(MULTIVECTOR_INDEX_LINE)
-                .cloned()
-                .unwrap_or_else(default_local_sidecar_model_selection);
-            let effective = merge_model_selection_override(&defaults, Some(selection.clone()));
-            self.validate_provider_selection(&effective)?;
+        for (content_type, binding) in &payload.content_types {
+            let binding = normalize_content_type_binding(content_type, binding.clone())?;
+            self.validate_content_type_binding(content_type, &binding)?;
         }
         Ok(())
     }
 
-    fn validate_provider_selection(
+    fn validate_content_type_binding(
         &self,
-        selection: &ModelSelectionPayload,
+        content_type: &str,
+        binding: &ContentTypeBindingPayload,
     ) -> Result<(), ApiError> {
-        validate_provider_selection_shape(
-            &selection.provider_id,
-            &selection.model_id,
-            "index_lines.multivector",
-        )?;
-        let provider = self.validate_provider_reference(&selection.provider_id)?;
-        self.validate_provider_model_binding_for_field(
-            provider,
-            selection,
-            "index_lines.multivector.model_id",
-        )?;
-        Ok(())
-    }
-
-    fn validate_provider_reference(&self, provider_id: &str) -> Result<&ProviderConfigRecord, ApiError> {
-        let provider = self.provider_configs.get(provider_id).ok_or_else(|| {
-            ApiError::conflict(
-                "Model selection references a missing provider.",
-                Some(json!({ "provider_id": provider_id })),
+        let (provider_id, model_id) = split_model_reference(&binding.model).ok_or_else(|| {
+            ApiError::validation_failed(
+                "content type model must use provider_id/model_id format.",
+                Some(json!({
+                    "field": format!("content_types.{content_type}.model"),
+                    "received": binding.model,
+                })),
             )
         })?;
-        if !provider.enabled {
-            return Err(ApiError::not_enabled(
-                "Model selection references a disabled provider.",
-                Some(json!({ "provider_id": provider_id })),
+
+        let provider = self
+            .provider_configs
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_else(|| ProviderConfigRecord {
+                provider_id: provider_id.to_string(),
+                display_name: provider_id.to_string(),
+                provider_kind: "unknown".to_string(),
+                enabled: true,
+                base_url: None,
+                readonly_reason: None,
+            });
+        let selection = ModelSelectionPayload {
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+        };
+        self.validate_provider_model_binding_for_field(
+            &provider,
+            &selection,
+            &format!("content_types.{content_type}.model"),
+        )?;
+
+        let vector_types = if provider_id == LOCAL_SIDECAR_PROVIDER_ID {
+            self.provider_embedding_capabilities
+                .get(provider_id)
+                .cloned()
+                .unwrap_or_else(local_sidecar_embedding_capabilities)
+                .vector_types
+        } else if provider_id == DASHSCOPE_PROVIDER_ID {
+            dashscope_embedding_capabilities(model_id).vector_types
+        } else {
+            Vec::new()
+        };
+
+        if !vector_types.is_empty()
+            && !vector_types
+                .iter()
+                .any(|value| value == &binding.vector_type)
+        {
+            return Err(ApiError::validation_failed(
+                "content type vector_type is not supported by the selected model.",
+                Some(json!({
+                    "field": format!("content_types.{content_type}.vector_type"),
+                    "received": binding.vector_type,
+                    "supported": vector_types,
+                })),
             ));
         }
-        Ok(provider)
+
+        Ok(())
     }
 
     fn validate_provider_model_binding_for_field(
@@ -607,12 +1028,12 @@ impl AppState {
                 Ok(())
             }
             DASHSCOPE_PROVIDER_ID => {
-                if !is_supported_dashscope_multivector_model(&selection.model_id) {
+                if !is_supported_dashscope_content_model(&selection.model_id) {
                     return Err(ApiError::validation_failed(
-                        "DashScope model_id is not supported for multivector indexing/search.",
+                        "DashScope model_id is not supported for the current content-type execution slice.",
                         Some(json!({
                             "field": field,
-                            "supported": dashscope_multivector_model_ids(),
+                            "supported": dashscope_supported_content_model_ids(),
                             "received": selection.model_id,
                         })),
                     ));
@@ -623,45 +1044,20 @@ impl AppState {
         }
     }
 
-    async fn inspect_index_model_selection(
-        &mut self,
-        library_id: &str,
-        index_line: &str,
-    ) -> Result<ResolvedModelSelectionPayload, ApiError> {
-        let library = self
-            .libraries
-            .get(library_id)
-            .cloned()
-            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
-        let global_selection = self
-            .global_model_defaults
-            .index_lines
-            .get(index_line)
-            .cloned()
-            .ok_or_else(|| {
-                ApiError::conflict(
-                    "Global model defaults are missing the requested index line.",
-                    Some(json!({ "index_line": index_line })),
-                )
-            })?;
-        let override_selection = library.model_overrides.index_lines.get(index_line).cloned();
-
-        let binding_source = if has_model_override(&override_selection) {
-            "library_override"
-        } else {
-            "global_default"
-        };
-        let effective_selection = merge_model_selection_override(&global_selection, override_selection);
-        Ok(self
-            .build_resolved_model_selection(binding_source, effective_selection, index_line)
-            .await)
+    fn configured_model_version(&self, provider_id: &str, model_id: &str) -> String {
+        self.provider_models
+            .get(provider_id)
+            .and_then(|models| models.get(model_id))
+            .map(|model| model.version.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(default_model_version)
     }
 
     async fn build_resolved_model_selection(
         &mut self,
         binding_source: &str,
         selection: ModelSelectionPayload,
-        index_line: &str,
+        selection_target: &str,
     ) -> ResolvedModelSelectionPayload {
         let Some(provider) = self.provider_configs.get(&selection.provider_id).cloned() else {
             return ResolvedModelSelectionPayload {
@@ -669,6 +1065,7 @@ impl AppState {
                 provider_id: selection.provider_id,
                 provider_kind: "missing".to_string(),
                 model_id: selection.model_id,
+                model_version: default_model_version(),
                 model_revision: None,
                 embedding_capabilities: empty_embedding_capabilities(),
                 status: "conflict".to_string(),
@@ -683,6 +1080,8 @@ impl AppState {
                 provider_id: provider.provider_id.clone(),
                 provider_kind: provider.provider_kind.clone(),
                 model_id: selection.model_id.clone(),
+                model_version: self
+                    .configured_model_version(&provider.provider_id, &selection.model_id),
                 model_revision: None,
                 embedding_capabilities: self
                     .provider_embedding_capabilities
@@ -706,15 +1105,23 @@ impl AppState {
 
         match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
-                if self.provider_probe_cache.get(&provider.provider_id).is_none() {
-                    self.refresh_provider_probe_snapshot(&provider.provider_id).await;
+                if self
+                    .provider_probe_cache
+                    .get(&provider.provider_id)
+                    .is_none()
+                {
+                    self.refresh_provider_probe_snapshot(&provider.provider_id)
+                        .await;
                 }
                 let runtime_model = self
                     .provider_runtime_models
                     .get(&provider.provider_id)
                     .cloned()
                     .unwrap_or_else(fallback_local_sidecar_runtime_model);
-                let probe = self.provider_probe_cache.get(&provider.provider_id).cloned();
+                let probe = self
+                    .provider_probe_cache
+                    .get(&provider.provider_id)
+                    .cloned();
                 if let Some(probe) = &probe {
                     if probe.status != "available" {
                         return ResolvedModelSelectionPayload {
@@ -722,6 +1129,10 @@ impl AppState {
                             provider_id: provider.provider_id.clone(),
                             provider_kind: provider.provider_kind.clone(),
                             model_id: runtime_model.model_id,
+                            model_version: self.configured_model_version(
+                                &provider.provider_id,
+                                &selection.model_id,
+                            ),
                             model_revision: runtime_model.model_revision,
                             embedding_capabilities: self
                                 .provider_embedding_capabilities
@@ -740,6 +1151,10 @@ impl AppState {
                     provider_id: provider.provider_id.clone(),
                     provider_kind: provider.provider_kind.clone(),
                     model_id: runtime_model.model_id,
+                    model_version: self.configured_model_version(
+                        &provider.provider_id,
+                        &selection.model_id,
+                    ),
                     model_revision: runtime_model.model_revision,
                     embedding_capabilities: self
                         .provider_embedding_capabilities
@@ -748,7 +1163,7 @@ impl AppState {
                         .unwrap_or_else(local_sidecar_embedding_capabilities),
                     status: "available".to_string(),
                     message: format!(
-                        "Resolved runtime-bound model for index_line={index_line} via local_sidecar."
+                        "Resolved runtime-bound model for target={selection_target} via local_sidecar."
                     ),
                     last_probed_at: probe.and_then(|item| item.last_probed_at),
                 }
@@ -758,77 +1173,158 @@ impl AppState {
                 provider_id: provider.provider_id.clone(),
                 provider_kind: provider.provider_kind.clone(),
                 model_id: selection.model_id.clone(),
+                model_version: self
+                    .configured_model_version(&provider.provider_id, &selection.model_id),
                 model_revision: None,
                 embedding_capabilities: dashscope_embedding_capabilities(&selection.model_id),
                 status: "not_supported".to_string(),
-                message:
-                    "dashscope is configurable but not executable in the current 005 slice."
-                        .to_string(),
+                message: "dashscope is configurable but not executable in the current 005 slice."
+                    .to_string(),
                 last_probed_at: self
                     .provider_probe_cache
                     .get(&provider.provider_id)
                     .and_then(|probe| probe.last_probed_at.clone()),
             },
-            _ => ResolvedModelSelectionPayload {
-                binding_source: binding_source.to_string(),
-                provider_id: provider.provider_id.clone(),
-                provider_kind: provider.provider_kind.clone(),
-                model_id: selection.model_id,
-                model_revision: None,
-                embedding_capabilities: empty_embedding_capabilities(),
-                status: "conflict".to_string(),
-                message: "Unknown provider kind.".to_string(),
-                last_probed_at: None,
-            },
+            _ => {
+                let model_id = selection.model_id.clone();
+                ResolvedModelSelectionPayload {
+                    binding_source: binding_source.to_string(),
+                    provider_id: provider.provider_id.clone(),
+                    provider_kind: provider.provider_kind.clone(),
+                    model_id: model_id.clone(),
+                    model_version: self.configured_model_version(&provider.provider_id, &model_id),
+                    model_revision: None,
+                    embedding_capabilities: empty_embedding_capabilities(),
+                    status: "conflict".to_string(),
+                    message: "Unknown provider kind.".to_string(),
+                    last_probed_at: None,
+                }
+            }
         }
     }
-}
 
-fn has_model_override(selection: &Option<ModelSelectionOverridePayload>) -> bool {
-    selection
-        .as_ref()
-        .map(|selection| selection.provider_id.is_some() || selection.model_id.is_some())
-        .unwrap_or(false)
-}
-
-fn merge_model_selection_override(
-    defaults: &ModelSelectionPayload,
-    override_selection: Option<ModelSelectionOverridePayload>,
-) -> ModelSelectionPayload {
-    let Some(override_selection) = override_selection else {
-        return defaults.clone();
-    };
-
-    ModelSelectionPayload {
-        provider_id: override_selection
-            .provider_id
-            .unwrap_or_else(|| defaults.provider_id.clone()),
-        model_id: override_selection
-            .model_id
-            .unwrap_or_else(|| defaults.model_id.clone()),
+    fn configured_vector_space_bindings_from_payload(
+        &self,
+        content_types: &BTreeMap<String, ContentTypeBindingPayload>,
+    ) -> Result<Vec<ConfiguredVectorSpaceBinding>, ApiError> {
+        let mut groups = BTreeMap::<String, ConfiguredVectorSpaceBinding>::new();
+        for (content_type, binding) in content_types {
+            if !binding.enabled {
+                continue;
+            }
+            let (provider_id, model_id) =
+                split_model_reference(&binding.model).ok_or_else(|| {
+                    ApiError::validation_failed(
+                        "enabled content type model must use provider_id/model_id format.",
+                        Some(json!({
+                            "field": format!("content_types.{content_type}.model"),
+                            "received": binding.model,
+                        })),
+                    )
+                })?;
+            let selection = ModelSelectionPayload {
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+            };
+            let version = self.configured_model_version(provider_id, model_id);
+            let vector_space_id =
+                vector_space_id(provider_id, model_id, &version, &binding.vector_type);
+            groups
+                .entry(vector_space_id.clone())
+                .and_modify(|group| group.content_types.push(content_type.clone()))
+                .or_insert_with(|| ConfiguredVectorSpaceBinding {
+                    vector_space_id,
+                    selection,
+                    vector_type: binding.vector_type.clone(),
+                    content_types: vec![content_type.clone()],
+                });
+        }
+        Ok(groups.into_values().collect())
     }
 }
 
-fn referenced_global_provider_ids(defaults: &ModelDefaultsPayload) -> Vec<String> {
-    let mut ids = defaults
-        .index_lines
+fn normalize_content_types_payload(
+    payload: ContentTypesPayload,
+) -> Result<ContentTypesPayload, ApiError> {
+    let mut content_types = BTreeMap::new();
+    for (content_type, binding) in payload.content_types {
+        content_types.insert(
+            content_type.clone(),
+            normalize_content_type_binding(&content_type, binding)?,
+        );
+    }
+    Ok(ContentTypesPayload { content_types })
+}
+
+fn normalize_content_type_binding(
+    content_type: &str,
+    binding: ContentTypeBindingPayload,
+) -> Result<ContentTypeBindingPayload, ApiError> {
+    let model = normalize_required_string(
+        &binding.model,
+        &format!("content_types.{content_type}.model"),
+    )?;
+    let vector_type = normalize_required_string(
+        &binding.vector_type,
+        &format!("content_types.{content_type}.vector_type"),
+    )?;
+    Ok(ContentTypeBindingPayload {
+        enabled: binding.enabled,
+        model,
+        vector_type,
+    })
+}
+
+fn effective_library_content_type_bindings(
+    global: &BTreeMap<String, ContentTypeConfigRecord>,
+    overrides: &BTreeMap<String, ContentTypeOverrideRecord>,
+) -> BTreeMap<String, ContentTypeBindingPayload> {
+    global
+        .iter()
+        .map(|(content_type, base)| {
+            let override_record = overrides.get(content_type);
+            (
+                content_type.clone(),
+                ContentTypeBindingPayload {
+                    enabled: override_record
+                        .and_then(|record| record.enabled)
+                        .unwrap_or(base.enabled),
+                    model: override_record
+                        .and_then(|record| record.model.clone())
+                        .unwrap_or_else(|| base.model.clone()),
+                    vector_type: override_record
+                        .and_then(|record| record.vector_type.clone())
+                        .unwrap_or_else(|| base.vector_type.clone()),
+                },
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConfiguredVectorSpaceBinding {
+    pub(crate) vector_space_id: String,
+    selection: ModelSelectionPayload,
+    pub(crate) vector_type: String,
+    pub(crate) content_types: Vec<String>,
+}
+
+fn referenced_content_type_provider_ids(
+    content_types: &BTreeMap<String, ContentTypeBindingPayload>,
+) -> Vec<String> {
+    let mut ids = content_types
         .values()
-        .map(|selection| selection.provider_id.clone())
+        .filter_map(|binding| {
+            split_model_reference(&binding.model).map(|(provider_id, _)| provider_id.to_string())
+        })
         .collect::<Vec<_>>();
     ids.sort();
     ids.dedup();
     ids
 }
 
-fn referenced_library_provider_ids(overrides: &ModelOverridesPayload) -> Vec<String> {
-    let mut ids = overrides
-        .index_lines
-        .values()
-        .filter_map(|selection| selection.provider_id.clone())
-        .collect::<Vec<_>>();
-    ids.sort();
-    ids.dedup();
-    ids
+fn split_model_reference(model_ref: &str) -> Option<(&str, &str)> {
+    model_ref.split_once('/')
 }
 
 fn model_selection_error(summary: &ResolvedModelSelectionPayload) -> ApiError {
@@ -875,6 +1371,105 @@ fn model_test_operation_kind(input_modality: &str) -> &'static str {
         QUERY_KIND_IMAGE => "image_query_embedding",
         _ => "query_embedding",
     }
+}
+
+struct ExecutedModelTestInput {
+    vectors: Vec<Vec<f32>>,
+    pooled_vector: Vec<f32>,
+    input_summary: ModelTestInputSummary,
+}
+
+async fn run_settings_model_test_input(
+    input_modality: &str,
+    text_input: Option<&str>,
+    file_input: Option<&StagedSettingsModelTestFile>,
+    provider_context: Option<serde_json::Value>,
+    modality_field: &str,
+) -> Result<ExecutedModelTestInput, ApiError> {
+    let text_field = if modality_field == "comparison_input_modality" {
+        "comparison_text"
+    } else {
+        "text"
+    };
+    match input_modality {
+        QUERY_KIND_TEXT => {
+            let text = normalize_required_string(text_input.unwrap_or_default(), text_field)?;
+            let result = embed_query_text(&text, provider_context).await?;
+            Ok(ExecutedModelTestInput {
+                vectors: result.vectors,
+                pooled_vector: result.pooled_vector,
+                input_summary: ModelTestInputSummary {
+                    kind: "text".to_string(),
+                    text_preview: Some(truncate_text_preview(&text)),
+                    original_filename: None,
+                    content_type: None,
+                    size_bytes: Some(text.len()),
+                },
+            })
+        }
+        QUERY_KIND_IMAGE => {
+            let field_name = if modality_field == "comparison_input_modality" {
+                "comparison_file"
+            } else {
+                "file"
+            };
+            let file = file_input.ok_or_else(|| {
+                ApiError::validation_failed(
+                    "image model test requires one file input.",
+                    Some(json!({ "field": field_name })),
+                )
+            })?;
+            let result = embed_query_image(&file.path, None, provider_context).await?;
+            Ok(ExecutedModelTestInput {
+                vectors: result.vectors,
+                pooled_vector: result.pooled_vector,
+                input_summary: ModelTestInputSummary {
+                    kind: "file".to_string(),
+                    text_preview: None,
+                    original_filename: file.original_filename.clone(),
+                    content_type: Some(file.content_type.clone()),
+                    size_bytes: Some(file.size_bytes),
+                },
+            })
+        }
+        _ => Err(ApiError::validation_failed(
+            "input_modality is not supported by the selected model's embedding capabilities.",
+            Some(json!({
+                "field": modality_field,
+                "received": input_modality,
+            })),
+        )),
+    }
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f32, ApiError> {
+    if left.is_empty() || right.is_empty() || left.len() != right.len() {
+        return Err(ApiError::runtime_unavailable(
+            "Model test similarity could not be computed because the pooled vectors were incompatible.",
+            Some(json!({
+                "left_dim": left.len(),
+                "right_dim": right.len(),
+            })),
+        ));
+    }
+
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (left_item, right_item) in left.iter().zip(right.iter()) {
+        dot += left_item * right_item;
+        left_norm += left_item * left_item;
+        right_norm += right_item * right_item;
+    }
+
+    if left_norm <= 0.0 || right_norm <= 0.0 {
+        return Err(ApiError::runtime_unavailable(
+            "Model test similarity could not be computed because one of the pooled vectors was degenerate.",
+            None,
+        ));
+    }
+
+    Ok(dot / (left_norm.sqrt() * right_norm.sqrt()))
 }
 
 fn vector_shape(vectors: &[Vec<f32>]) -> Vec<usize> {

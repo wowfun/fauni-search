@@ -5,7 +5,7 @@ use serde_json::json;
 use support::TestEnv;
 
 #[tokio::test]
-async fn create_library_requires_multivector_only() {
+async fn create_library_requires_display_name_or_library_id() {
     let env = TestEnv::new("library-api-validation").await;
     let app = env.boot().await;
 
@@ -13,42 +13,70 @@ async fn create_library_requires_multivector_only() {
         .post_json(
             "/libraries",
             json!({
-                "name": "demo",
-                "config": { "enabled_index_lines": ["single-vector"] }
+                "display_name": "   ",
+                "library_id": "   "
             }),
         )
         .await;
     assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
     let invalid_body = invalid.json();
     assert_eq!(invalid_body["error"]["code"], "validation_failed");
-    assert_eq!(
-        invalid_body["error"]["details"]["field"],
-        "config.enabled_index_lines"
-    );
-    assert_eq!(
-        invalid_body["error"]["details"]["expected"],
-        json!(["multivector"])
-    );
-    assert_eq!(
-        invalid_body["error"]["details"]["received"],
-        json!(["single-vector"])
-    );
+    assert_eq!(invalid_body["error"]["details"]["field"], "display_name");
 
     let valid = app
         .post_json(
             "/libraries",
             json!({
-                "name": "demo",
-                "config": { "enabled_index_lines": ["multivector"] }
+                "name": "demo"
             }),
         )
         .await;
     assert_eq!(valid.status, StatusCode::CREATED);
     let valid_body = valid.json();
-    assert_eq!(valid_body["data"]["id"], "lib_000001");
-    assert_eq!(
-        valid_body["data"]["index_lines"][0]["index_line"],
-        "multivector"
-    );
-    assert_eq!(valid_body["data"]["index_lines"][0]["status"], "not_ready");
+    assert_eq!(valid_body["data"]["id"], "demo");
+    assert_eq!(valid_body["data"]["display_name"], "demo");
+    assert_eq!(valid_body["data"]["name"], "demo");
+    assert!(valid_body["data"].get("index_lines").is_none());
+}
+
+#[tokio::test]
+async fn create_library_accepts_custom_library_id_and_generates_unique_slugs() {
+    let env = TestEnv::new("library-api-identity").await;
+    let app = env.boot().await;
+
+    let custom = app
+        .post_json(
+            "/libraries",
+            json!({
+                "library_id": "invoice_demo",
+                "display_name": "Invoice Demo"
+            }),
+        )
+        .await;
+    assert_eq!(custom.status, StatusCode::CREATED);
+    let custom_body = custom.json();
+    assert_eq!(custom_body["data"]["id"], "invoice_demo");
+    assert_eq!(custom_body["data"]["display_name"], "Invoice Demo");
+
+    let generated = app
+        .post_json(
+            "/libraries",
+            json!({
+                "display_name": "Invoice Demo"
+            }),
+        )
+        .await;
+    assert_eq!(generated.status, StatusCode::CREATED);
+    assert_eq!(generated.json()["data"]["id"], "invoice-demo");
+
+    let deduped = app
+        .post_json(
+            "/libraries",
+            json!({
+                "display_name": "Invoice Demo"
+            }),
+        )
+        .await;
+    assert_eq!(deduped.status, StatusCode::CREATED);
+    assert_eq!(deduped.json()["data"]["id"], "invoice-demo-2");
 }

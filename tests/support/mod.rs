@@ -31,8 +31,8 @@ const TEST_ENV_KEYS: &[&str] = &[
     "SIDECAR_PORT",
     "QDRANT_URL",
     "FAUNI_ENV",
-    "TEXT_SEARCH_MODEL_ID",
-    "TEXT_SEARCH_MODEL_REVISION",
+    "EMBEDDING_MODEL_ID",
+    "EMBEDDING_MODEL_REVISION",
 ];
 
 pub struct TestEnv {
@@ -59,8 +59,8 @@ impl TestEnv {
         env::set_var("SIDECAR_PORT", "39011");
         env::set_var("QDRANT_URL", "http://127.0.0.1:63999");
         env::set_var("FAUNI_ENV", "test");
-        env::set_var("TEXT_SEARCH_MODEL_ID", "athrael-soju/colqwen3.5-4.5B-v3");
-        env::set_var("TEXT_SEARCH_MODEL_REVISION", "main");
+        env::set_var("EMBEDDING_MODEL_ID", "athrael-soju/colqwen3.5-4.5B-v3");
+        env::set_var("EMBEDDING_MODEL_REVISION", "main");
         let sidecar_stub = SidecarStub::start("127.0.0.1:39011").await;
 
         Self {
@@ -224,6 +224,16 @@ impl TestApp {
         fields: Vec<(String, String)>,
         file: Option<MultipartFile>,
     ) -> TestResponse {
+        let files = file.into_iter().collect::<Vec<_>>();
+        self.post_multipart_with_files(path, fields, files).await
+    }
+
+    pub async fn post_multipart_with_files(
+        &self,
+        path: &str,
+        fields: Vec<(String, String)>,
+        files: Vec<MultipartFile>,
+    ) -> TestResponse {
         let boundary = "fauni-search-test-boundary";
         let mut body = Vec::new();
 
@@ -236,7 +246,7 @@ impl TestApp {
             body.extend_from_slice(b"\r\n");
         }
 
-        if let Some(file) = file {
+        for file in files {
             body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
             body.extend_from_slice(
                 format!(
@@ -394,6 +404,7 @@ async fn sidecar_capabilities() -> impl IntoResponse {
             "vector_types": ["multi_vector_late_interaction"],
             "supports_mixed_inputs": false
         },
+        "execution_input_types": ["text", "image", "document", "video"],
         "runtime_adapters": [
             "document_query_via_page_images",
             "video_query_via_frame_images"
@@ -423,14 +434,10 @@ async fn sidecar_embed(Json(payload): Json<Value>) -> impl IntoResponse {
             vec![vec![4.0_f32, 5.0, 6.0], vec![7.0, 8.0, 9.0]],
             vec![5.5_f32, 6.5, 7.5],
         ),
-        "document_query_embedding" => (
-            vec![vec![10.0_f32, 11.0, 12.0]],
-            vec![10.0_f32, 11.0, 12.0],
-        ),
-        "document_embedding" => (
-            vec![vec![13.0_f32, 14.0, 15.0]],
-            vec![13.0_f32, 14.0, 15.0],
-        ),
+        "document_query_embedding" => {
+            (vec![vec![10.0_f32, 11.0, 12.0]], vec![10.0_f32, 11.0, 12.0])
+        }
+        "document_embedding" => (vec![vec![13.0_f32, 14.0, 15.0]], vec![13.0_f32, 14.0, 15.0]),
         _ => (vec![vec![0.0_f32, 0.0, 0.0]], vec![0.0_f32, 0.0, 0.0]),
     };
 

@@ -17,6 +17,7 @@
 
 - 本地脚本入口与命令行约定
 - `.env` / `.env.dev` 配置选择规则
+- `fauni.config.json` / `${APP_RUNTIME_DIR}/runtime-config.json` 的本地选择与合并规则
 - 启动、停止、状态查询、诊断、快速检查与 smoke 验证的本地自动化语义
 - 本地日志、pid 文件与机器可读输出约定
 
@@ -38,18 +39,26 @@
 
 - 本地脚本默认使用根 `.env` 作为用户 / 默认运行配置
 - 本地脚本通过显式 `--dev` 选择开发隔离配置 `.env.dev`
+- provider/model 的项目级基线事实源是仓库根 `fauni.config.json`
+- provider/model 的实例级覆盖事实源是 `${APP_RUNTIME_DIR}/runtime-config.json`
+- 本地脚本应先选中 `.env` 或 `.env.dev`，再由其中的 `${APP_RUNTIME_DIR}` 解析实例级覆盖配置路径
 - `.env.example` 是默认配置模板；`.env.dev.example` 是开发隔离配置模板
 - `.env*.example` 只作为模板，不承接本机实际运行状态
 - 脚本不得通过逐项端口 flag、脚本常量或 UI 常量维护与选中 env 文件并行的配置真值
 - 开发隔离配置应与默认配置使用不同端口、日志目录与运行时数据目录，避免两个本地运行面互相抢占服务或 Qdrant storage
+- `.env` / `.env.dev` 不再承接 `local_sidecar` 的正式模型事实；本地模型选择应从合并后的配置文件读取
 
 ## 本地操作入口
 
 - `bootstrap-linux.sh` 承接一次性安装与初始化；带 `--dev` 时应初始化 `.env.dev`
 - `doctor.sh` 承接环境诊断；允许在选中 env 文件缺失时回退到对应 example 进行诊断
+- `download-model.sh` 承接 Hugging Face 模型预下载；默认读取合并后配置中的 `provider.local_sidecar.active_model` 与对应 model 的 `version`，并允许通过显式 `hf_repo_id` 参数临时指定其他 Hugging Face 仓库而不改写配置
 - `run-qdrant.sh` 承接 Qdrant 本地进程启动或复用
 - `run.sh` 承接 app、sidecar 与 UI 的启动；默认前台运行，`--detach` 时进入分离运行
+- `cutover-runtime.sh` 承接 runtime 世代切换；它按当前环境单独归档旧 `app/` 与 `qdrant/`，并初始化新的 `${APP_RUNTIME_DIR}/runtime-config.json`
 - `run.sh` 启动 app、sidecar 与 UI 前应先确认 Qdrant 可访问；若不可访问，应自动调用同一配置上下文下的 `run-qdrant.sh` 启动或复用 Qdrant，并在 Qdrant 仍不可访问时失败
+- `run.sh` 启动前必须解析合并后的 provider/model 配置，并为本地 sidecar 与本地 app 导出所需的运行时模型环境变量
+- `run.sh` 若检测到当前环境下仍存在未 cutover 的旧世代 runtime 数据，必须拒绝启动并明确提示先执行 `cutover-runtime.sh`
 - `run.sh` 必须复用选中 env 下同一个 `APP_RUNTIME_DIR`；重启 app 不得隐式改写持久状态路径，也不得在启动时自动清理旧的 durable store
 - `stop.sh` 承接 app、sidecar、UI 与 Qdrant 的停止；必须支持选中配置下的服务发现
 - `stop.sh --all` 只承接停进程语义，不承接数据清空、runtime wipe 或旧 collection 自动清理
@@ -69,6 +78,7 @@
 - 旧 runtime-token Qdrant collections 的清理属于 operator/manual concern，不属于 `run.sh` / `stop.sh` 的自动职责
 - 本次 alias cutover 后，旧 `text_search_*` collection 与旧“直接物理 `index_*` collection”的清理同样属于 operator/manual concern；`run.sh` / `stop.sh` 不负责自动迁移或自动删除这些旧 collections
 - 如需兼容切换，操作员应先在选中配置下手工清理旧物理 `index_*` collections，再让新机制重建 active alias 与其物理 target
+- `cutover-runtime.sh` 只归档旧 `${APP_RUNTIME_DIR}/state.sqlite` 所在 `app/` 目录与 `QDRANT_STORAGE_DIR` 所在 `qdrant/` 目录；它不归档下载缓存、模型缓存、日志或其他工具缓存
 
 ## 快速检查与 smoke
 
@@ -76,9 +86,16 @@
 - `check.sh` 不应默认执行 GPU smoke，也不应要求 app、sidecar、UI 或 Qdrant 已经启动
 - `smoke-text-search.sh` 用于真实模型与真实 Qdrant 链路验证，应在 app、sidecar 与 Qdrant 已可访问后运行
 - `smoke-image-search.sh` 若存在，用于真实图片查询链路验证，并应复用与 `smoke-text-search.sh` 相同的本地配置选择、服务前置与 JSON 输出约定
+- `smoke-runtime-health.sh` 若存在，用于真实运行时健康与 `vector_space` 诊断链路验证，并应复用与其他 smoke 相同的本地配置选择、服务前置与 JSON 输出约定
+- `check-e2e.sh` 若存在，应作为 Playwright UI smoke 与本地 smoke 的统一聚合入口，并默认面向 `--dev` 隔离运行面
 - smoke 的机器可读摘要至少包含：`status`、`library_id`、`job_id`、`result_kinds`、`backend`、`repr_kind`
+- `smoke-runtime-health.sh` 的机器可读摘要至少还应包含：
+  - `runtime_health`
+  - `vector_space_ids`
+  - 可选 `unsupported_content_types`
 - Playwright UI smoke 默认使用 `--dev` 隔离配置，优先复用现有 `--dev` 服务；仅在 `--dev` 服务未运行时才自行启动，并且只清理由自身启动的服务
 - Playwright UI smoke 不应依赖默认 `.env` profile，也不应在结束时误停默认 profile 的服务
+- UI 侧 Vite、Playwright 配置与 `tests/e2e` 源文件应统一使用 TypeScript；本地 `typecheck` 必须覆盖这些 Node / Playwright 入口，而不只覆盖浏览器端 `src/**/*.ts`
 
 ## 关联主题
 

@@ -1,9 +1,6 @@
 use crate::{
-    api::{LibraryConfigPayload, ModelDefaultsPayload, ModelOverridesPayload, SourceRootRulesPayload},
-    model::{ProviderConfigRecord, SourceRecord, VisualUnitRecord},
-    provider::{
-        default_global_model_defaults, default_library_model_overrides, default_provider_configs,
-    },
+    api::SourceRootRulesPayload,
+    model::{RetiredVectorSpaceRecord, SourceRecord, VisualUnitRecord},
     STATE_SNAPSHOT_ROW_ID,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -24,27 +21,24 @@ pub(crate) struct LoadedDurableStateSnapshot {
 pub(crate) struct DurableAppStateSnapshot {
     pub(crate) version: u32,
     pub(crate) library_order: Vec<String>,
-    #[serde(default = "default_provider_configs")]
-    pub(crate) provider_configs: BTreeMap<String, ProviderConfigRecord>,
-    #[serde(default = "default_global_model_defaults")]
-    pub(crate) global_model_defaults: ModelDefaultsPayload,
     pub(crate) libraries: BTreeMap<String, DurableLibraryRecord>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct DurableLibraryRecord {
     pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) config: LibraryConfigPayload,
-    #[serde(default = "default_library_model_overrides")]
-    pub(crate) model_overrides: ModelOverridesPayload,
+    #[serde(alias = "name")]
+    pub(crate) display_name: String,
     pub(crate) source_roots: BTreeMap<String, DurableSourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
     pub(crate) sources: BTreeMap<String, SourceRecord>,
     pub(crate) source_order: Vec<String>,
     pub(crate) visual_units: BTreeMap<String, VisualUnitRecord>,
     pub(crate) visual_unit_order: Vec<String>,
-    pub(crate) active_index_lines: BTreeSet<String>,
+    #[serde(default, alias = "active_index_lines")]
+    pub(crate) active_vector_spaces: BTreeSet<String>,
+    #[serde(default)]
+    pub(crate) retired_vector_spaces: BTreeMap<String, RetiredVectorSpaceRecord>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

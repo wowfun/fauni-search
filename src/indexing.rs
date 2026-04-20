@@ -1,33 +1,38 @@
 use crate::{
     api::{ApiError, SearchResultItem, TextSearchData},
     model::{
-        PreparedImport, PreparedSourceAction, ResolvedExecutionModelSelection, SearchPlan,
-        SearchTimeRangeFilter,
+        PreparedImportVectorSpaceBatch, PreparedSourceActionVectorSpaceBatch,
+        ResolvedExecutionModelSelection, SearchPlan, SearchTimeRangeFilter,
     },
     provider::provider_context_payload,
     qdrant::*,
     query_assets::visual_unit_preview_reference,
     sidecar::{embed_documents, IndexingError, QueryEmbeddingResult},
     state::SharedState,
-    DEFAULT_INDEX_EMBED_BATCH_ITEMS, MULTIVECTOR_INDEX_LINE,
+    DEFAULT_INDEX_EMBED_BATCH_ITEMS,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::env;
 
 pub(crate) async fn index_visual_units(
-    prepared: &PreparedImport,
+    library_id: &str,
+    prepared: &PreparedImportVectorSpaceBatch,
     resolved_model: &ResolvedExecutionModelSelection,
     state: SharedState,
     job_id: &str,
-) -> Result<String, IndexingError> {
+) -> Result<(), IndexingError> {
+    if prepared.visual_units.is_empty() {
+        return Ok(());
+    }
     let batch_items = index_embed_batch_items();
     let total_batches = batch_count(prepared.visual_units.len(), batch_items);
     let stage_collection_name =
-        staging_collection_name(&prepared.library_id, MULTIVECTOR_INDEX_LINE, job_id);
+        staging_vector_space_collection_name(library_id, &resolved_model.vector_space_id, job_id);
     let write_plan = resolve_qdrant_namespace_write_plan(
-        &prepared.collection_name,
+        &stable_vector_space_name(library_id, &resolved_model.vector_space_id),
         &stage_collection_name,
-        !prepared.had_existing_visual_units,
+        !prepared.had_existing_index,
     )
     .await
     .map_err(|message| IndexingError {
@@ -60,7 +65,7 @@ pub(crate) async fn index_visual_units(
                 "encode",
                 0,
                 format!(
-                    "Encoding batch {}/{} ({} visual unit(s)) for staged multivector indexing.",
+                    "Encoding batch {}/{} ({} visual unit(s)) for staged vector-space indexing.",
                     batch_index + 1,
                     total_batches,
                     visual_unit_batch.len()
@@ -91,7 +96,7 @@ pub(crate) async fn index_visual_units(
                 "stage_write",
                 0,
                 format!(
-                    "Writing batch {}/{} ({} visual unit(s)) into staged multivector storage.",
+                    "Writing batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
                     batch_index + 1,
                     total_batches,
                     visual_unit_batch.len()
@@ -151,20 +156,17 @@ pub(crate) async fn index_visual_units(
         return Err(IndexingError {
             phase: "activated",
             message,
-            completed: prepared.accepted.len(),
+            completed: prepared.visual_units.len(),
         });
     }
     best_effort_cleanup_retired_stage_collections(&write_plan).await;
-
-    Ok(format!(
-        "Accepted {} path(s); indexed {} visual unit(s) into staged multivector storage and atomically activated the active namespace.",
-        prepared.accepted.len(),
-        prepared.visual_units.len()
-    ))
+    Ok(())
 }
 
 pub(crate) async fn index_source_action_visual_units(
-    prepared: &PreparedSourceAction,
+    library_id: &str,
+    action: &str,
+    prepared: &PreparedSourceActionVectorSpaceBatch,
     resolved_model: &ResolvedExecutionModelSelection,
     state: SharedState,
     job_id: &str,
@@ -172,11 +174,11 @@ pub(crate) async fn index_source_action_visual_units(
     let batch_items = index_embed_batch_items();
     let total_batches = batch_count(prepared.visual_units_to_index.len(), batch_items);
     let stage_collection_name =
-        staging_collection_name(&prepared.library_id, MULTIVECTOR_INDEX_LINE, job_id);
+        staging_vector_space_collection_name(library_id, &resolved_model.vector_space_id, job_id);
     let write_plan = resolve_qdrant_namespace_write_plan(
-        &prepared.collection_name,
+        &stable_vector_space_name(library_id, &resolved_model.vector_space_id),
         &stage_collection_name,
-        !prepared.had_existing_visual_units || prepared.can_rebuild_from_scratch,
+        !prepared.had_existing_index || prepared.can_rebuild_from_scratch,
     )
     .await?;
     let mut stage_initialized = false;
@@ -198,7 +200,7 @@ pub(crate) async fn index_source_action_visual_units(
                 "stage_write",
                 0,
                 format!(
-                    "Deleting {} stale point(s) from staged multivector storage.",
+                    "Deleting {} stale point(s) from staged vector-space storage.",
                     prepared.stale_point_ids.len()
                 ),
             );
@@ -228,7 +230,7 @@ pub(crate) async fn index_source_action_visual_units(
                     batch_index + 1,
                     total_batches,
                     visual_unit_batch.len(),
-                    prepared.action.as_str(),
+                    action,
                 ),
             );
         }
@@ -256,7 +258,7 @@ pub(crate) async fn index_source_action_visual_units(
                 "stage_write",
                 0,
                 format!(
-                    "Writing batch {}/{} ({} visual unit(s)) into staged multivector storage.",
+                    "Writing batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
                     batch_index + 1,
                     total_batches,
                     visual_unit_batch.len()
@@ -316,27 +318,30 @@ pub(crate) fn batch_count(total_items: usize, batch_items: usize) -> usize {
 
 pub(crate) fn build_search_response(
     plan: SearchPlan,
-    embedding: QueryEmbeddingResult,
-    candidates: Vec<QdrantScoredPoint>,
+    executed_groups: Vec<ExecutedSearchGroup>,
 ) -> Result<TextSearchData, ApiError> {
-    let result_count = candidates.len();
-    let top_score = candidates.first().map(|point| point.score);
-    let filtered_candidates = candidates
+    let result_count = executed_groups
+        .iter()
+        .map(|group| group.candidates.len())
+        .sum::<usize>();
+    let top_score = executed_groups
+        .iter()
+        .flat_map(|group| group.candidates.iter().map(|point| point.score))
+        .max_by(|left, right| left.total_cmp(right));
+    let mut filtered_candidates = executed_groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .candidates
+                .iter()
+                .filter_map(|point| point.payload.clone().map(|payload| (point.score, payload)))
+        })
         .into_iter()
-        .filter_map(|point| point.payload.map(|payload| (point.score, payload)))
         .filter(|(_, payload)| search_payload_matches_filters(&plan, payload))
         .collect::<Vec<_>>();
+    filtered_candidates.sort_by(|left, right| right.0.total_cmp(&left.0));
     let filtered_result_count = filtered_candidates.len();
     let page_start = plan.cursor_offset.min(filtered_result_count);
-    let raw_scores = filtered_candidates
-        .iter()
-        .map(|(score, payload)| {
-            json!({
-                "visual_unit_id": payload.visual_unit_id,
-                "score": score,
-            })
-        })
-        .collect::<Vec<_>>();
     let results = filtered_candidates
         .iter()
         .skip(page_start)
@@ -364,29 +369,70 @@ pub(crate) fn build_search_response(
         .collect::<Result<Vec<_>, ApiError>>()?;
     let returned_result_count = results.len();
     let next_offset = page_start + returned_result_count;
-    let next_cursor = (next_offset < filtered_result_count).then(|| encode_search_cursor(next_offset));
-    let index_lines_debug = plan
-        .target_index_lines
+    let next_cursor =
+        (next_offset < filtered_result_count).then(|| encode_search_cursor(next_offset));
+    let content_types_debug = plan
+        .target_content_types
         .iter()
-        .map(|index_line| {
-            let selection = plan.resolved_index_models.get(index_line);
+        .map(|content_type| {
+            let selection = plan.resolved_content_models.get(content_type);
+            let raw_scores = executed_groups
+                .iter()
+                .flat_map(|group| {
+                    group.candidates.iter().filter_map(|point| {
+                        let payload = point.payload.as_ref()?;
+                        if !content_type_matches_visual_unit(content_type, &payload.kind) {
+                            return None;
+                        }
+                        Some(json!({
+                            "visual_unit_id": payload.visual_unit_id,
+                            "score": point.score,
+                        }))
+                    })
+                })
+                .collect::<Vec<_>>();
             json!({
-                "index_line": index_line,
-                "resolved_model": selection.map(|selection| selection.summary.clone()),
-                "raw_scores": raw_scores.clone(),
+                "content_type": content_type,
+                "resolved_model": selection.cloned(),
+                "raw_scores": raw_scores,
             })
         })
         .collect::<Vec<_>>();
+    let mut vector_spaces = BTreeMap::new();
+    for group in &plan.execution_groups {
+        let selection = &group.resolved_model.summary;
+        let entry = vector_spaces
+            .entry(group.vector_space_id.clone())
+            .or_insert_with(|| {
+                json!({
+                    "vector_space_id": group.vector_space_id,
+                    "provider_id": selection.provider_id,
+                    "provider_kind": selection.provider_kind,
+                    "model_id": selection.model_id,
+                    "model_version": selection.model_version,
+                    "model_revision": selection.model_revision,
+                    "vector_type": group.resolved_model.vector_type,
+                    "execution_input_types": group.resolved_model.execution_input_types.clone(),
+                    "status": selection.status,
+                    "content_types": group.content_types,
+                })
+            });
+        let _ = entry;
+    }
 
     Ok(TextSearchData {
         results,
         next_cursor,
+        unsupported_content_types: plan.unsupported_content_types,
         debug: plan.debug.then_some(json!({
             "backend": "qdrant",
             "repr_kind": "multivector",
-            "resolved_model": plan.resolved_query_model.summary.clone(),
-            "index_lines": index_lines_debug,
-            "query_vector_count": embedding.vectors.len(),
+            "content_types": content_types_debug,
+            "vector_spaces": vector_spaces.into_values().collect::<Vec<_>>(),
+            "query_vector_count": executed_groups
+                .iter()
+                .map(|group| group.query_embedding.vectors.len())
+                .sum::<usize>(),
             "retrieved_points": result_count,
             "filtered_results": filtered_result_count,
             "returned_results": returned_result_count,
@@ -395,12 +441,18 @@ pub(crate) fn build_search_response(
     })
 }
 
+pub(crate) struct ExecutedSearchGroup {
+    pub(crate) query_embedding: QueryEmbeddingResult,
+    pub(crate) candidates: Vec<QdrantScoredPoint>,
+}
+
 fn encode_search_cursor(offset: usize) -> String {
     format!("search:v1:{offset}")
 }
 
 fn search_payload_matches_filters(plan: &SearchPlan, payload: &QdrantPointPayload) -> bool {
-    plan.active_visual_unit_ids.contains(&payload.visual_unit_id)
+    plan.active_visual_unit_ids
+        .contains(&payload.visual_unit_id)
         && plan
             .kind_filter
             .as_ref()
@@ -435,4 +487,14 @@ fn payload_overlaps_time_range(locator: &Value, filter: SearchTimeRangeFilter) -
     };
 
     start_ms <= filter.end_ms && end_ms >= filter.start_ms
+}
+
+fn content_type_matches_visual_unit(content_type: &str, visual_unit_kind: &str) -> bool {
+    match content_type {
+        "image" => visual_unit_kind == "image",
+        "document" => visual_unit_kind == "document_page",
+        "video" => visual_unit_kind == "video_segment",
+        "text" => visual_unit_kind == "text",
+        _ => false,
+    }
 }

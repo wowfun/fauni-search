@@ -12,13 +12,15 @@ PYTHON_PID=""
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/local/download-model.sh [--dev] [repo_id]
+  bash scripts/local/download-model.sh [--dev] [--hf-repo-id <repo_id>] [repo_id]
 
 Options:
-  --dev    Use .env.dev instead of .env
+  --dev                  Use .env.dev instead of .env
+  --hf-repo-id <repo_id> Download the given Hugging Face repo instead of local_sidecar.active_model
 
 Behavior:
-  - Defaults to TEXT_SEARCH_MODEL_ID / TEXT_SEARCH_MODEL_REVISION from the selected env file
+  - Defaults to provider.local_sidecar.active_model and its version from merged config
+  - `--hf-repo-id` temporarily overrides the repo id without editing the env file
   - Downloads into the default Hugging Face user cache
   - Inherits HF_ENDPOINT / HF_HUB_ENABLE_HF_TRANSFER from the selected env file when present
   - Uses a managed child process so Ctrl-C can force-stop a stuck downloader
@@ -70,8 +72,43 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-if [[ "$#" -gt 1 ]]; then
-  echo "[error] Too many arguments"
+HF_REPO_ID_OVERRIDE=""
+POSITIONAL_REPO_ID=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --hf-repo-id)
+      if [[ -z "${2:-}" ]]; then
+        echo "[error] --hf-repo-id requires a value"
+        usage
+        exit 2
+      fi
+      if [[ -n "$HF_REPO_ID_OVERRIDE" ]]; then
+        echo "[error] --hf-repo-id was provided more than once"
+        usage
+        exit 2
+      fi
+      HF_REPO_ID_OVERRIDE="$2"
+      shift 2
+      ;;
+    -*)
+      echo "[error] Unknown option: $1"
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "$POSITIONAL_REPO_ID" ]]; then
+        echo "[error] Too many arguments"
+        usage
+        exit 2
+      fi
+      POSITIONAL_REPO_ID="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$HF_REPO_ID_OVERRIDE" && -n "$POSITIONAL_REPO_ID" ]]; then
+  echo "[error] Use either --hf-repo-id or the legacy positional repo_id, not both"
   usage
   exit 2
 fi
@@ -89,16 +126,25 @@ if ! "$PYTHON_BIN" "$ROOT_DIR/tools/python/probe.py" import-modules huggingface_
   exit 1
 fi
 
-MODEL_ID="${1:-${TEXT_SEARCH_MODEL_ID:-}}"
-MODEL_REVISION="${TEXT_SEARCH_MODEL_REVISION:-}"
+MODEL_ID="${HF_REPO_ID_OVERRIDE:-${POSITIONAL_REPO_ID:-}}"
+MODEL_VERSION=""
 
 if [[ -z "$MODEL_ID" ]]; then
-  echo "[error] TEXT_SEARCH_MODEL_ID is empty"
+  MODEL_ID="$("$PYTHON_BIN" "$ROOT_DIR/tools/python/read_config.py" local-sidecar-active --field model_id)"
+  MODEL_VERSION="$("$PYTHON_BIN" "$ROOT_DIR/tools/python/read_config.py" local-sidecar-active --field version)"
+fi
+
+if [[ -z "$MODEL_ID" ]]; then
+  echo "[error] local_sidecar.active_model is empty"
   exit 1
 fi
 
-if [[ -z "$MODEL_REVISION" ]]; then
-  echo "[error] TEXT_SEARCH_MODEL_REVISION is empty"
+if [[ -z "$MODEL_VERSION" ]]; then
+  MODEL_VERSION="main"
+fi
+
+if [[ -z "$MODEL_VERSION" ]]; then
+  echo "[error] local_sidecar active model version is empty"
   exit 1
 fi
 
@@ -106,8 +152,8 @@ mkdir -p "$DEV_LOG_DIR"
 
 echo "[info] Python: $PYTHON_BIN"
 echo "[info] Config: ${FAUNI_CONFIG_SOURCE#$ROOT_DIR/}"
-echo "[info] Model: $MODEL_ID"
-echo "[info] Revision: $MODEL_REVISION"
+echo "[info] HF repo: $MODEL_ID"
+echo "[info] Version: $MODEL_VERSION"
 echo "[info] HF_ENDPOINT: ${HF_ENDPOINT:-<default>}"
 echo "[info] HF_HUB_ENABLE_HF_TRANSFER: ${HF_HUB_ENABLE_HF_TRANSFER:-0}"
 
@@ -119,7 +165,9 @@ if [[ "${HF_HUB_ENABLE_HF_TRANSFER:-0}" == "1" ]]; then
   echo "[info] hf_transfer is enabled; huggingface_hub will restart incomplete files instead of resuming them"
 fi
 
-PYTHONUNBUFFERED=1 "$PYTHON_BIN" -u "$ROOT_DIR/tools/python/download_model.py" "$MODEL_ID" "$MODEL_REVISION" &
+PYTHONUNBUFFERED=1 "$PYTHON_BIN" -u "$ROOT_DIR/tools/python/download_model.py" \
+  --hf-repo-id "$MODEL_ID" \
+  --version "$MODEL_VERSION" &
 
 PYTHON_PID=$!
 

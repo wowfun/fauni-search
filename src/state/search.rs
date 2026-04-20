@@ -12,6 +12,7 @@ impl AppState {
         let library = self
             .libraries
             .get(library_id)
+            .cloned()
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
 
         let visual_unit = library
@@ -47,7 +48,8 @@ impl AppState {
             request.top_k,
             request.cursor.as_deref(),
             request.debug,
-            request.target_index_lines.as_ref(),
+            request.target_content_types.as_ref(),
+            "text",
         )
         .await
     }
@@ -56,15 +58,17 @@ impl AppState {
         &mut self,
         request: &ImageSearchRequest,
     ) -> Result<(SearchPlan, ResolvedImageQueryInput), ApiError> {
-        let plan = self.prepare_search_scope(
-            request.library_id.trim(),
-            request.filters.as_ref(),
-            request.top_k,
-            request.cursor.as_deref(),
-            request.debug,
-            request.target_index_lines.as_ref(),
-        )
-        .await?;
+        let plan = self
+            .prepare_search_scope(
+                request.library_id.trim(),
+                request.filters.as_ref(),
+                request.top_k,
+                request.cursor.as_deref(),
+                request.debug,
+                request.target_content_types.as_ref(),
+                "image",
+            )
+            .await?;
 
         match request.image_input.kind.as_str() {
             "temp_asset" => {
@@ -125,15 +129,17 @@ impl AppState {
         &mut self,
         request: &VideoSearchRequest,
     ) -> Result<(SearchPlan, ResolvedVideoQueryInput), ApiError> {
-        let plan = self.prepare_search_scope(
-            request.library_id.trim(),
-            request.filters.as_ref(),
-            request.top_k,
-            request.cursor.as_deref(),
-            request.debug,
-            request.target_index_lines.as_ref(),
-        )
-        .await?;
+        let plan = self
+            .prepare_search_scope(
+                request.library_id.trim(),
+                request.filters.as_ref(),
+                request.top_k,
+                request.cursor.as_deref(),
+                request.debug,
+                request.target_content_types.as_ref(),
+                "video",
+            )
+            .await?;
 
         match request.video_input.kind.as_str() {
             "temp_asset" => {
@@ -246,15 +252,17 @@ impl AppState {
         &mut self,
         request: &DocumentSearchRequest,
     ) -> Result<(SearchPlan, ResolvedDocumentQueryInput), ApiError> {
-        let plan = self.prepare_search_scope(
-            request.library_id.trim(),
-            request.filters.as_ref(),
-            request.top_k,
-            request.cursor.as_deref(),
-            request.debug,
-            request.target_index_lines.as_ref(),
-        )
-        .await?;
+        let plan = self
+            .prepare_search_scope(
+                request.library_id.trim(),
+                request.filters.as_ref(),
+                request.top_k,
+                request.cursor.as_deref(),
+                request.debug,
+                request.target_content_types.as_ref(),
+                "document",
+            )
+            .await?;
 
         match request.document_input.kind.as_str() {
             "temp_asset" => {
@@ -332,43 +340,59 @@ impl AppState {
         top_k: Option<usize>,
         cursor: Option<&str>,
         debug: Option<bool>,
-        target_index_lines: Option<&Vec<String>>,
+        target_content_types: Option<&Vec<String>>,
+        query_input_type: &str,
     ) -> Result<SearchPlan, ApiError> {
         let library = self
             .libraries
             .get(library_id)
+            .cloned()
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
         let resolved_library_id = library.id.clone();
-        let collection_name = library.collection_name.clone();
-        let enabled_index_lines = library.config.enabled_index_lines.clone();
-        let active_index_lines = library.active_index_lines.clone();
-        let active_visual_unit_ids = library.visual_units.keys().cloned().collect::<BTreeSet<_>>();
+        let active_vector_spaces = library.active_vector_spaces.clone();
         let latest_job_id = library.latest_job_id.clone();
-
-        let target_index_lines = target_index_lines
-            .cloned()
-            .map(|lines| normalize_index_lines(Some(lines)))
-            .filter(|lines| !lines.is_empty())
-            .unwrap_or_else(|| enabled_index_lines.clone());
-
-        let enabled_lines: BTreeSet<_> = enabled_index_lines.iter().cloned().collect();
-        let invalid_target_lines: Vec<_> = target_index_lines
+        let effective_content_types = self.get_library_content_types(&resolved_library_id)?;
+        let enabled_content_types = effective_content_types
+            .content_types
+            .content_types
             .iter()
-            .filter(|line| !enabled_lines.contains(*line))
+            .filter(|(_, binding)| binding.enabled)
+            .map(|(content_type, _)| content_type.clone())
+            .collect::<Vec<_>>();
+
+        let target_content_types = target_content_types
+            .cloned()
+            .map(normalize_content_type_targets)
+            .filter(|content_types| !content_types.is_empty())
+            .unwrap_or_else(|| enabled_content_types.clone());
+
+        let enabled_types: BTreeSet<_> = enabled_content_types.iter().cloned().collect();
+        let invalid_target_content_types: Vec<_> = target_content_types
+            .iter()
+            .filter(|content_type| !enabled_types.contains(*content_type))
             .cloned()
             .collect();
 
-        if !invalid_target_lines.is_empty() {
+        if !invalid_target_content_types.is_empty() {
             return Err(ApiError::not_enabled(
-                "Requested index lines are not enabled for the selected library.",
-                Some(json!({ "target_index_lines": invalid_target_lines })),
+                "Requested content types are not enabled for the selected library.",
+                Some(json!({ "target_content_types": invalid_target_content_types })),
             ));
         }
 
-        let not_ready_lines: Vec<_> = target_index_lines
+        let resolved_content_models = self
+            .get_resolved_content_models(&resolved_library_id)
+            .await?
+            .content_types;
+        let not_ready_content_types = target_content_types
             .iter()
-            .filter(|line| !active_index_lines.contains(*line))
-            .map(|line| {
+            .filter_map(|content_type| {
+                let resolved = resolved_content_models.get(content_type)?;
+                let vector_space_id = resolved.vector_space_id.as_ref()?;
+                if active_vector_spaces.contains(vector_space_id) {
+                    return None;
+                }
+
                 let job_summary = latest_job_id.as_ref().and_then(|job_id| {
                     self.jobs.get(job_id).map(|job| {
                         json!({
@@ -379,30 +403,117 @@ impl AppState {
                     })
                 });
 
-                json!({
-                    "index_line": line,
+                Some(json!({
+                    "content_type": content_type,
                     "status": "not_ready",
                     "job": job_summary,
-                })
+                }))
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        if !not_ready_lines.is_empty() {
+        if !not_ready_content_types.is_empty() {
             return Err(ApiError::not_ready(
-                "The requested index lines are enabled but do not have an active index yet.",
-                Some(json!({ "index_lines": not_ready_lines })),
+                "The requested content types are enabled but do not have an active index yet.",
+                Some(json!({ "content_types": not_ready_content_types })),
             ));
         }
 
-        let resolved_query_model = self
-            .resolve_query_model_for_execution(&resolved_library_id)
-            .await?;
-        let mut resolved_index_models = BTreeMap::new();
-        for index_line in &target_index_lines {
-            let selection = self
-                .resolve_index_model_for_execution(&resolved_library_id, index_line)
-                .await?;
-            resolved_index_models.insert(index_line.clone(), selection);
+        if let Some(unavailable) = target_content_types
+            .iter()
+            .filter_map(|content_type| resolved_content_models.get(content_type))
+            .find(|resolved| resolved.status != "available")
+        {
+            return Err(ApiError::runtime_unavailable(
+                unavailable.message.clone(),
+                Some(json!({
+                    "content_type": unavailable.content_type,
+                    "provider_id": unavailable.provider_id,
+                    "model_id": unavailable.model_id,
+                    "status": unavailable.status,
+                })),
+            ));
+        }
+
+        let unsupported_content_types = target_content_types
+            .iter()
+            .filter_map(|content_type| {
+                let resolved = resolved_content_models.get(content_type)?;
+                let execution_input_types = self
+                    .provider_execution_input_types
+                    .get(&resolved.provider_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if execution_input_types_support_input_type(
+                    &execution_input_types,
+                    query_input_type,
+                ) {
+                    return None;
+                }
+
+                Some(UnsupportedContentTypeSnapshot {
+                    content_type: content_type.clone(),
+                    model: format!("{}/{}", resolved.provider_id, resolved.model_id),
+                    vector_type: resolved.vector_type.clone(),
+                    reason: format!(
+                        "model does not support query input type {}",
+                        query_input_type
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        let supported_content_types = target_content_types
+            .iter()
+            .filter(|content_type| {
+                !unsupported_content_types
+                    .iter()
+                    .any(|item| item.content_type == **content_type)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if supported_content_types.is_empty() {
+            return Err(ApiError::not_supported(
+                "None of the requested content types can execute the current query input.",
+                Some(json!({ "unsupported_content_types": unsupported_content_types })),
+            ));
+        }
+
+        let active_visual_unit_ids = library
+            .visual_units
+            .iter()
+            .filter(|(_, visual_unit)| {
+                supported_content_types.iter().any(|content_type| {
+                    content_type_matches_visual_unit(content_type, &visual_unit.kind)
+                })
+            })
+            .map(|(visual_unit_id, _)| visual_unit_id.clone())
+            .collect::<BTreeSet<_>>();
+        let resolved_content_models = resolved_content_models
+            .into_iter()
+            .filter(|(content_type, _)| supported_content_types.contains(content_type))
+            .collect::<BTreeMap<_, _>>();
+        let mut execution_groups_by_id = BTreeMap::<String, VectorSpaceExecutionGroup>::new();
+        for content_type in &supported_content_types {
+            let Some(resolved) = resolved_content_models.get(content_type) else {
+                continue;
+            };
+            let Some(vector_space_id) = resolved.vector_space_id.clone() else {
+                continue;
+            };
+            execution_groups_by_id
+                .entry(vector_space_id.clone())
+                .and_modify(|group| group.content_types.push(content_type.clone()))
+                .or_insert_with(|| VectorSpaceExecutionGroup {
+                    vector_space_id: vector_space_id.clone(),
+                    content_types: vec![content_type.clone()],
+                    resolved_model: resolved_execution_selection_from_content_model(
+                        resolved,
+                        self.provider_execution_input_types
+                            .get(&resolved.provider_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
+                });
         }
 
         let cursor_offset = decode_search_cursor_offset(cursor)?;
@@ -410,7 +521,6 @@ impl AppState {
 
         Ok(SearchPlan {
             library_id: resolved_library_id,
-            collection_name,
             top_k: top_k.unwrap_or(10).max(1),
             cursor_offset,
             kind_filter: read_string_filter(filters, "visual_unit.kind")
@@ -418,10 +528,11 @@ impl AppState {
             path_prefix_filter: read_string_filter(filters, "path_prefix"),
             source_type_filter: read_string_filter(filters, "source_type"),
             time_range_filter,
-            target_index_lines: target_index_lines.clone(),
+            target_content_types: supported_content_types,
+            unsupported_content_types,
             active_visual_unit_ids,
-            resolved_query_model,
-            resolved_index_models,
+            execution_groups: execution_groups_by_id.into_values().collect(),
+            resolved_content_models,
             debug: debug.unwrap_or(false),
         })
     }
@@ -711,7 +822,9 @@ fn invalid_search_cursor(cursor: &str) -> ApiError {
     )
 }
 
-fn resolve_time_range_filter(filters: Option<&Value>) -> Result<Option<SearchTimeRangeFilter>, ApiError> {
+fn resolve_time_range_filter(
+    filters: Option<&Value>,
+) -> Result<Option<SearchTimeRangeFilter>, ApiError> {
     let Some(value) = filters.and_then(|filters| filters.get("time_range")) else {
         return Ok(None);
     };
@@ -740,4 +853,51 @@ fn invalid_time_range_filter(value: &Value) -> ApiError {
             "value": value,
         })),
     )
+}
+
+fn normalize_content_type_targets(content_types: Vec<String>) -> Vec<String> {
+    let mut normalized = content_types
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn content_type_matches_visual_unit(content_type: &str, visual_unit_kind: &str) -> bool {
+    match content_type {
+        "image" => visual_unit_kind == "image",
+        "document" => visual_unit_kind == "document_page",
+        "video" => visual_unit_kind == "video_segment",
+        "text" => visual_unit_kind == "text",
+        _ => false,
+    }
+}
+
+fn resolved_execution_selection_from_content_model(
+    resolved: &ResolvedContentModelSelectionPayload,
+    execution_input_types: Vec<String>,
+) -> ResolvedExecutionModelSelection {
+    ResolvedExecutionModelSelection {
+        summary: ResolvedModelSelectionPayload {
+            binding_source: resolved.binding_source.clone(),
+            provider_id: resolved.provider_id.clone(),
+            provider_kind: resolved.provider_kind.clone(),
+            model_id: resolved.model_id.clone(),
+            model_version: resolved.model_version.clone(),
+            model_revision: resolved.model_revision.clone(),
+            embedding_capabilities: resolved.embedding_capabilities.clone(),
+            status: resolved.status.clone(),
+            message: resolved.message.clone(),
+            last_probed_at: resolved.last_probed_at.clone(),
+        },
+        vector_type: resolved.vector_type.clone(),
+        vector_space_id: resolved
+            .vector_space_id
+            .clone()
+            .unwrap_or_else(|| format!("unresolved:{}", resolved.content_type)),
+        execution_input_types,
+    }
 }

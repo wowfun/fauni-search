@@ -1,14 +1,16 @@
 use crate::{
     indexing::{index_source_action_visual_units, index_visual_units},
     model::{
-        ImportJobOutcome, PreparedImport, PreparedSourceAction, SourceActionJobOutcome,
-        SourceActionPlan, SourceActionSummary,
+        ImportJobOutcome, PreparedImport, PreparedSourceAction, RetiredVectorSpaceCleanupCandidate,
+        SourceActionJobOutcome, SourceActionPlan, SourceActionSummary,
     },
+    qdrant::cleanup_retired_vector_space_namespace,
     state::SharedState,
-    MULTIVECTOR_INDEX_LINE, SOURCE_WATCHER_POLL_INTERVAL_SECS,
+    RETIRED_VECTOR_SPACE_REAPER_INTERVAL_SECS, SOURCE_WATCHER_POLL_INTERVAL_SECS,
     TEMP_QUERY_ASSET_REAPER_INTERVAL_SECS,
 };
-use std::time::Duration;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn spawn_runtime_maintenance(state: SharedState) {
     let reaper_state = state.clone();
@@ -31,6 +33,72 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
                     missing_removed = summary.missing_removed,
                     "Pruned expired query assets."
                 );
+            }
+        }
+    });
+
+    let retired_cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(
+            RETIRED_VECTOR_SPACE_REAPER_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+
+            let candidates = {
+                let state = retired_cleanup_state.read().await;
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_millis())
+                    .unwrap_or(0);
+                state.eligible_retired_vector_spaces_for_cleanup(now_ms)
+            };
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            let mut cleaned = Vec::<RetiredVectorSpaceCleanupCandidate>::new();
+            for candidate in candidates {
+                match cleanup_retired_vector_space_namespace(
+                    &candidate.library_id,
+                    &candidate.vector_space_id,
+                )
+                .await
+                {
+                    Ok(()) => cleaned.push(candidate),
+                    Err(error) => {
+                        tracing::warn!(
+                            library_id = %candidate.library_id,
+                            vector_space_id = %candidate.vector_space_id,
+                            "Failed to clean retired vector-space namespace: {error}"
+                        );
+                    }
+                }
+            }
+
+            if cleaned.is_empty() {
+                continue;
+            }
+
+            let cleaned_count = cleaned.len();
+            let mut state = retired_cleanup_state.write().await;
+            match state.forget_cleaned_retired_vector_spaces(&cleaned) {
+                Ok(()) => {
+                    tracing::info!(
+                        cleaned_count,
+                        "Cleaned expired retired vector-space namespace(s)."
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        cleaned_count,
+                        "Failed to persist retired vector-space cleanup progress: {error}"
+                    );
+                }
             }
         }
     });
@@ -65,15 +133,22 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
 }
 
 pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared: PreparedImport) {
-    let resolved_model = {
+    let execution_groups = {
         let mut state = state.write().await;
         match state
-            .resolve_index_model_for_execution(&prepared.library_id, MULTIVECTOR_INDEX_LINE)
+            .resolve_execution_groups_for_library(&prepared.library_id)
             .await
         {
-            Ok(selection) => selection,
+            Ok(groups) => groups
+                .into_iter()
+                .map(|group| (group.vector_space_id.clone(), group))
+                .collect::<BTreeMap<_, _>>(),
             Err(error) => {
-                let outcome = ImportJobOutcome::failed("encode", error.payload.message, 0);
+                let outcome = ImportJobOutcome::failed(
+                    "encode",
+                    error.payload.message,
+                    prepared.accepted.len(),
+                );
                 if let Err(message) = state.finalize_import_job(&job_id, prepared, outcome) {
                     tracing::warn!("Failed to finalize import job {job_id}: {message}");
                 }
@@ -90,15 +165,81 @@ pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared:
             "encode",
             0,
             format!(
-                "Encoding {} accepted path(s) into multivector embeddings.",
+                "Encoding {} accepted path(s) into vector-space embeddings.",
                 prepared.accepted.len()
             ),
         );
     }
 
-    let outcome = match index_visual_units(&prepared, &resolved_model, state.clone(), &job_id).await {
-        Ok(summary) => ImportJobOutcome::completed(summary, prepared.accepted.len()),
-        Err(error) => ImportJobOutcome::failed(error.phase, error.message, error.completed),
+    let outcome = if prepared.vector_space_batches.is_empty() {
+        ImportJobOutcome::completed(
+            format!(
+                "Accepted {} path(s); stored structured sources and visual units without indexing because no enabled content types matched the imported assets.",
+                prepared.accepted.len()
+            ),
+            prepared.accepted.len(),
+            BTreeSet::new(),
+        )
+    } else {
+        let mut activated_vector_spaces = BTreeSet::new();
+        let mut indexed_visual_units = 0_usize;
+        let mut indexed_vector_spaces = 0_usize;
+        let mut failures = Vec::new();
+        for batch in &prepared.vector_space_batches {
+            let Some(group) = execution_groups.get(&batch.vector_space_id) else {
+                failures.push(format!(
+                    "vector_space {}: missing resolved execution group",
+                    batch.vector_space_id
+                ));
+                continue;
+            };
+            if let Err(error) = index_visual_units(
+                &prepared.library_id,
+                batch,
+                &group.resolved_model,
+                state.clone(),
+                &job_id,
+            )
+            .await
+            {
+                failures.push(format!(
+                    "vector_space {}: {} failed: {}",
+                    batch.vector_space_id, error.phase, error.message
+                ));
+                continue;
+            }
+            indexed_visual_units += batch.visual_units.len();
+            indexed_vector_spaces += 1;
+            activated_vector_spaces.insert(batch.vector_space_id.clone());
+        }
+
+        if failures.is_empty() {
+            ImportJobOutcome::completed(
+                format!(
+                    "Accepted {} path(s); indexed {} visual unit(s) across {} vector space(s) and activated the resulting namespaces.",
+                    prepared.accepted.len(),
+                    indexed_visual_units,
+                    indexed_vector_spaces,
+                ),
+                prepared.accepted.len(),
+                activated_vector_spaces,
+            )
+        } else {
+            ImportJobOutcome::failed_with_activations(
+                "failed",
+                format!(
+                    "Accepted {} path(s); indexed {} visual unit(s) across {} vector space(s), activated {} vector space(s), and encountered {} failure(s): {}",
+                    prepared.accepted.len(),
+                    indexed_visual_units,
+                    prepared.vector_space_batches.len(),
+                    activated_vector_spaces.len(),
+                    failures.len(),
+                    failures.join("; "),
+                ),
+                prepared.accepted.len(),
+                activated_vector_spaces,
+            )
+        }
     };
 
     let mut state = state.write().await;
@@ -117,26 +258,25 @@ pub(crate) async fn run_source_action_job(
         state.mark_source_action_running(&plan, &job_id);
     }
 
-    let resolved_model = {
+    let execution_groups = {
         let mut state = state.write().await;
         match state
-            .resolve_index_model_for_execution(&plan.library_id, MULTIVECTOR_INDEX_LINE)
+            .resolve_execution_groups_for_library(&plan.library_id)
             .await
         {
-            Ok(selection) => selection,
+            Ok(groups) => groups
+                .into_iter()
+                .map(|group| (group.vector_space_id.clone(), group))
+                .collect::<BTreeMap<_, _>>(),
             Err(error) => {
                 let prepared = PreparedSourceAction {
                     library_id: plan.library_id.clone(),
-                    collection_name: String::new(),
                     action: plan.action,
                     accepted_root_count: plan.target_root_ids.len(),
-                    can_rebuild_from_scratch: false,
-                    had_existing_visual_units: false,
                     root_updates: Vec::new(),
                     source_mutations: Vec::new(),
-                    stale_point_ids: Vec::new(),
-                    visual_units_to_index: Vec::new(),
                     summary: SourceActionSummary::default(),
+                    vector_space_batches: Vec::new(),
                 };
                 if let Err(message) = state.finalize_source_action_job(
                     &job_id,
@@ -167,47 +307,66 @@ pub(crate) async fn run_source_action_job(
                         0,
                         format!(
                             "Encoding {} visual unit(s) for {}.",
-                            prepared.visual_units_to_index.len(),
+                            prepared
+                                .vector_space_batches
+                                .iter()
+                                .map(|batch| batch.visual_units_to_index.len())
+                                .sum::<usize>(),
                             plan.action.as_str(),
                         ),
                     );
                 }
 
-                let indexing =
-                    index_source_action_visual_units(
-                        &prepared,
-                        &resolved_model,
+                let mut activated_vector_spaces = BTreeSet::new();
+                let mut failures = Vec::new();
+                for batch in prepared.vector_space_batches.clone() {
+                    let Some(group) = execution_groups.get(&batch.vector_space_id) else {
+                        failures.push(format!(
+                            "vector_space {}: missing resolved execution group",
+                            batch.vector_space_id
+                        ));
+                        continue;
+                    };
+                    if let Err(message) = index_source_action_visual_units(
+                        &prepared.library_id,
+                        plan.action.as_str(),
+                        &batch,
+                        &group.resolved_model,
                         state.clone(),
                         &job_id,
                     )
-                    .await;
-                match indexing {
-                    Ok(()) => {
-                        let outcome = SourceActionJobOutcome::completed(&prepared);
-                        let mut state = state.write().await;
-                        if let Err(message) =
-                            state.finalize_source_action_job(&job_id, prepared, outcome)
-                        {
-                            tracing::warn!(
-                                "Failed to finalize source action job {job_id}: {message}"
-                            );
-                        }
-                        return;
+                    .await
+                    {
+                        failures.push(format!(
+                            "vector_space {}: {}",
+                            batch.vector_space_id, message
+                        ));
+                        continue;
                     }
-                    Err(message) => {
-                        let mut state = state.write().await;
-                        if let Err(finalize_error) = state.finalize_source_action_job(
-                            &job_id,
-                            prepared,
-                            SourceActionJobOutcome::failed(plan.action, 0, message),
-                        ) {
-                            tracing::warn!(
-                                "Failed to finalize failed source action job {job_id}: {finalize_error}"
-                            );
-                        }
-                        return;
-                    }
+                    activated_vector_spaces.insert(batch.vector_space_id.clone());
                 }
+
+                let outcome = if failures.is_empty() {
+                    SourceActionJobOutcome::completed(&prepared)
+                } else {
+                    let activated_count = activated_vector_spaces.len();
+                    SourceActionJobOutcome::failed_with_structured_changes(
+                        plan.action,
+                        prepared.accepted_root_count,
+                        activated_vector_spaces,
+                        format!(
+                            "applied structured updates, activated {} vector space(s), and encountered {} failure(s): {}",
+                            activated_count,
+                            failures.len(),
+                            failures.join("; "),
+                        ),
+                    )
+                };
+                let mut state = state.write().await;
+                if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
+                    tracing::warn!("Failed to finalize source action job {job_id}: {message}");
+                }
+                return;
             }
 
             let outcome = SourceActionJobOutcome::completed(&prepared);
@@ -223,16 +382,12 @@ pub(crate) async fn run_source_action_job(
     let mut state = state.write().await;
     let prepared = PreparedSourceAction {
         library_id: plan.library_id,
-        collection_name: String::new(),
         action: plan.action,
         accepted_root_count: plan.target_root_ids.len(),
-        can_rebuild_from_scratch: false,
-        had_existing_visual_units: false,
         root_updates: Vec::new(),
         source_mutations: Vec::new(),
-        stale_point_ids: Vec::new(),
-        visual_units_to_index: Vec::new(),
         summary: SourceActionSummary::default(),
+        vector_space_batches: Vec::new(),
     };
     if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
         tracing::warn!("Failed to finalize source action job {job_id}: {message}");

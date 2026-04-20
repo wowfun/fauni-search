@@ -15,8 +15,7 @@ async fn jobs_endpoints_expose_import_jobs_and_library_filtering() {
         .post_json(
             "/libraries",
             json!({
-                "name": "jobs-first",
-                "config": { "enabled_index_lines": ["multivector"] }
+                "name": "jobs-first"
             }),
         )
         .await
@@ -27,8 +26,7 @@ async fn jobs_endpoints_expose_import_jobs_and_library_filtering() {
         .post_json(
             "/libraries",
             json!({
-                "name": "jobs-second",
-                "config": { "enabled_index_lines": ["multivector"] }
+                "name": "jobs-second"
             }),
         )
         .await

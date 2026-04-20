@@ -31,7 +31,7 @@ impl AppState {
                 attempt: 1,
                 status: "queued".to_string(),
                 summary: format!(
-                    "Accepted {} path(s); queued for multivector indexing.",
+                    "Accepted {} path(s); queued for vector-space indexing.",
                     prepared.accepted.len()
                 ),
             },
@@ -107,10 +107,9 @@ impl AppState {
                 .insert(visual_unit.id.clone(), visual_unit.clone());
         }
 
-        if outcome.activate_index {
-            library
-                .active_index_lines
-                .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        for vector_space_id in &outcome.activated_vector_spaces {
+            library.active_vector_spaces.insert(vector_space_id.clone());
+            library.retired_vector_spaces.remove(vector_space_id);
         }
 
         if let Err(message) = self.persist_durable_state() {
@@ -164,16 +163,20 @@ impl AppState {
         &mut self,
         plan: &SourceActionPlan,
     ) -> Result<PreparedSourceAction, String> {
-        let (collection_name, had_existing_visual_units, can_rebuild_from_scratch) = self
+        let active_vector_spaces = self
+            .libraries
+            .get(&plan.library_id)
+            .map(|library| library.active_vector_spaces.clone())
+            .ok_or_else(|| "Library was not found.".to_string())?;
+        let vector_space_bindings = self
+            .configured_vector_space_bindings_for_library(&plan.library_id)
+            .map_err(|error| error.payload.message)?;
+        let can_rebuild_from_scratch = self
             .libraries
             .get(&plan.library_id)
             .map(|library| {
-                (
-                    library.collection_name.clone(),
-                    !library.visual_units.is_empty(),
-                    plan.action.is_rescan()
-                        && plan.target_root_ids.len() == library.source_root_order.len(),
-                )
+                plan.action.is_rescan()
+                    && plan.target_root_ids.len() == library.source_root_order.len()
             })
             .ok_or_else(|| "Library was not found.".to_string())?;
 
@@ -386,19 +389,43 @@ impl AppState {
 
         stale_point_ids.sort_unstable();
         stale_point_ids.dedup();
+        let vector_space_batches = vector_space_bindings
+            .into_iter()
+            .filter_map(|binding| {
+                let visual_units = visual_units_to_index
+                    .iter()
+                    .filter(|visual_unit| {
+                        binding.content_types.iter().any(|content_type| {
+                            source_action_content_type_matches_visual_unit(
+                                content_type,
+                                &visual_unit.kind,
+                            )
+                        })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if visual_units.is_empty() && stale_point_ids.is_empty() {
+                    return None;
+                }
+                Some(PreparedSourceActionVectorSpaceBatch {
+                    vector_space_id: binding.vector_space_id.clone(),
+                    content_types: binding.content_types,
+                    can_rebuild_from_scratch,
+                    had_existing_index: active_vector_spaces.contains(&binding.vector_space_id),
+                    stale_point_ids: stale_point_ids.clone(),
+                    visual_units_to_index: visual_units,
+                })
+            })
+            .collect::<Vec<_>>();
 
         Ok(PreparedSourceAction {
             library_id: plan.library_id.clone(),
-            collection_name,
             action: plan.action,
             accepted_root_count: plan.target_root_ids.len(),
-            can_rebuild_from_scratch,
-            had_existing_visual_units,
             root_updates,
             source_mutations,
-            stale_point_ids,
-            visual_units_to_index,
             summary,
+            vector_space_batches,
         })
     }
 
@@ -415,7 +442,7 @@ impl AppState {
             return Err("Library was not found.".to_string());
         }
 
-        if outcome.status == "completed" {
+        if outcome.apply_structured_changes {
             let before = self.clone();
             let library = self
                 .libraries
@@ -463,10 +490,9 @@ impl AppState {
                 }
             }
 
-            if outcome.activate_index {
-                library
-                    .active_index_lines
-                    .insert(MULTIVECTOR_INDEX_LINE.to_string());
+            for vector_space_id in &outcome.activated_vector_spaces {
+                library.active_vector_spaces.insert(vector_space_id.clone());
+                library.retired_vector_spaces.remove(vector_space_id);
             }
 
             if let Err(message) = self.persist_durable_state() {
@@ -489,7 +515,7 @@ impl AppState {
 
         for update in &prepared.root_updates {
             if let Some(root) = library.source_roots.get_mut(&update.source_root_id) {
-                root.watch_state = if outcome.status == "completed" {
+                root.watch_state = if outcome.apply_structured_changes {
                     update.watch_state.clone()
                 } else {
                     source_root_watch_state(
@@ -546,5 +572,18 @@ impl AppState {
             .get(job_id)
             .map(|job| job.snapshot.clone())
             .ok_or_else(|| ApiError::not_found("Job was not found."))
+    }
+}
+
+fn source_action_content_type_matches_visual_unit(
+    content_type: &str,
+    visual_unit_kind: &str,
+) -> bool {
+    match content_type {
+        "image" => visual_unit_kind == "image",
+        "document" => visual_unit_kind == "document_page",
+        "video" => visual_unit_kind == "video_segment",
+        "text" => visual_unit_kind == "text",
+        _ => false,
     }
 }

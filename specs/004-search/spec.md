@@ -1,6 +1,6 @@
 # 004 搜索 (Search)
 
-定义 FauniSearch 的搜索语义，明确搜索查询 (Search Query) 如何在已启用索引线上执行，并返回搜索结果 (Search Result)。
+定义 FauniSearch 的搜索语义，明确搜索查询 (Search Query) 如何在已启用内容类型上执行，并返回搜索结果 (Search Result)。
 
 ## 关键术语 (Terminology)
 
@@ -35,7 +35,7 @@
 ## 设计原则
 
 - 单一公开输入（Single Public Input）：每次公开搜索请求只接受一种查询输入，不在本专题中公开组合查询形状
-- 启用线约束（Enabled-Line Constraint）：搜索只能以库内已启用索引线为目标，不能绕过索引配置直接访问未启用索引线
+- 启用内容类型约束（Enabled-Content-Type Constraint）：搜索只能以库内已启用内容类型为目标，不能绕过内容类型配置直接访问未启用内容类型
 - 视觉单元优先（Visual Unit First）：搜索结果默认按视觉单元返回，而不是按源内容聚合后返回
 - 分值上下文化（Contextual Score）：公开结果可以返回稳定 `score` 字段，但该值只在同一次搜索响应内表达当前后端返回的排序强弱，不承诺跨查询、跨索引线或跨后端可直接比较
 - 显式拒绝（Explicit Rejection）：不支持或不可用的搜索请求应明确拒绝，而不是静默降级、忽略或改写请求含义
@@ -62,12 +62,16 @@
 ## 搜索目标与公共控制项
 
 - 每次搜索请求都必须显式指向单个库
-- 默认情况下，搜索会并行查询该库全部已启用索引线，并以融合后的排序结果返回
-- 请求可以通过 `target_index_lines` 显式限制本次查询的索引线子集，但只能引用该库已启用的索引线
-- 若请求命中未启用索引线，应返回明确不可用状态
-- 若请求显式命中，或默认会作用到任一已启用但尚未持有 active index 的索引线，应返回明确未就绪状态，而不是静默忽略该索引线、自动降级到其他索引线或返回空结果
+- 默认情况下，搜索会并行查询该库全部已启用内容类型，并按这些内容类型当前解析出的一个或多个 `vector_space` 并行执行后再融合排序
+- 请求可以通过 `target_content_types` 显式限制本次查询的内容类型子集，但只能引用该库已启用内容类型
+- 若请求命中未启用内容类型，应返回明确不可用状态
+- 若请求显式命中，或默认会作用到任一已启用但尚未持有 active index 的内容类型，应返回明确未就绪状态，而不是静默忽略该内容类型、自动降级到其他内容类型或返回空结果
+- 若某个已启用内容类型绑定的模型不支持当前查询输入，应跳过该内容类型，并在成功响应中的 `unsupported_content_types` 返回结构化原因；只有当全部目标内容类型都不可执行时，才允许显式失败
+- 当前切片中，搜索是否支持 `text` / `image` / `document` / `video` 查询输入，必须以已解析 provider 的 Execution Input Types 判定，而不是以模型原生 `EmbeddingCapabilities.input_types` 判定
+- 若多个目标内容类型解析到同一个 `vector_space`，系统应对该 `vector_space` 只生成一次查询 embedding 并复用到该空间承载的全部内容类型
+- 若目标内容类型解析到多个不同 `vector_space`，系统应按空间分别生成查询 embedding、分别检索，再进行跨空间混排
 - 搜索期提供方的能力、绑定与已解析提供方选择（Resolved Provider Selection）语义，由 [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义
-- 公共控制项固定包括：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_index_lines`
+- 公共控制项固定包括：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_content_types`
 - 正式公共过滤器固定包括：`visual_unit.kind`、`path_prefix`、`source_type`、`time_range`
 - 分页采用 `cursor` 语义；本专题不固定 cursor 的内部编码方式
 - 当前切片中，`path_prefix` 作用于结果对象的 `source_path` 前缀匹配；若提供多个前缀，则按“命中任一前缀即可保留”解释
@@ -92,11 +96,11 @@
 
 ## 调试与错误语义
 
-- `debug=true` 时，稳定返回的调试信息至少包括：命中的 `index_line`、各索引线原始分数，以及 `provider`、`backend`、`repr_kind` 等技术元信息
-- 当前切片中，`debug=true` 的稳定最小实现至少应返回：参与本次查询的 `index_line` 列表、每条索引线上的原始分数摘要，以及当前后端 / 表征类型 / 已解析提供方摘要
-- 公开结果中的 `score` 与调试原始分数都只用于当前响应内的排序解释与诊断，不承诺跨索引线或跨查询请求可直接比较
-- 显式请求未启用索引线时，应返回明确不可用状态
-- 请求命中已启用但未就绪的索引线时，应返回明确未就绪状态，而不是静默返回空结果
+- `debug=true` 时，稳定返回的调试信息至少包括：命中的 `content_type`、各内容类型原始分数摘要，以及 `backend`、`repr_kind`、派生 `vector_space`、Execution Input Types 等技术元信息
+- 当前切片中，`debug=true` 的稳定最小实现至少应返回：参与本次查询的 `content_type` 列表、每个内容类型上的原始分数摘要、参与执行的 `vector_space` 摘要，以及当前后端 / 表征类型摘要
+- 公开结果中的 `score` 与调试原始分数都只用于当前响应内的排序解释与诊断，不承诺跨内容类型或跨查询请求可直接比较
+- 显式请求未启用内容类型时，应返回明确不可用状态
+- 请求命中已启用但未就绪的内容类型时，应返回明确未就绪状态，而不是静默返回空结果
 - 公开请求若携带多种查询输入，应返回明确“不支持”
 - 文档查询若携带非法、越界或不可解析的页范围，应返回明确失败，而不是隐式回退到整份文档
 - 视频查询若携带非法、越界或不可解析的时间范围，应返回明确失败，而不是隐式回退到整段视频

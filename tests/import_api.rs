@@ -15,8 +15,7 @@ async fn import_paths_partially_accepts_and_queues_a_job() {
         .post_json(
             "/libraries",
             json!({
-                "name": "imports",
-                "config": { "enabled_index_lines": ["multivector"] }
+                "name": "imports"
             }),
         )
         .await

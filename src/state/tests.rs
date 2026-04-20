@@ -17,10 +17,9 @@ fn durable_state_roundtrip_restores_library_source_roots_sources_visual_units_an
     let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "durable-roundtrip".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     let source_root = state
@@ -53,8 +52,12 @@ fn durable_state_roundtrip_restores_library_source_roots_sources_visual_units_an
         .finalize_source_action_job(&queued.job_id, prepared, outcome)
         .unwrap();
 
-    let active_alias = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
-    let active_target = staging_collection_name(&library.id, MULTIVECTOR_INDEX_LINE, "job_000001");
+    let active_alias = stable_vector_space_name(&library.id, &available_vector_space_id());
+    let active_target = staging_vector_space_collection_name(
+        &library.id,
+        &available_vector_space_id(),
+        "job_000001",
+    );
     let loaded = load_state_with_qdrant_namespaces(
         &store_path,
         &[(active_alias, active_target.clone())],
@@ -74,8 +77,8 @@ fn durable_state_roundtrip_restores_library_source_roots_sources_visual_units_an
     assert_eq!(loaded_library.sources.len(), 2);
     assert_eq!(loaded_library.visual_units.len(), 3);
     assert!(loaded_library
-        .active_index_lines
-        .contains(MULTIVECTOR_INDEX_LINE));
+        .active_vector_spaces
+        .contains(&available_vector_space_id()));
     assert_eq!(
         loaded_root.rules.include_extensions,
         vec!["pdf".to_string(), "png".to_string()]
@@ -102,10 +105,9 @@ fn restart_load_continues_id_sequences_and_clears_jobs() {
     let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "restart-sequences".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     let root = state
@@ -132,12 +134,20 @@ fn restart_load_continues_id_sequences_and_clears_jobs() {
         .finalize_import_job(
             &job_id,
             prepared,
-            ImportJobOutcome::completed("indexed first image".to_string(), 1),
+            ImportJobOutcome::completed(
+                "indexed first image".to_string(),
+                1,
+                BTreeSet::from([available_vector_space_id()]),
+            ),
         )
         .unwrap();
 
-    let active_alias = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
-    let active_target = staging_collection_name(&library.id, MULTIVECTOR_INDEX_LINE, "job_000001");
+    let active_alias = stable_vector_space_name(&library.id, &available_vector_space_id());
+    let active_target = staging_vector_space_collection_name(
+        &library.id,
+        &available_vector_space_id(),
+        "job_000001",
+    );
     let mut loaded = load_state_with_qdrant_namespaces(
         &store_path,
         &[(active_alias, active_target.clone())],
@@ -150,13 +160,12 @@ fn restart_load_continues_id_sequences_and_clears_jobs() {
 
     let second_library = loaded
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "restart-sequences-2".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
-    assert_eq!(second_library.id, "lib_000002");
+    assert_eq!(second_library.id, "restart-sequences-2");
 
     let second_root = loaded
         .create_source_root(
@@ -197,10 +206,9 @@ fn restart_load_missing_collection_marks_index_not_ready() {
     let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "restart-missing-collection".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     let prepared = state
@@ -217,30 +225,38 @@ fn restart_load_missing_collection_marks_index_not_ready() {
         .finalize_import_job(
             &job_id,
             prepared,
-            ImportJobOutcome::completed("indexed first image".to_string(), 1),
+            ImportJobOutcome::completed(
+                "indexed first image".to_string(),
+                1,
+                BTreeSet::from([available_vector_space_id()]),
+            ),
         )
         .unwrap();
 
     let mut loaded = load_state_with_qdrant_namespaces(&store_path, &[], &[]);
     let loaded_library = loaded.libraries.get(&library.id).unwrap();
     assert!(!loaded_library
-        .active_index_lines
-        .contains(MULTIVECTOR_INDEX_LINE));
+        .active_vector_spaces
+        .contains(&available_vector_space_id()));
 
     let error = run_async(loaded.prepare_text_search(&TextSearchRequest {
-            library_id: library.id.clone(),
-            text: "chart".to_string(),
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        text: "chart".to_string(),
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
     assert_eq!(error.payload.code, "not_ready");
 
-    let active_alias = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
-    let active_target = staging_collection_name(&library.id, MULTIVECTOR_INDEX_LINE, "job_000001");
+    let active_alias = stable_vector_space_name(&library.id, &available_vector_space_id());
+    let active_target = staging_vector_space_collection_name(
+        &library.id,
+        &available_vector_space_id(),
+        "job_000001",
+    );
     let reloaded = load_state_with_qdrant_namespaces(
         &store_path,
         &[(active_alias, active_target.clone())],
@@ -250,8 +266,8 @@ fn restart_load_missing_collection_marks_index_not_ready() {
         .libraries
         .get(&library.id)
         .unwrap()
-        .active_index_lines
-        .contains(MULTIVECTOR_INDEX_LINE));
+        .active_vector_spaces
+        .contains(&available_vector_space_id()));
 
     let _ = fs::remove_file(&store_path);
     let _ = fs::remove_file(image_path);
@@ -266,10 +282,9 @@ fn restart_load_legacy_direct_collection_marks_index_not_ready() {
     let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "restart-legacy-direct".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     let prepared = state
@@ -286,18 +301,23 @@ fn restart_load_legacy_direct_collection_marks_index_not_ready() {
         .finalize_import_job(
             &job_id,
             prepared,
-            ImportJobOutcome::completed("indexed first image".to_string(), 1),
+            ImportJobOutcome::completed(
+                "indexed first image".to_string(),
+                1,
+                BTreeSet::from([available_vector_space_id()]),
+            ),
         )
         .unwrap();
 
-    let legacy_direct_collection = stable_collection_name(&library.id, MULTIVECTOR_INDEX_LINE);
+    let legacy_direct_collection =
+        stable_vector_space_name(&library.id, &available_vector_space_id());
     let loaded = load_state_with_qdrant_namespaces(&store_path, &[], &[legacy_direct_collection]);
     assert!(!loaded
         .libraries
         .get(&library.id)
         .unwrap()
-        .active_index_lines
-        .contains(MULTIVECTOR_INDEX_LINE));
+        .active_vector_spaces
+        .contains(&available_vector_space_id()));
 
     let _ = fs::remove_file(&store_path);
     let _ = fs::remove_file(image_path);
@@ -313,10 +333,9 @@ fn restart_load_reseeds_watcher_runtime_fields_without_auto_queueing_jobs() {
     let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "restart-watcher".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     let source_root = state
@@ -372,14 +391,110 @@ fn restart_load_reseeds_watcher_runtime_fields_without_auto_queueing_jobs() {
 }
 
 #[test]
+fn apply_config_backed_model_state_prunes_unconfigured_active_vector_spaces_marks_retired_and_persists(
+) {
+    let store_path = unique_test_file_path("config-prunes-vector-spaces.sqlite");
+    let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "config-prunes-vector-spaces".to_string(),
+        })
+        .unwrap();
+    state
+        .libraries
+        .get_mut(&library.id)
+        .unwrap()
+        .active_vector_spaces
+        .insert(available_vector_space_id());
+    state.persist_durable_state().unwrap();
+
+    let replacement_vector_space_id = vector_space_id(
+        LOCAL_SIDECAR_PROVIDER_ID,
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        "main",
+        "single_vector",
+    );
+    let config = FauniConfig {
+        provider: BTreeMap::from([(
+            LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+            ProviderConfigFileRecord {
+                kind: LOCAL_SIDECAR_PROVIDER_KIND.to_string(),
+                display_name: Some("Local Sidecar".to_string()),
+                enabled: true,
+                active_model: Some("athrael-soju/colqwen3.5-4.5B-v3".to_string()),
+                base_url: None,
+                models: BTreeMap::from([(
+                    "athrael-soju/colqwen3.5-4.5B-v3".to_string(),
+                    ProviderModelConfigRecord {
+                        enabled: true,
+                        version: "main".to_string(),
+                        embedding_capabilities: EmbeddingCapabilities {
+                            input_types: vec!["text".to_string(), "image".to_string()],
+                            vector_types: vec![
+                                "multi_vector_late_interaction".to_string(),
+                                "single_vector".to_string(),
+                            ],
+                            supports_mixed_inputs: false,
+                        },
+                    },
+                )]),
+            },
+        )]),
+        content_types: BTreeMap::from([(
+            "image".to_string(),
+            ContentTypeConfigRecord {
+                enabled: true,
+                model: format!(
+                    "{}/{}",
+                    LOCAL_SIDECAR_PROVIDER_ID, "athrael-soju/colqwen3.5-4.5B-v3"
+                ),
+                vector_type: "single_vector".to_string(),
+            },
+        )]),
+        libraries: BTreeMap::new(),
+    };
+
+    state.apply_config_backed_model_state(&config).unwrap();
+
+    let active_vector_spaces = &state
+        .libraries
+        .get(&library.id)
+        .unwrap()
+        .active_vector_spaces;
+    assert!(!active_vector_spaces.contains(&available_vector_space_id()));
+    assert!(!active_vector_spaces.contains(&replacement_vector_space_id));
+    let retired_vector_spaces = &state
+        .libraries
+        .get(&library.id)
+        .unwrap()
+        .retired_vector_spaces;
+    assert!(retired_vector_spaces.contains_key(&available_vector_space_id()));
+    assert!(!retired_vector_spaces.contains_key(&replacement_vector_space_id));
+
+    let loaded = load_durable_state_snapshot(&store_path)
+        .unwrap()
+        .unwrap()
+        .snapshot;
+    assert!(loaded.libraries[&library.id]
+        .active_vector_spaces
+        .is_empty());
+    assert!(loaded.libraries[&library.id]
+        .retired_vector_spaces
+        .contains_key(&available_vector_space_id()));
+
+    let _ = fs::remove_file(store_path);
+}
+
+#[test]
 fn source_root_refresh_activates_files_and_rule_update_moves_sources_out_of_scope() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "source-root-refresh".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -504,10 +619,9 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "source-root-invalidation".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -579,14 +693,14 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
     );
 
     let search_plan = run_async(state.prepare_text_search(&TextSearchRequest {
-            library_id: library.id.clone(),
-            text: "chart".to_string(),
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        text: "chart".to_string(),
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
     assert!(search_plan.active_visual_unit_ids.is_empty());
 
@@ -594,14 +708,329 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
 }
 
 #[test]
+fn finalize_import_job_failed_with_activations_keeps_structured_state_and_active_vector_space() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "import-partial-vector-space".to_string(),
+        })
+        .unwrap();
+
+    let image_path = unique_test_file_path("import-partial-vector-space.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    let queued = state.queue_import(&prepared).unwrap();
+    let job_id = queued.job_handle.clone().unwrap();
+    state
+        .libraries
+        .get_mut(&library.id)
+        .unwrap()
+        .retired_vector_spaces
+        .insert(
+            available_vector_space_id(),
+            RetiredVectorSpaceRecord {
+                retired_at_ms: current_unix_ms().saturating_sub(1),
+            },
+        );
+
+    state
+        .finalize_import_job(
+            &job_id,
+            prepared,
+            ImportJobOutcome::failed_with_activations(
+                "failed",
+                "vector_space image-space failed after document-space activation".to_string(),
+                1,
+                BTreeSet::from([available_vector_space_id()]),
+            ),
+        )
+        .unwrap();
+
+    let library = state.libraries.get(&library.id).unwrap();
+    assert_eq!(library.sources.len(), 1);
+    assert_eq!(library.visual_units.len(), 1);
+    assert!(library
+        .active_vector_spaces
+        .contains(&available_vector_space_id()));
+    assert!(!library
+        .retired_vector_spaces
+        .contains_key(&available_vector_space_id()));
+
+    let job = state.jobs.get(&job_id).unwrap();
+    assert_eq!(job.snapshot.status, "failed");
+    assert_eq!(job.snapshot.phase, "failed");
+    assert_eq!(job.snapshot.progress.completed, 1);
+
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
+fn finalize_source_action_job_failed_with_structured_changes_persists_mutations() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "source-action-partial-vector-space".to_string(),
+        })
+        .unwrap();
+
+    let root_dir = unique_test_dir_path("source-action-partial-vector-space");
+    fs::create_dir_all(&root_dir).unwrap();
+    let image_path = root_dir.join("chart.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let source_root = state
+        .create_source_root(
+            &library.id,
+            CreateSourceRootRequest {
+                root_path: root_dir.to_string_lossy().to_string(),
+                enabled: Some(true),
+                rules: Some(SourceRootRulesPayload::default()),
+            },
+        )
+        .unwrap();
+
+    let (_, queued) = state
+        .queue_source_action(
+            &library.id,
+            SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+            SourceActionKind::Refresh,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let queued = queued.unwrap();
+    let prepared = state.prepare_source_action_execution(&queued.plan).unwrap();
+    state
+        .libraries
+        .get_mut(&library.id)
+        .unwrap()
+        .retired_vector_spaces
+        .insert(
+            available_vector_space_id(),
+            RetiredVectorSpaceRecord {
+                retired_at_ms: current_unix_ms().saturating_sub(1),
+            },
+        );
+
+    state
+        .finalize_source_action_job(
+            &queued.job_id,
+            prepared,
+            SourceActionJobOutcome::failed_with_structured_changes(
+                SourceActionKind::Refresh,
+                1,
+                BTreeSet::from([available_vector_space_id()]),
+                "vector_space image-space failed after document-space activation".to_string(),
+            ),
+        )
+        .unwrap();
+
+    let library = state.libraries.get(&library.id).unwrap();
+    assert_eq!(library.sources.len(), 1);
+    assert_eq!(library.visual_units.len(), 1);
+    assert!(library
+        .active_vector_spaces
+        .contains(&available_vector_space_id()));
+    assert!(!library
+        .retired_vector_spaces
+        .contains_key(&available_vector_space_id()));
+
+    let root = library
+        .source_roots
+        .get(&source_root.source_root_id)
+        .unwrap();
+    assert_eq!(root.watch_state, "watching");
+    assert_eq!(root.last_action.as_ref().unwrap().status, "failed");
+
+    let job = state.jobs.get(&queued.job_id).unwrap();
+    assert_eq!(job.snapshot.status, "failed");
+    assert_eq!(job.snapshot.phase, "failed");
+    assert_eq!(job.snapshot.progress.completed, 1);
+
+    let _ = fs::remove_dir_all(root_dir);
+}
+
+#[test]
+fn retired_vector_space_cleanup_candidates_and_persistence_follow_retention_window() {
+    let store_path = unique_test_file_path("retired-vector-space-cleanup.sqlite");
+    let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "retired-vector-space-cleanup".to_string(),
+        })
+        .unwrap();
+    let old_vector_space_id = available_vector_space_id();
+    let fresh_vector_space_id = vector_space_id(
+        LOCAL_SIDECAR_PROVIDER_ID,
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        "main",
+        "single_vector",
+    );
+    let still_active_vector_space_id = vector_space_id(
+        LOCAL_SIDECAR_PROVIDER_ID,
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        "main",
+        "independent_vectors",
+    );
+    let now_ms = current_unix_ms();
+    {
+        let library = state.libraries.get_mut(&library.id).unwrap();
+        library.retired_vector_spaces.insert(
+            old_vector_space_id.clone(),
+            RetiredVectorSpaceRecord {
+                retired_at_ms: now_ms.saturating_sub(crate::RETIRED_VECTOR_SPACE_RETENTION_MS + 1),
+            },
+        );
+        library.retired_vector_spaces.insert(
+            fresh_vector_space_id.clone(),
+            RetiredVectorSpaceRecord {
+                retired_at_ms: now_ms,
+            },
+        );
+        library.retired_vector_spaces.insert(
+            still_active_vector_space_id.clone(),
+            RetiredVectorSpaceRecord {
+                retired_at_ms: now_ms.saturating_sub(crate::RETIRED_VECTOR_SPACE_RETENTION_MS + 1),
+            },
+        );
+        library
+            .active_vector_spaces
+            .insert(still_active_vector_space_id.clone());
+    }
+    state.persist_durable_state().unwrap();
+
+    let candidates = state.eligible_retired_vector_spaces_for_cleanup(now_ms);
+    assert_eq!(
+        candidates,
+        vec![RetiredVectorSpaceCleanupCandidate {
+            library_id: library.id.clone(),
+            vector_space_id: old_vector_space_id.clone(),
+        }]
+    );
+
+    state
+        .forget_cleaned_retired_vector_spaces(&candidates)
+        .unwrap();
+
+    let library = state.libraries.get(&library.id).unwrap();
+    assert!(!library
+        .retired_vector_spaces
+        .contains_key(&old_vector_space_id));
+    assert!(library
+        .retired_vector_spaces
+        .contains_key(&fresh_vector_space_id));
+    assert!(library
+        .retired_vector_spaces
+        .contains_key(&still_active_vector_space_id));
+
+    let loaded = load_durable_state_snapshot(&store_path)
+        .unwrap()
+        .unwrap()
+        .snapshot;
+    let retired_vector_spaces = &loaded.libraries[&library.id].retired_vector_spaces;
+    assert!(!retired_vector_spaces.contains_key(&old_vector_space_id));
+    assert!(retired_vector_spaces.contains_key(&fresh_vector_space_id));
+    assert!(retired_vector_spaces.contains_key(&still_active_vector_space_id));
+
+    let _ = fs::remove_file(store_path);
+}
+
+#[test]
+fn get_vector_space_diagnostics_reports_active_and_retired_spaces() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "vector-space-diagnostics".to_string(),
+        })
+        .unwrap();
+    let retired_vector_space_id = vector_space_id(
+        LOCAL_SIDECAR_PROVIDER_ID,
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        "main",
+        "single_vector",
+    );
+    {
+        let library = state.libraries.get_mut(&library.id).unwrap();
+        library
+            .active_vector_spaces
+            .insert(available_vector_space_id());
+        library.retired_vector_spaces.insert(
+            retired_vector_space_id.clone(),
+            RetiredVectorSpaceRecord {
+                retired_at_ms: 1234,
+            },
+        );
+    }
+
+    let diagnostics = run_async(state.get_vector_space_diagnostics(&library.id)).unwrap();
+    assert_eq!(diagnostics.vector_spaces.len(), 2);
+
+    let active = diagnostics
+        .vector_spaces
+        .iter()
+        .find(|item| item.lifecycle_state == "active")
+        .unwrap();
+    assert_eq!(active.vector_space_id, available_vector_space_id());
+    assert_eq!(
+        active.content_types,
+        vec![
+            "document".to_string(),
+            "image".to_string(),
+            "video".to_string()
+        ]
+    );
+    assert_eq!(
+        active.provider_id.as_deref(),
+        Some(LOCAL_SIDECAR_PROVIDER_ID)
+    );
+    assert_eq!(
+        active.model_id.as_deref(),
+        Some("athrael-soju/colqwen3.5-4.5B-v3")
+    );
+    assert_eq!(active.model_version.as_deref(), Some("main"));
+    assert_eq!(
+        active.vector_type.as_deref(),
+        Some("multi_vector_late_interaction")
+    );
+    assert_eq!(active.retired_at_ms, None);
+
+    let retired = diagnostics
+        .vector_spaces
+        .iter()
+        .find(|item| item.lifecycle_state == "retired")
+        .unwrap();
+    assert_eq!(retired.vector_space_id, retired_vector_space_id);
+    assert!(retired.content_types.is_empty());
+    assert_eq!(retired.provider_id, None);
+    assert_eq!(retired.model_id, None);
+    assert_eq!(retired.vector_type, None);
+    assert_eq!(retired.retired_at_ms, Some(1234));
+}
+
+#[test]
 fn watcher_poll_debounces_into_incremental_refresh_queue() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "watcher-refresh".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -650,10 +1079,9 @@ fn disabled_source_root_skips_watcher_and_rejects_manual_refresh() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "disabled-source-root".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -708,10 +1136,9 @@ fn build_search_response_returns_qdrant_results_after_import() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "ready-search".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -759,51 +1186,51 @@ fn build_search_response_returns_qdrant_results_after_import() {
                     "Accepted 2 path(s); indexed 3 visual unit(s) into the active multivector collection."
                         .to_string(),
                     2,
+                    BTreeSet::from([available_vector_space_id()]),
                 ),
             )
             .unwrap();
 
     let plan = run_async(state.prepare_text_search(&TextSearchRequest {
-            library_id: library.id.clone(),
-            text: "report".to_string(),
-            filters: None,
-            top_k: Some(10),
-            cursor: None,
-            debug: Some(true),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        text: "report".to_string(),
+        filters: None,
+        top_k: Some(10),
+        cursor: None,
+        debug: Some(true),
+        target_content_types: None,
+    }))
     .unwrap();
 
     let response = build_search_response(
         plan,
-        QueryEmbeddingResult {
-            vectors: vec![vec![0.1, 0.2, 0.3], vec![0.3, 0.2, 0.1]],
-            pooled_vector: vec![0.2, 0.2, 0.2],
-        },
-        vec![
-            QdrantScoredPoint {
-                score: 0.9,
-                payload: Some(QdrantPointPayload {
-                    visual_unit_id: image_visual_unit_id,
-                    source_id: "src_000002".to_string(),
-                    source_path: image_path.to_string_lossy().to_string(),
-                    source_type: "image".to_string(),
-                    kind: "image".to_string(),
-                    locator: json!({ "path": image_path.to_string_lossy().to_string() }),
-                }),
-            },
-            QdrantScoredPoint {
-                score: 0.8,
-                payload: Some(QdrantPointPayload {
-                    visual_unit_id: document_visual_unit_id,
-                    source_id: "src_000001".to_string(),
-                    source_path: pdf_path.to_string_lossy().to_string(),
-                    source_type: "pdf".to_string(),
-                    kind: "document_page".to_string(),
-                    locator: json!({ "page": 1, "page_label": "1" }),
-                }),
-            },
-        ],
+        executed_search_groups(
+            &["image", "document"],
+            vec![
+                QdrantScoredPoint {
+                    score: 0.9,
+                    payload: Some(QdrantPointPayload {
+                        visual_unit_id: image_visual_unit_id,
+                        source_id: "src_000002".to_string(),
+                        source_path: image_path.to_string_lossy().to_string(),
+                        source_type: "image".to_string(),
+                        kind: "image".to_string(),
+                        locator: json!({ "path": image_path.to_string_lossy().to_string() }),
+                    }),
+                },
+                QdrantScoredPoint {
+                    score: 0.8,
+                    payload: Some(QdrantPointPayload {
+                        visual_unit_id: document_visual_unit_id,
+                        source_id: "src_000001".to_string(),
+                        source_path: pdf_path.to_string_lossy().to_string(),
+                        source_type: "pdf".to_string(),
+                        kind: "document_page".to_string(),
+                        locator: json!({ "page": 1, "page_label": "1" }),
+                    }),
+                },
+            ],
+        ),
     )
     .unwrap();
 
@@ -824,16 +1251,16 @@ fn build_search_response_returns_qdrant_results_after_import() {
         .starts_with("http://127.0.0.1:53210/libraries/")));
     assert_eq!(response.debug.as_ref().unwrap()["repr_kind"], "multivector");
     assert_eq!(
-        response.debug.as_ref().unwrap()["resolved_model"]["provider_kind"],
+        response.debug.as_ref().unwrap()["vector_spaces"][0]["vector_space_id"],
+        available_vector_space_id()
+    );
+    assert_eq!(
+        response.debug.as_ref().unwrap()["vector_spaces"][0]["provider_kind"],
         LOCAL_SIDECAR_PROVIDER_KIND
     );
     assert_eq!(
-        response.debug.as_ref().unwrap()["resolved_model"]["provider_id"],
+        response.debug.as_ref().unwrap()["vector_spaces"][0]["provider_id"],
         LOCAL_SIDECAR_PROVIDER_ID
-    );
-    assert_eq!(
-        response.debug.as_ref().unwrap()["index_lines"][0]["index_line"],
-        "multivector"
     );
 
     let _ = fs::remove_file(pdf_path);
@@ -845,20 +1272,17 @@ fn build_search_response_supports_cursor_pagination() {
     set_test_app_env();
     let plan = SearchPlan {
         library_id: "lib_000001".to_string(),
-        collection_name: stable_collection_name("lib_000001", MULTIVECTOR_INDEX_LINE),
         top_k: 1,
         cursor_offset: 0,
         kind_filter: None,
         path_prefix_filter: None,
         source_type_filter: None,
         time_range_filter: None,
-        target_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
-        active_visual_unit_ids: BTreeSet::from([
-            "vu_000001".to_string(),
-            "vu_000002".to_string(),
-        ]),
-        resolved_query_model: available_provider_selection(),
-        resolved_index_models: default_resolved_index_providers(),
+        target_content_types: vec!["image".to_string(), "document".to_string()],
+        unsupported_content_types: Vec::new(),
+        active_visual_unit_ids: BTreeSet::from(["vu_000001".to_string(), "vu_000002".to_string()]),
+        execution_groups: available_execution_groups(&["image", "document"]),
+        resolved_content_models: default_resolved_content_models(),
         debug: true,
     };
     let candidates = vec![
@@ -891,11 +1315,7 @@ fn build_search_response_supports_cursor_pagination() {
             cursor_offset: 0,
             ..plan.clone()
         },
-        QueryEmbeddingResult {
-            vectors: vec![vec![0.1, 0.2, 0.3]],
-            pooled_vector: vec![0.1, 0.2, 0.3],
-        },
-        candidates.clone(),
+        executed_search_groups(&["image", "document"], candidates.clone()),
     )
     .unwrap();
     assert_eq!(first_page.results.len(), 1);
@@ -908,11 +1328,7 @@ fn build_search_response_supports_cursor_pagination() {
             cursor_offset: 1,
             ..plan
         },
-        QueryEmbeddingResult {
-            vectors: vec![vec![0.1, 0.2, 0.3]],
-            pooled_vector: vec![0.1, 0.2, 0.3],
-        },
-        candidates,
+        executed_search_groups(&["image", "document"], candidates),
     )
     .unwrap();
     assert_eq!(second_page.results.len(), 1);
@@ -922,12 +1338,110 @@ fn build_search_response_supports_cursor_pagination() {
 }
 
 #[test]
+fn build_search_response_merges_multiple_vector_spaces_by_score() {
+    set_test_app_env();
+    let secondary_vector_space_id = vector_space_id(
+        LOCAL_SIDECAR_PROVIDER_ID,
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        "main",
+        "single_vector",
+    );
+    let mut resolved_content_models = default_resolved_content_models();
+    if let Some(document) = resolved_content_models.get_mut("document") {
+        document.vector_type = "single_vector".to_string();
+        document.vector_space_id = Some(secondary_vector_space_id.clone());
+    }
+    let plan = SearchPlan {
+        library_id: "lib_000001".to_string(),
+        top_k: 10,
+        cursor_offset: 0,
+        kind_filter: None,
+        path_prefix_filter: None,
+        source_type_filter: None,
+        time_range_filter: None,
+        target_content_types: vec!["image".to_string(), "document".to_string()],
+        unsupported_content_types: Vec::new(),
+        active_visual_unit_ids: BTreeSet::from(["vu_000001".to_string(), "vu_000002".to_string()]),
+        execution_groups: vec![
+            VectorSpaceExecutionGroup {
+                vector_space_id: available_vector_space_id(),
+                content_types: vec!["image".to_string()],
+                resolved_model: available_provider_selection(),
+            },
+            VectorSpaceExecutionGroup {
+                vector_space_id: secondary_vector_space_id.clone(),
+                content_types: vec!["document".to_string()],
+                resolved_model: ResolvedExecutionModelSelection {
+                    vector_type: "single_vector".to_string(),
+                    vector_space_id: secondary_vector_space_id.clone(),
+                    summary: available_provider_selection().summary,
+                    execution_input_types: vec!["text".to_string(), "image".to_string()],
+                },
+            },
+        ],
+        resolved_content_models,
+        debug: true,
+    };
+
+    let response = build_search_response(
+        plan,
+        vec![
+            crate::indexing::ExecutedSearchGroup {
+                query_embedding: QueryEmbeddingResult {
+                    vectors: vec![vec![0.1, 0.2, 0.3]],
+                    pooled_vector: vec![0.1, 0.2, 0.3],
+                },
+                candidates: vec![QdrantScoredPoint {
+                    score: 0.7,
+                    payload: Some(QdrantPointPayload {
+                        visual_unit_id: "vu_000001".to_string(),
+                        source_id: "src_000001".to_string(),
+                        source_path: "/library/chart.png".to_string(),
+                        source_type: "image".to_string(),
+                        kind: "image".to_string(),
+                        locator: json!({ "path": "/library/chart.png" }),
+                    }),
+                }],
+            },
+            crate::indexing::ExecutedSearchGroup {
+                query_embedding: QueryEmbeddingResult {
+                    vectors: vec![vec![0.3, 0.2, 0.1]],
+                    pooled_vector: vec![0.3, 0.2, 0.1],
+                },
+                candidates: vec![QdrantScoredPoint {
+                    score: 0.9,
+                    payload: Some(QdrantPointPayload {
+                        visual_unit_id: "vu_000002".to_string(),
+                        source_id: "src_000002".to_string(),
+                        source_path: "/library/report.pdf".to_string(),
+                        source_type: "pdf".to_string(),
+                        kind: "document_page".to_string(),
+                        locator: json!({ "page": 1, "page_label": "1" }),
+                    }),
+                }],
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.results[0].visual_unit_id, "vu_000002");
+    assert_eq!(response.results[1].visual_unit_id, "vu_000001");
+    assert_eq!(
+        response.debug.as_ref().unwrap()["vector_spaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_filters() {
     set_test_app_env();
     let response = build_search_response(
         SearchPlan {
             library_id: "lib_000001".to_string(),
-            collection_name: stable_collection_name("lib_000001", MULTIVECTOR_INDEX_LINE),
             top_k: 10,
             cursor_offset: 0,
             kind_filter: Some(BTreeSet::from(["video_segment".to_string()])),
@@ -937,55 +1451,55 @@ fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_fil
                 start_ms: 600,
                 end_ms: 1400,
             }),
-            target_index_lines: vec![MULTIVECTOR_INDEX_LINE.to_string()],
+            target_content_types: vec!["video".to_string()],
+            unsupported_content_types: Vec::new(),
             active_visual_unit_ids: BTreeSet::from([
                 "vu_000001".to_string(),
                 "vu_000002".to_string(),
                 "vu_000003".to_string(),
             ]),
-            resolved_query_model: available_provider_selection(),
-            resolved_index_models: default_resolved_index_providers(),
+            execution_groups: available_execution_groups(&["video"]),
+            resolved_content_models: default_resolved_content_models(),
             debug: false,
         },
-        QueryEmbeddingResult {
-            vectors: vec![vec![0.1, 0.2, 0.3]],
-            pooled_vector: vec![0.1, 0.2, 0.3],
-        },
-        vec![
-            QdrantScoredPoint {
-                score: 0.9,
-                payload: Some(QdrantPointPayload {
-                    visual_unit_id: "vu_000001".to_string(),
-                    source_id: "src_000001".to_string(),
-                    source_path: "/library/videos/clip.mp4".to_string(),
-                    source_type: "video".to_string(),
-                    kind: "video_segment".to_string(),
-                    locator: json!({ "start_ms": 500, "end_ms": 1500, "duration_ms": 3000 }),
-                }),
-            },
-            QdrantScoredPoint {
-                score: 0.8,
-                payload: Some(QdrantPointPayload {
-                    visual_unit_id: "vu_000002".to_string(),
-                    source_id: "src_000002".to_string(),
-                    source_path: "/library/videos/clip.mp4".to_string(),
-                    source_type: "video".to_string(),
-                    kind: "video_segment".to_string(),
-                    locator: json!({ "start_ms": 1600, "end_ms": 2200, "duration_ms": 3000 }),
-                }),
-            },
-            QdrantScoredPoint {
-                score: 0.7,
-                payload: Some(QdrantPointPayload {
-                    visual_unit_id: "vu_000003".to_string(),
-                    source_id: "src_000003".to_string(),
-                    source_path: "/library/images/chart.png".to_string(),
-                    source_type: "image".to_string(),
-                    kind: "image".to_string(),
-                    locator: json!({ "path": "/library/images/chart.png" }),
-                }),
-            },
-        ],
+        executed_search_groups(
+            &["video"],
+            vec![
+                QdrantScoredPoint {
+                    score: 0.9,
+                    payload: Some(QdrantPointPayload {
+                        visual_unit_id: "vu_000001".to_string(),
+                        source_id: "src_000001".to_string(),
+                        source_path: "/library/videos/clip.mp4".to_string(),
+                        source_type: "video".to_string(),
+                        kind: "video_segment".to_string(),
+                        locator: json!({ "start_ms": 500, "end_ms": 1500, "duration_ms": 3000 }),
+                    }),
+                },
+                QdrantScoredPoint {
+                    score: 0.8,
+                    payload: Some(QdrantPointPayload {
+                        visual_unit_id: "vu_000002".to_string(),
+                        source_id: "src_000002".to_string(),
+                        source_path: "/library/videos/clip.mp4".to_string(),
+                        source_type: "video".to_string(),
+                        kind: "video_segment".to_string(),
+                        locator: json!({ "start_ms": 1600, "end_ms": 2200, "duration_ms": 3000 }),
+                    }),
+                },
+                QdrantScoredPoint {
+                    score: 0.7,
+                    payload: Some(QdrantPointPayload {
+                        visual_unit_id: "vu_000003".to_string(),
+                        source_id: "src_000003".to_string(),
+                        source_path: "/library/images/chart.png".to_string(),
+                        source_type: "image".to_string(),
+                        kind: "image".to_string(),
+                        locator: json!({ "path": "/library/images/chart.png" }),
+                    }),
+                },
+            ],
+        ),
     )
     .unwrap();
 
@@ -997,33 +1511,96 @@ fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_fil
 }
 
 #[test]
+fn prepare_import_groups_visual_units_by_vector_space() {
+    let pdf_path = unique_test_file_path("prepare-import-grouped.pdf");
+    let image_path = unique_test_file_path("prepare-import-grouped.png");
+    write_test_pdf(&pdf_path, 2);
+    fs::write(&image_path, b"png").unwrap();
+
+    let mut state = test_state();
+    state.provider_embedding_capabilities.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        EmbeddingCapabilities {
+            input_types: vec!["text".to_string(), "image".to_string()],
+            vector_types: vec![
+                "multi_vector_late_interaction".to_string(),
+                "single_vector".to_string(),
+            ],
+            supports_mixed_inputs: false,
+        },
+    );
+    state.global_content_types.insert(
+        "document".to_string(),
+        ContentTypeConfigRecord {
+            enabled: true,
+            model: format!(
+                "{}/{}",
+                LOCAL_SIDECAR_PROVIDER_ID, "athrael-soju/colqwen3.5-4.5B-v3"
+            ),
+            vector_type: "single_vector".to_string(),
+        },
+    );
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "prepare-import-grouped".to_string(),
+        })
+        .unwrap();
+
+    let prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![
+                    pdf_path.to_string_lossy().to_string(),
+                    image_path.to_string_lossy().to_string(),
+                ],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(prepared.vector_space_batches.len(), 2);
+    assert!(prepared
+        .vector_space_batches
+        .iter()
+        .any(|batch| batch.visual_units.iter().all(|item| item.kind == "image")));
+    assert!(prepared.vector_space_batches.iter().any(|batch| batch
+        .visual_units
+        .iter()
+        .all(|item| item.kind == "document_page")));
+
+    let _ = fs::remove_file(pdf_path);
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
 fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
     set_test_app_env();
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "search-filter-validation".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let invalid_cursor = run_async(state.prepare_text_search(&TextSearchRequest {
-            library_id: library.id.clone(),
-            text: "report".to_string(),
-            filters: None,
-            top_k: Some(5),
-            cursor: Some("bogus-cursor".to_string()),
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        text: "report".to_string(),
+        filters: None,
+        top_k: Some(5),
+        cursor: Some("bogus-cursor".to_string()),
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
     assert_eq!(invalid_cursor.payload.code, "validation_failed");
     assert_eq!(
@@ -1032,19 +1609,19 @@ fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
     );
 
     let invalid_time_range = run_async(state.prepare_text_search(&TextSearchRequest {
-            library_id: library.id,
-            text: "report".to_string(),
-            filters: Some(json!({
-                "time_range": {
-                    "start_ms": 1000,
-                    "end_ms": 1000,
-                }
-            })),
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id,
+        text: "report".to_string(),
+        filters: Some(json!({
+            "time_range": {
+                "start_ms": 1000,
+                "end_ms": 1000,
+            }
+        })),
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
     assert_eq!(invalid_time_range.payload.code, "validation_failed");
     assert_eq!(
@@ -1059,18 +1636,17 @@ fn prepare_image_search_requires_existing_temp_asset() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "image-search".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let image_path = unique_test_file_path("query.png");
     fs::write(&image_path, b"png").unwrap();
@@ -1088,18 +1664,18 @@ fn prepare_image_search_requires_existing_temp_asset() {
         .unwrap();
 
     let (plan, temp_asset) = run_async(state.prepare_image_search(&ImageSearchRequest {
-            library_id: library.id.clone(),
-            image_input: QueryImageInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some(asset.temp_asset_id.clone()),
-                visual_unit_id: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(true),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        image_input: QueryImageInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some(asset.temp_asset_id.clone()),
+            visual_unit_id: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(true),
+        target_content_types: None,
+    }))
     .unwrap();
 
     assert_eq!(plan.library_id, library.id);
@@ -1114,18 +1690,18 @@ fn prepare_image_search_requires_existing_temp_asset() {
     }
 
     let missing = run_async(state.prepare_image_search(&ImageSearchRequest {
-            library_id: library.id.clone(),
-            image_input: QueryImageInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some("temp_asset_999999".to_string()),
-                visual_unit_id: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        image_input: QueryImageInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some("temp_asset_999999".to_string()),
+            visual_unit_id: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(missing.payload.code, "not_found");
@@ -1138,18 +1714,17 @@ fn prepare_image_search_accepts_library_image_objects() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "image-search-library-object".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let image_path = unique_test_file_path("library-query.png");
     fs::write(&image_path, b"png").unwrap();
@@ -1170,18 +1745,18 @@ fn prepare_image_search_accepts_library_image_objects() {
         .insert(visual_unit.id.clone(), visual_unit.clone());
 
     let (plan, input) = run_async(state.prepare_image_search(&ImageSearchRequest {
-            library_id: library.id.clone(),
-            image_input: QueryImageInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                visual_unit_id: Some(visual_unit_id),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        image_input: QueryImageInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            visual_unit_id: Some(visual_unit_id),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
 
     assert_eq!(plan.library_id, library.id);
@@ -1203,18 +1778,17 @@ fn prepare_image_search_accepts_library_document_page_objects() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "document-page-query-object".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let pdf_path = unique_test_file_path("library-query-page.pdf");
     write_test_pdf(&pdf_path, 1);
@@ -1235,18 +1809,18 @@ fn prepare_image_search_accepts_library_document_page_objects() {
         .insert(visual_unit.id.clone(), visual_unit.clone());
 
     let (plan, input) = run_async(state.prepare_image_search(&ImageSearchRequest {
-            library_id: library.id.clone(),
-            image_input: QueryImageInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                visual_unit_id: Some(visual_unit_id),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        image_input: QueryImageInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            visual_unit_id: Some(visual_unit_id),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
 
     assert_eq!(plan.library_id, library.id);
@@ -1268,18 +1842,17 @@ fn prepare_image_search_rejects_unsupported_library_object_query_images() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "unsupported-query-object".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let visual_unit_id = "vu_video_000001".to_string();
     state
@@ -1302,18 +1875,18 @@ fn prepare_image_search_rejects_unsupported_library_object_query_images() {
         );
 
     let error = run_async(state.prepare_image_search(&ImageSearchRequest {
-            library_id: library.id.clone(),
-            image_input: QueryImageInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                visual_unit_id: Some(visual_unit_id),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        image_input: QueryImageInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            visual_unit_id: Some(visual_unit_id),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "not_supported");
@@ -1328,10 +1901,9 @@ fn get_temp_query_asset_rejects_expired_assets() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "expired-query-image".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -1373,10 +1945,9 @@ fn prune_temp_query_assets_removes_expired_asset_records_and_files() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "prune-expired-query-image".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -1413,10 +1984,9 @@ fn prune_temp_query_assets_removes_missing_asset_records() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "prune-missing-query-image".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -1447,10 +2017,9 @@ fn import_paths_accepts_video_and_generates_video_segments() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "video-import".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
 
@@ -1491,18 +2060,17 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "video-search".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let video_path = unique_test_file_path("query.mp4");
     write_test_video(&video_path, 3.0);
@@ -1519,20 +2087,20 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
         .unwrap();
 
     let (plan, temp_input) = run_async(state.prepare_video_search(&VideoSearchRequest {
-            library_id: library.id.clone(),
-            video_input: QueryVideoInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some(asset.temp_asset_id.clone()),
-                source_id: None,
-                visual_unit_id: None,
-                locator: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        video_input: QueryVideoInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some(asset.temp_asset_id.clone()),
+            source_id: None,
+            visual_unit_id: None,
+            locator: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
     assert_eq!(plan.library_id, library.id);
     assert_eq!(temp_input.path, video_path.to_string_lossy());
@@ -1550,20 +2118,20 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
         .insert(source.id.clone(), source.clone());
 
     let (_, library_input) = run_async(state.prepare_video_search(&VideoSearchRequest {
-            library_id: library.id.clone(),
-            video_input: QueryVideoInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                source_id: Some(source.id),
-                visual_unit_id: None,
-                locator: Some(json!({ "start_ms": 500, "end_ms": 1500 })),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        video_input: QueryVideoInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            source_id: Some(source.id),
+            visual_unit_id: None,
+            locator: Some(json!({ "start_ms": 500, "end_ms": 1500 })),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
 
     assert_eq!(library_input.path, video_path.to_string_lossy());
@@ -1580,18 +2148,17 @@ fn prepare_video_search_rejects_invalid_ranges() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "video-range-errors".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let video_path = unique_test_file_path("invalid-range.mp4");
     write_test_video(&video_path, 2.0);
@@ -1608,20 +2175,20 @@ fn prepare_video_search_rejects_invalid_ranges() {
         .unwrap();
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-            library_id: library.id.clone(),
-            video_input: QueryVideoInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some(asset.temp_asset_id),
-                source_id: None,
-                visual_unit_id: None,
-                locator: Some(json!({ "start_ms": 1500, "end_ms": 2500 })),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        video_input: QueryVideoInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some(asset.temp_asset_id),
+            source_id: None,
+            visual_unit_id: None,
+            locator: Some(json!({ "start_ms": 1500, "end_ms": 2500 })),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "validation_failed");
@@ -1635,18 +2202,17 @@ fn prepare_video_search_rejects_expired_temp_assets() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "expired-query-video".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let video_path = unique_test_file_path("expired-query.mp4");
     write_test_video(&video_path, 2.0);
@@ -1668,20 +2234,20 @@ fn prepare_video_search_rejects_expired_temp_assets() {
         .expires_at_ms = 0;
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-            library_id: library.id.clone(),
-            video_input: QueryVideoInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some(asset.temp_asset_id),
-                source_id: None,
-                visual_unit_id: None,
-                locator: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        video_input: QueryVideoInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some(asset.temp_asset_id),
+            source_id: None,
+            visual_unit_id: None,
+            locator: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "not_found");
@@ -1694,18 +2260,17 @@ fn prepare_video_search_rejects_non_video_library_sources() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "unsupported-video-query-source".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     state
         .libraries
@@ -1733,20 +2298,20 @@ fn prepare_video_search_rejects_non_video_library_sources() {
         );
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-            library_id: library.id.clone(),
-            video_input: QueryVideoInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                source_id: Some("src_image_000001".to_string()),
-                visual_unit_id: None,
-                locator: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        video_input: QueryVideoInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            source_id: Some("src_image_000001".to_string()),
+            visual_unit_id: None,
+            locator: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "not_supported");
@@ -1760,18 +2325,17 @@ fn prepare_video_search_accepts_library_video_segments() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "video-segment-query".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let visual_unit_id = "vu_video_000123".to_string();
     let locator = json!({ "start_ms": 600, "end_ms": 1800, "duration_ms": 3000 });
@@ -1795,20 +2359,20 @@ fn prepare_video_search_accepts_library_video_segments() {
         );
 
     let (_, input) = run_async(state.prepare_video_search(&VideoSearchRequest {
-            library_id: library.id.clone(),
-            video_input: QueryVideoInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                source_id: None,
-                visual_unit_id: Some(visual_unit_id),
-                locator: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        video_input: QueryVideoInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            source_id: None,
+            visual_unit_id: Some(visual_unit_id),
+            locator: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
 
     assert_eq!(input.path, "/tmp/example.mp4");
@@ -1820,18 +2384,17 @@ fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "video-segment-query-locator".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let visual_unit_id = "vu_video_000124".to_string();
     state
@@ -1854,20 +2417,20 @@ fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
         );
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-            library_id: library.id.clone(),
-            video_input: QueryVideoInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                source_id: None,
-                visual_unit_id: Some(visual_unit_id),
-                locator: Some(json!({ "start_ms": 0, "end_ms": 1000 })),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        video_input: QueryVideoInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            source_id: None,
+            visual_unit_id: Some(visual_unit_id),
+            locator: Some(json!({ "start_ms": 0, "end_ms": 1000 })),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "validation_failed");
@@ -1879,18 +2442,17 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "document-search".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let pdf_path = unique_test_file_path("query-document.pdf");
     write_test_pdf(&pdf_path, 3);
@@ -1907,19 +2469,19 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
         .unwrap();
 
     let (plan, temp_input) = run_async(state.prepare_document_search(&DocumentSearchRequest {
-            library_id: library.id.clone(),
-            document_input: QueryDocumentInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some(asset.temp_asset_id.clone()),
-                source_id: None,
-                locator: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        document_input: QueryDocumentInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some(asset.temp_asset_id.clone()),
+            source_id: None,
+            locator: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
     assert_eq!(plan.library_id, library.id);
     assert_eq!(temp_input.path, pdf_path.to_string_lossy());
@@ -1937,19 +2499,19 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
         .insert(source.id.clone(), source.clone());
 
     let (_, library_input) = run_async(state.prepare_document_search(&DocumentSearchRequest {
-            library_id: library.id.clone(),
-            document_input: QueryDocumentInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                source_id: Some(source.id),
-                locator: Some(json!({ "start_page": 2, "end_page": 3 })),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        document_input: QueryDocumentInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            source_id: Some(source.id),
+            locator: Some(json!({ "start_page": 2, "end_page": 3 })),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap();
 
     assert_eq!(library_input.path, pdf_path.to_string_lossy());
@@ -1967,18 +2529,17 @@ fn prepare_document_search_rejects_invalid_ranges() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "document-range-errors".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let pdf_path = unique_test_file_path("invalid-document-range.pdf");
     write_test_pdf(&pdf_path, 2);
@@ -1995,19 +2556,19 @@ fn prepare_document_search_rejects_invalid_ranges() {
         .unwrap();
 
     let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
-            library_id: library.id.clone(),
-            document_input: QueryDocumentInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some(asset.temp_asset_id),
-                source_id: None,
-                locator: Some(json!({ "start_page": 2, "end_page": 5 })),
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        document_input: QueryDocumentInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some(asset.temp_asset_id),
+            source_id: None,
+            locator: Some(json!({ "start_page": 2, "end_page": 5 })),
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "validation_failed");
@@ -2021,18 +2582,17 @@ fn prepare_document_search_rejects_expired_temp_assets() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "expired-query-document".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     let pdf_path = unique_test_file_path("expired-query-document.pdf");
     write_test_pdf(&pdf_path, 2);
@@ -2054,19 +2614,19 @@ fn prepare_document_search_rejects_expired_temp_assets() {
         .expires_at_ms = 0;
 
     let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
-            library_id: library.id.clone(),
-            document_input: QueryDocumentInputRequest {
-                kind: "temp_asset".to_string(),
-                temp_asset_id: Some(asset.temp_asset_id),
-                source_id: None,
-                locator: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        document_input: QueryDocumentInputRequest {
+            kind: "temp_asset".to_string(),
+            temp_asset_id: Some(asset.temp_asset_id),
+            source_id: None,
+            locator: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "not_found");
@@ -2079,18 +2639,17 @@ fn prepare_document_search_rejects_non_pdf_library_sources() {
     let mut state = test_state();
     let library = state
         .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
             name: "unsupported-document-query-source".to_string(),
-            config: Some(CreateLibraryConfigRequest {
-                enabled_index_lines: vec!["multivector".to_string()],
-            }),
         })
         .unwrap();
     state
         .libraries
         .get_mut(&library.id)
         .unwrap()
-        .active_index_lines
-        .insert(MULTIVECTOR_INDEX_LINE.to_string());
+        .active_vector_spaces
+        .insert(available_vector_space_id());
 
     state
         .libraries
@@ -2118,19 +2677,19 @@ fn prepare_document_search_rejects_non_pdf_library_sources() {
         );
 
     let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
-            library_id: library.id.clone(),
-            document_input: QueryDocumentInputRequest {
-                kind: "library_object".to_string(),
-                temp_asset_id: None,
-                source_id: Some("src_image_000002".to_string()),
-                locator: None,
-            },
-            filters: None,
-            top_k: Some(5),
-            cursor: None,
-            debug: Some(false),
-            target_index_lines: None,
-        }))
+        library_id: library.id.clone(),
+        document_input: QueryDocumentInputRequest {
+            kind: "library_object".to_string(),
+            temp_asset_id: None,
+            source_id: Some("src_image_000002".to_string()),
+            locator: None,
+        },
+        filters: None,
+        top_k: Some(5),
+        cursor: None,
+        debug: Some(false),
+        target_content_types: None,
+    }))
     .unwrap_err();
 
     assert_eq!(error.payload.code, "not_supported");
@@ -2209,6 +2768,41 @@ fn run_async<T>(future: impl Future<Output = T>) -> T {
 
 fn test_state() -> AppState {
     let mut state = AppState::default();
+    state.global_content_types = BTreeMap::from([
+        (
+            "image".to_string(),
+            ContentTypeConfigRecord {
+                enabled: true,
+                model: format!(
+                    "{}/{}",
+                    LOCAL_SIDECAR_PROVIDER_ID, "athrael-soju/colqwen3.5-4.5B-v3"
+                ),
+                vector_type: "multi_vector_late_interaction".to_string(),
+            },
+        ),
+        (
+            "document".to_string(),
+            ContentTypeConfigRecord {
+                enabled: true,
+                model: format!(
+                    "{}/{}",
+                    LOCAL_SIDECAR_PROVIDER_ID, "athrael-soju/colqwen3.5-4.5B-v3"
+                ),
+                vector_type: "multi_vector_late_interaction".to_string(),
+            },
+        ),
+        (
+            "video".to_string(),
+            ContentTypeConfigRecord {
+                enabled: true,
+                model: format!(
+                    "{}/{}",
+                    LOCAL_SIDECAR_PROVIDER_ID, "athrael-soju/colqwen3.5-4.5B-v3"
+                ),
+                vector_type: "multi_vector_late_interaction".to_string(),
+            },
+        ),
+    ]);
     seed_available_provider_probe_cache(&mut state);
     state
 }
@@ -2229,16 +2823,29 @@ fn seed_available_provider_probe_cache(state: &mut AppState) {
             model_revision: Some("main".to_string()),
         },
     );
+    state.provider_embedding_capabilities.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        local_sidecar_embedding_capabilities(),
+    );
+    state.provider_execution_input_types.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        local_sidecar_execution_input_types(),
+    );
 }
 
 fn available_provider_selection() -> ResolvedExecutionModelSelection {
     ResolvedExecutionModelSelection {
+        vector_type: "multi_vector_late_interaction".to_string(),
+        vector_space_id: available_vector_space_id(),
+        execution_input_types: local_sidecar_execution_input_types(),
         summary: ResolvedModelSelectionPayload {
             binding_source: "global_default".to_string(),
             provider_id: LOCAL_SIDECAR_PROVIDER_ID.to_string(),
             provider_kind: LOCAL_SIDECAR_PROVIDER_KIND.to_string(),
             model_id: "athrael-soju/colqwen3.5-4.5B-v3".to_string(),
+            model_version: "main".to_string(),
             model_revision: Some("main".to_string()),
+            embedding_capabilities: local_sidecar_embedding_capabilities(),
             status: "available".to_string(),
             message: "Resolved search model for tests.".to_string(),
             last_probed_at: None,
@@ -2246,11 +2853,97 @@ fn available_provider_selection() -> ResolvedExecutionModelSelection {
     }
 }
 
-fn default_resolved_index_providers() -> BTreeMap<String, ResolvedExecutionModelSelection> {
-    BTreeMap::from([(
-        MULTIVECTOR_INDEX_LINE.to_string(),
-        available_provider_selection(),
-    )])
+fn available_execution_groups(content_types: &[&str]) -> Vec<VectorSpaceExecutionGroup> {
+    vec![VectorSpaceExecutionGroup {
+        vector_space_id: available_vector_space_id(),
+        content_types: content_types
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+        resolved_model: available_provider_selection(),
+    }]
+}
+
+fn executed_search_groups(
+    _content_types: &[&str],
+    candidates: Vec<QdrantScoredPoint>,
+) -> Vec<crate::indexing::ExecutedSearchGroup> {
+    vec![crate::indexing::ExecutedSearchGroup {
+        query_embedding: QueryEmbeddingResult {
+            vectors: vec![vec![0.1, 0.2, 0.3]],
+            pooled_vector: vec![0.1, 0.2, 0.3],
+        },
+        candidates,
+    }]
+}
+
+fn available_vector_space_id() -> String {
+    vector_space_id(
+        LOCAL_SIDECAR_PROVIDER_ID,
+        "athrael-soju/colqwen3.5-4.5B-v3",
+        "main",
+        "multi_vector_late_interaction",
+    )
+}
+
+fn default_resolved_content_models() -> BTreeMap<String, ResolvedContentModelSelectionPayload> {
+    let summary = available_provider_selection().summary;
+    BTreeMap::from([
+        (
+            "image".to_string(),
+            ResolvedContentModelSelectionPayload {
+                binding_source: "global_default".to_string(),
+                content_type: "image".to_string(),
+                provider_id: summary.provider_id.clone(),
+                provider_kind: summary.provider_kind.clone(),
+                model_id: summary.model_id.clone(),
+                model_version: summary.model_version.clone(),
+                model_revision: summary.model_revision.clone(),
+                vector_type: "multi_vector_late_interaction".to_string(),
+                vector_space_id: Some(available_vector_space_id()),
+                embedding_capabilities: summary.embedding_capabilities.clone(),
+                status: summary.status.clone(),
+                message: summary.message.clone(),
+                last_probed_at: summary.last_probed_at.clone(),
+            },
+        ),
+        (
+            "document".to_string(),
+            ResolvedContentModelSelectionPayload {
+                binding_source: "global_default".to_string(),
+                content_type: "document".to_string(),
+                provider_id: summary.provider_id.clone(),
+                provider_kind: summary.provider_kind.clone(),
+                model_id: summary.model_id.clone(),
+                model_version: summary.model_version.clone(),
+                model_revision: summary.model_revision.clone(),
+                vector_type: "multi_vector_late_interaction".to_string(),
+                vector_space_id: Some(available_vector_space_id()),
+                embedding_capabilities: summary.embedding_capabilities.clone(),
+                status: summary.status.clone(),
+                message: summary.message.clone(),
+                last_probed_at: summary.last_probed_at.clone(),
+            },
+        ),
+        (
+            "video".to_string(),
+            ResolvedContentModelSelectionPayload {
+                binding_source: "global_default".to_string(),
+                content_type: "video".to_string(),
+                provider_id: summary.provider_id.clone(),
+                provider_kind: summary.provider_kind.clone(),
+                model_id: summary.model_id.clone(),
+                model_version: summary.model_version.clone(),
+                model_revision: summary.model_revision,
+                vector_type: "multi_vector_late_interaction".to_string(),
+                vector_space_id: Some(available_vector_space_id()),
+                embedding_capabilities: summary.embedding_capabilities,
+                status: summary.status,
+                message: summary.message,
+                last_probed_at: summary.last_probed_at,
+            },
+        ),
+    ])
 }
 
 fn simulated_active_namespace_probe(

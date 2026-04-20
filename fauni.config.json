@@ -1,0 +1,62 @@
+{
+  "$schema": "https://fauni-search/config.json",
+  "provider": {
+    "local_sidecar": {
+      "kind": "local_sidecar",
+      "display_name": "Local Sidecar",
+      "enabled": true,
+      "active_model": "athrael-soju/colqwen3.5-4.5B-v3",
+      "models": {
+        "athrael-soju/colqwen3.5-4.5B-v3": {
+          "enabled": true,
+          "version": "main",
+          "embedding_capabilities": {
+            "input_types": ["text", "image"],
+            "vector_types": ["multi_vector_late_interaction"],
+            "supports_mixed_inputs": false
+          }
+        }
+      }
+    },
+    "openai_compatible": {
+      "kind": "openai_compatible",
+      "display_name": "OpenAI-Compatible",
+      "enabled": true,
+      "base_url": "http://127.0.0.1:8000/v1",
+      "models": {
+        "Qwen/Qwen3-VL-Embedding-2B": {
+          "enabled": true,
+          "version": "main",
+          "embedding_capabilities": {
+            "input_types": ["text", "image", "video"],
+            "vector_types": ["single_vector"],
+            "supports_mixed_inputs": true
+          }
+        }
+      }
+    }
+  },
+  "content_types": {
+    "image": {
+      "enabled": true,
+      "model": "local_sidecar/athrael-soju/colqwen3.5-4.5B-v3",
+      "vector_type": "multi_vector_late_interaction"
+    },
+    "document": {
+      "enabled": true,
+      "model": "local_sidecar/athrael-soju/colqwen3.5-4.5B-v3",
+      "vector_type": "multi_vector_late_interaction"
+    },
+    "video": {
+      "enabled": true,
+      "model": "local_sidecar/athrael-soju/colqwen3.5-4.5B-v3",
+      "vector_type": "multi_vector_late_interaction"
+    },
+    "text": {
+      "enabled": false,
+      "model": "openai_compatible/Qwen/Qwen3-VL-Embedding-2B",
+      "vector_type": "single_vector"
+    }
+  },
+  "libraries": {}
+}

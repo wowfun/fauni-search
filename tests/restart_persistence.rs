@@ -17,8 +17,7 @@ async fn libraries_and_source_roots_survive_restart() {
         .post_json(
             "/libraries",
             json!({
-                "name": "restart-persistence",
-                "config": { "enabled_index_lines": ["multivector"] }
+                "name": "restart-persistence"
             }),
         )
         .await;

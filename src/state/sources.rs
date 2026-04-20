@@ -540,37 +540,45 @@ impl AppState {
         request: CreateLibraryRequest,
     ) -> Result<LibrarySnapshot, ApiError> {
         self.commit_durable_api(|state| {
-            let name = request.name.trim();
-            if name.is_empty() {
-                return Err(ApiError::validation_failed(
-                    "Library name must not be empty.",
-                    Some(json!({ "field": "name" })),
-                ));
-            }
+            let display_name = request
+                .display_name
+                .as_deref()
+                .or(Some(request.name.as_str()))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    request
+                        .library_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                })
+                .ok_or_else(|| {
+                    ApiError::validation_failed(
+                        "Library display_name must not be empty.",
+                        Some(json!({ "field": "display_name" })),
+                    )
+                })?;
 
-            let enabled_index_lines =
-                normalize_index_lines(request.config.map(|config| config.enabled_index_lines));
-
-            if enabled_index_lines != [MULTIVECTOR_INDEX_LINE.to_string()] {
+            let library_id = match request.library_id.as_deref() {
+                Some(value) => normalize_library_id(value)?,
+                None => state.generate_library_slug(&display_name),
+            };
+            if state.libraries.contains_key(&library_id) {
                 return Err(ApiError::validation_failed(
-                    "Current 100-text-search implementation requires config.enabled_index_lines to be exactly [\"multivector\"].",
+                    "library_id is already in use.",
                     Some(json!({
-                        "field": "config.enabled_index_lines",
-                        "expected": [MULTIVECTOR_INDEX_LINE],
-                        "received": enabled_index_lines,
+                        "field": "library_id",
+                        "library_id": library_id,
                     })),
                 ));
             }
-
-            let library_id = state.next_library_id();
             let record = LibraryRecord {
                 id: library_id.clone(),
-                name: name.to_string(),
-                collection_name: stable_collection_name(&library_id, MULTIVECTOR_INDEX_LINE),
-                config: LibraryConfigPayload {
-                    enabled_index_lines,
-                },
-                model_overrides: default_library_model_overrides(),
+                display_name,
+                content_type_overrides: BTreeMap::new(),
                 source_roots: BTreeMap::new(),
                 source_root_order: Vec::new(),
                 sources: BTreeMap::new(),
@@ -578,7 +586,8 @@ impl AppState {
                 visual_units: BTreeMap::new(),
                 visual_unit_order: Vec::new(),
                 latest_job_id: None,
-                active_index_lines: BTreeSet::new(),
+                active_vector_spaces: BTreeSet::new(),
+                retired_vector_spaces: BTreeMap::new(),
             };
 
             let snapshot = state.library_snapshot(&record);
@@ -593,16 +602,13 @@ impl AppState {
         library_id: &str,
         request: ImportPathsRequest,
     ) -> Result<PreparedImport, ApiError> {
-        let (collection_name, had_existing_visual_units) = self
+        let active_vector_spaces = self
             .libraries
             .get(library_id)
-            .map(|library| {
-                (
-                    library.collection_name.clone(),
-                    !library.visual_units.is_empty(),
-                )
-            })
+            .map(|library| library.active_vector_spaces.clone())
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        let vector_space_bindings =
+            self.configured_vector_space_bindings_for_library(library_id)?;
 
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
@@ -627,7 +633,7 @@ impl AppState {
                         normalized_path: Some(classification.normalized_path),
                         reason_code: "accepted".to_string(),
                         message: format!(
-                            "Accepted as {} input for the pending multivector index.",
+                            "Accepted as {} input for the library.",
                             classification.source_type
                         ),
                         source_id: Some(classification.source_id),
@@ -645,14 +651,37 @@ impl AppState {
             }
         }
 
+        let vector_space_batches = vector_space_bindings
+            .into_iter()
+            .filter_map(|binding| {
+                let visual_units = new_visual_units
+                    .iter()
+                    .filter(|visual_unit| {
+                        binding.content_types.iter().any(|content_type| {
+                            import_content_type_matches_visual_unit(content_type, &visual_unit.kind)
+                        })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if visual_units.is_empty() {
+                    return None;
+                }
+                Some(PreparedImportVectorSpaceBatch {
+                    vector_space_id: binding.vector_space_id.clone(),
+                    content_types: binding.content_types,
+                    had_existing_index: active_vector_spaces.contains(&binding.vector_space_id),
+                    visual_units,
+                })
+            })
+            .collect::<Vec<_>>();
+
         Ok(PreparedImport {
             library_id: library_id.to_string(),
-            collection_name,
-            had_existing_visual_units,
             accepted,
             rejected,
             sources: new_sources,
             visual_units: new_visual_units,
+            vector_space_batches,
         })
     }
 
@@ -813,25 +842,10 @@ impl AppState {
             })
             .count();
 
-        let index_lines = library
-            .config
-            .enabled_index_lines
-            .iter()
-            .map(|index_line| LibraryIndexLineStatus {
-                index_line: index_line.clone(),
-                status: if library.active_index_lines.contains(index_line) {
-                    "ready".to_string()
-                } else {
-                    "not_ready".to_string()
-                },
-            })
-            .collect();
-
         LibrarySnapshot {
             id: library.id.clone(),
-            name: library.name.clone(),
-            config: library.config.clone(),
-            index_lines,
+            display_name: library.display_name.clone(),
+            name: library.display_name.clone(),
             counts: LibraryCounts {
                 accepted_items: library
                     .sources
@@ -842,6 +856,22 @@ impl AppState {
                 pending_jobs,
             },
             latest_job_id: library.latest_job_id.clone(),
+        }
+    }
+
+    fn generate_library_slug(&self, display_name: &str) -> String {
+        let base = slugify_library_id(display_name);
+        if !self.libraries.contains_key(&base) {
+            return base;
+        }
+
+        let mut suffix = 2_u64;
+        loop {
+            let candidate = format!("{base}-{suffix}");
+            if !self.libraries.contains_key(&candidate) {
+                return candidate;
+            }
+            suffix += 1;
         }
     }
 
@@ -966,5 +996,64 @@ impl AppState {
             locator,
             neighbor_context,
         }
+    }
+}
+
+fn import_content_type_matches_visual_unit(content_type: &str, visual_unit_kind: &str) -> bool {
+    match content_type {
+        "image" => visual_unit_kind == "image",
+        "document" => visual_unit_kind == "document_page",
+        "video" => visual_unit_kind == "video_segment",
+        "text" => visual_unit_kind == "text",
+        _ => false,
+    }
+}
+
+fn normalize_library_id(value: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::validation_failed(
+            "library_id must not be empty.",
+            Some(json!({ "field": "library_id" })),
+        ));
+    }
+
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
+    {
+        return Err(ApiError::validation_failed(
+            "library_id must contain only lowercase letters, digits, '-' or '_'.",
+            Some(json!({ "field": "library_id" })),
+        ));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn slugify_library_id(display_name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for ch in display_name.trim().chars() {
+        let lowered = ch.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            slug.push(lowered);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    let slug = slug.trim_start_matches('-').to_string();
+    if slug.is_empty() {
+        "library".to_string()
+    } else {
+        slug
     }
 }

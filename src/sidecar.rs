@@ -3,7 +3,8 @@ use crate::{
     model::{ProviderConfigRecord, VisualUnitRecord},
     provider::{
         current_rfc3339_timestamp, local_sidecar_embedding_capabilities,
-        ProviderRuntimeModelSnapshot,
+        local_sidecar_execution_input_types, ProviderRuntimeModelSnapshot,
+        QUERY_KIND_DOCUMENT, QUERY_KIND_IMAGE, QUERY_KIND_TEXT, QUERY_KIND_VIDEO,
     },
     SIDECAR_REQUEST_TIMEOUT_SECS,
 };
@@ -48,7 +49,8 @@ pub(crate) struct LocalSidecarProviderSnapshot {
     pub(crate) probe: ProviderProbeSnapshot,
     pub(crate) runtime_model: ProviderRuntimeModelSnapshot,
     pub(crate) embedding_capabilities: EmbeddingCapabilities,
-    pub(crate) _runtime_adapters: Vec<String>,
+    pub(crate) execution_input_types: Vec<String>,
+    pub(crate) runtime_adapters: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -554,7 +556,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                 },
                 runtime_model: fallback_runtime_model,
                 embedding_capabilities: local_sidecar_embedding_capabilities(),
-                _runtime_adapters: Vec::new(),
+                execution_input_types: Vec::new(),
+                runtime_adapters: Vec::new(),
             };
         }
     };
@@ -578,7 +581,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                 },
                 runtime_model: fallback_runtime_model,
                 embedding_capabilities: local_sidecar_embedding_capabilities(),
-                _runtime_adapters: Vec::new(),
+                execution_input_types: Vec::new(),
+                runtime_adapters: Vec::new(),
             };
         }
     };
@@ -595,7 +599,8 @@ pub(crate) async fn probe_local_sidecar_provider(
             },
             runtime_model: fallback_runtime_model,
             embedding_capabilities: local_sidecar_embedding_capabilities(),
-            _runtime_adapters: Vec::new(),
+            execution_input_types: Vec::new(),
+            runtime_adapters: Vec::new(),
         };
     }
 
@@ -610,7 +615,8 @@ pub(crate) async fn probe_local_sidecar_provider(
                 },
                 runtime_model: fallback_runtime_model,
                 embedding_capabilities: local_sidecar_embedding_capabilities(),
-                _runtime_adapters: Vec::new(),
+                execution_input_types: Vec::new(),
+                runtime_adapters: Vec::new(),
             };
         }
     };
@@ -620,18 +626,20 @@ pub(crate) async fn probe_local_sidecar_provider(
         .and_then(Value::as_array)
         .and_then(|operations| {
             operations.iter().find_map(|operation| {
-                operation.get("model").map(|model| ProviderRuntimeModelSnapshot {
-                    model_id: model
-                        .get("model_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| fallback_runtime_model.model_id.clone()),
-                    model_revision: model
-                        .get("revision")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| fallback_runtime_model.model_revision.clone()),
-                })
+                operation
+                    .get("model")
+                    .map(|model| ProviderRuntimeModelSnapshot {
+                        model_id: model
+                            .get("model_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| fallback_runtime_model.model_id.clone()),
+                        model_revision: model
+                            .get("revision")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| fallback_runtime_model.model_revision.clone()),
+                    })
             })
         })
         .unwrap_or_else(|| fallback_runtime_model.clone());
@@ -654,6 +662,18 @@ pub(crate) async fn probe_local_sidecar_provider(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let execution_input_types = payload
+        .get("execution_input_types")
+        .and_then(Value::as_array)
+        .map(|input_types| {
+            input_types
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|input_types| !input_types.is_empty())
+        .unwrap_or_else(|| derive_execution_input_types_from_capabilities(&payload));
 
     let can_service = payload
         .pointer("/availability/can_service")
@@ -677,7 +697,8 @@ pub(crate) async fn probe_local_sidecar_provider(
             },
             runtime_model,
             embedding_capabilities,
-            _runtime_adapters: runtime_adapters,
+            execution_input_types,
+            runtime_adapters: runtime_adapters,
         };
     }
 
@@ -687,7 +708,11 @@ pub(crate) async fn probe_local_sidecar_provider(
         .map(|operations| {
             operations
                 .iter()
-                .filter(|item| item.get("supported").and_then(Value::as_bool).unwrap_or(false))
+                .filter(|item| {
+                    item.get("supported")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
                 .filter_map(|item| item.get("operation_kind").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect::<Vec<_>>()
@@ -709,7 +734,8 @@ pub(crate) async fn probe_local_sidecar_provider(
             },
             runtime_model,
             embedding_capabilities,
-            _runtime_adapters: runtime_adapters,
+            execution_input_types,
+            runtime_adapters: runtime_adapters,
         };
     }
 
@@ -724,8 +750,59 @@ pub(crate) async fn probe_local_sidecar_provider(
         },
         runtime_model,
         embedding_capabilities,
-        _runtime_adapters: runtime_adapters,
+        execution_input_types,
+        runtime_adapters: runtime_adapters,
     }
+}
+
+fn derive_execution_input_types_from_capabilities(payload: &Value) -> Vec<String> {
+    let mut execution_input_types = Vec::new();
+    let supported_operations = payload
+        .get("operations")
+        .and_then(Value::as_array)
+        .map(|operations| {
+            operations
+                .iter()
+                .filter(|operation| {
+                    operation
+                        .get("supported")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .filter_map(|operation| operation.get("operation_kind").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let runtime_adapters = payload
+        .get("runtime_adapters")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    if supported_operations.contains(&"query_embedding") {
+        execution_input_types.push(QUERY_KIND_TEXT.to_string());
+    }
+    if supported_operations.contains(&"image_query_embedding") {
+        execution_input_types.push(QUERY_KIND_IMAGE.to_string());
+    }
+    if supported_operations.contains(&"document_query_embedding")
+        || runtime_adapters.contains(&"document_query_via_page_images")
+    {
+        execution_input_types.push(QUERY_KIND_DOCUMENT.to_string());
+    }
+    if supported_operations.contains(&"video_query_embedding")
+        || runtime_adapters.contains(&"video_query_via_frame_images")
+    {
+        execution_input_types.push(QUERY_KIND_VIDEO.to_string());
+    }
+
+    if execution_input_types.is_empty() {
+        return local_sidecar_execution_input_types();
+    }
+
+    execution_input_types.sort();
+    execution_input_types.dedup();
+    execution_input_types
 }
 
 fn required_local_sidecar_operations() -> Vec<String> {

@@ -218,6 +218,35 @@ tail -n 50 data/runtime/logs/ui.log
 处理：
 - app 启不来：先看 `app.log`，常见是端口冲突或 Rust 运行失败
 - sidecar 启不来：先看 `sidecar.log`，常见是 `.venv` 缺依赖或环境变量不对
+
+## 检测到 legacy runtime 数据，要求先 cutover
+
+症状：
+- `run.sh` 直接报 `Legacy runtime data detected for this environment`
+- 旧的 `state.sqlite` 或 Qdrant storage 还在，但 `${APP_RUNTIME_DIR}/runtime-config.json` 不存在
+
+检查：
+
+```bash
+ls -l "${APP_RUNTIME_DIR:-data/runtime/app}"
+ls -l "${QDRANT_STORAGE_DIR:-data/runtime/qdrant}"
+```
+
+处理：
+- 当前本地运行面已经把 provider/model 的实例级覆盖事实源切到 `${APP_RUNTIME_DIR}/runtime-config.json`
+- 对旧世代 runtime，不做原地兼容迁移；需要先显式执行 cutover
+
+```bash
+bash scripts/local/cutover-runtime.sh
+```
+
+- `--dev` 隔离运行面也要单独执行：
+
+```bash
+bash scripts/local/cutover-runtime.sh --dev
+```
+
+- `cutover-runtime.sh` 只归档旧 `app/` 与 `qdrant/`，不会移动下载缓存、模型缓存或日志
 - UI 启不来：先看 `ui.log`，常见是端口冲突或 `ui/node_modules` 没准备好
 
 如果以上都不明显，回到第一步重新跑：
@@ -430,6 +459,30 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 - 当前视频 smoke 依赖本地 `ffmpeg` / `ffprobe` 做 clip 与截图派生；如果命令不存在，先在宿主机安装对应工具后再重跑
 - 如果失败发生在派生阶段，优先检查 local-only manifest 路径与视频样本路径是否仍然存在
 - 如果失败发生在查询视频上传或 `/search/video` 阶段，优先检查 app 日志中的 `validation_failed`、`not_found` 或 `not_ready`
+
+## `smoke-runtime-health.sh` 失败
+
+症状：
+- `smoke-runtime-health.sh` 报 app / sidecar / Qdrant 本地端口不可达
+- 脚本报 `runtime-health did not include local_sidecar diagnostics`
+- 脚本报 `execution_input_types` 缺少 `document` 或 `video`
+- 脚本报 `vector-space diagnostics did not reflect the shared ColQwen execution surface`
+
+检查：
+
+```bash
+bash scripts/local/status.sh --dev --json
+curl -s http://127.0.0.1:54210/runtime-health
+curl -s http://127.0.0.1:54210/libraries
+tail -n 80 data/runtime/dev/logs/app.log
+tail -n 80 data/runtime/dev/logs/sidecar.log
+```
+
+处理：
+- 先确认 `fauni.config.json` 中 `image`、`document`、`video` 都指向 `local_sidecar/athrael-soju/colqwen3.5-4.5B-v3`
+- 再确认 `GET /runtime-health` 中 `local_sidecar.execution_input_types` 为 `text,image,document,video`
+- 如果 `vector-space diagnostics` 为空，优先检查导入任务是否已经到达 `activated`
+- 如果只缺 `document` 或 `video`，优先检查 sidecar `/capabilities` 是否仍返回旧的 `embedding_capabilities` 语义而未包含新的执行输入层
 - 如果失败发生在 `source_id` 复用路径，优先确认对应库里确实已经导入视频，并且返回结果中包含可复用的视频源
 - 如果失败发生在指定时间范围查询，优先确认 `start_ms` / `end_ms` 没有越界，且 `start_ms < end_ms`
 - 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/dev/logs/sidecar.log`
@@ -474,15 +527,18 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 检查：
 
 ```bash
-grep '^TEXT_SEARCH_MODEL_' .env
+python3 tools/python/read_config.py local-sidecar-active --field model_id
+python3 tools/python/read_config.py local-sidecar-active --field version
 grep '^HF_' .env
 .venv/bin/python -c "import huggingface_hub; print(huggingface_hub.__version__)"
 .venv/bin/python -c "import hf_transfer; print(hf_transfer.__file__)"
 bash scripts/local/download-model.sh --help
+bash scripts/local/download-model.sh --hf-repo-id Qwen/Qwen3-VL-Embedding-2B --help
 ```
 
 处理：
-- 先确认本次运行选中的 env 文件里的 `TEXT_SEARCH_MODEL_ID` / `TEXT_SEARCH_MODEL_REVISION` 是你要的值
+- 先确认合并后配置中的 `provider.local_sidecar.active_model` 和其 `version` 是你要的值
+- 如果只是临时下载另一个 Hugging Face 模型仓库，不必改 `.env`；直接传 `--hf-repo-id <repo_id>`
 - 如果 `.venv` 缺依赖，重新运行 `bash scripts/local/bootstrap-linux.sh`
 - 如果启用了 `HF_HUB_ENABLE_HF_TRANSFER=1`，确保 `.venv` 里已经装了 `hf_transfer`
 - `huggingface_hub 0.36.2` 在 `HF_HUB_ENABLE_HF_TRANSFER=1` 时不会续传未完成的大文件；如果网络不稳、镜像表现差，或你更需要稳定中断/重试，直接把选中的 env 文件里的 `HF_HUB_ENABLE_HF_TRANSFER` 改成 `0`

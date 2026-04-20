@@ -16,6 +16,7 @@
   - 显式 `not_ready` 反馈和真实搜索结果列表
 - 当前 sidecar 已经具备真实的 ColQwen `query_embedding`、`image_query_embedding`、`video_query_embedding`、`document_embedding` 与 `document_query_embedding` 能力，并提供 `/health`、`/capabilities`、`/embed`。
 - 当前 app 已经接通真实的 `app -> sidecar -> Qdrant` multivector 搜索链，当前可实际命中 `image`、真实页级 `document_page` 与 `video_segment`。
+- repo 基线现在默认让 `local_sidecar/athrael-soju/colqwen3.5-4.5B-v3` 承接 `image`、`document`、`video` 三类 content types；模型原生 `EmbeddingCapabilities` 仍只声明 `text,image`，`document/video` 通过 runtime execution inputs 与 adapter 链路执行。
 - 当前仍然是早期工作台，不包含完整产品控制面，但已经具备文本、图片、视频与文档四种查询主链。
 - 默认使用根 `.env` 作为本地运行时配置；传 `--dev` 时使用 `.env.dev`。同一次运行中，被选中的 env 文件是端口、URL、日志目录和运行时目录的单一事实源。
 
@@ -48,7 +49,10 @@ bash scripts/local/doctor.sh
 
 ```bash
 bash scripts/local/download-model.sh
+bash scripts/local/download-model.sh --hf-repo-id Qwen/Qwen3-VL-Embedding-2B
 ```
+
+当前 `download-model.sh` 默认从仓库根 `fauni.config.json` 与 `${APP_RUNTIME_DIR}/runtime-config.json` 的合并结果中读取 `provider.local_sidecar.active_model` 和该 model 的 `version`。
 
 ## 安装完成后：日常启动
 
@@ -58,7 +62,19 @@ bash scripts/local/download-model.sh
 bash scripts/local/run.sh
 ```
 
-`run.sh` 会先自动启动或复用 Qdrant，再启动 app、sidecar 和 UI。
+`run.sh` 会先解析 `fauni.config.json + ${APP_RUNTIME_DIR}/runtime-config.json`，再自动启动或复用 Qdrant，并启动 app、sidecar 和 UI。
+
+如果当前环境仍有旧世代 runtime 数据，`run.sh` 会拒绝启动并提示先执行：
+
+```bash
+bash scripts/local/cutover-runtime.sh
+```
+
+`--dev` 环境需要单独执行：
+
+```bash
+bash scripts/local/cutover-runtime.sh --dev
+```
 
 如果这套服务需要和默认 `.env` 服务同时存在，给日常命令统一加 `--dev`：
 
@@ -157,6 +173,19 @@ bash scripts/local/smoke-document-search.sh --dev --json
 - 统一结果列表能稳定返回 `document_page` 与 `image`
 - 搜索后端是 `qdrant` / `multivector`
 
+运行时健康与 `vector_space` 诊断对应 smoke：
+
+```bash
+bash scripts/local/smoke-runtime-health.sh --dev --json
+```
+
+该脚本会导入一组真实 `image / document / video` 样本，然后验证：
+- `GET /runtime-health` 中的 app / qdrant / local_sidecar 状态
+- local sidecar 的 exact model、原生 `EmbeddingCapabilities`、`execution_input_types`
+- `GET /libraries/{library_id}/resolved-content-models`
+- `GET /libraries/{library_id}/vector-space-diagnostics`
+- 默认 `image/document/video` content types 共享同一个 active `vector_space`
+
 ## 快速检查
 
 快速检查不启动长驻服务，也不加载真实 GPU 模型：
@@ -177,6 +206,28 @@ pnpm --dir ui test:e2e
 
 ```bash
 bash scripts/local/bootstrap-linux.sh --dev
+```
+
+统一入口：
+
+```bash
+bash scripts/local/check-e2e.sh --all
+```
+
+该脚本默认面向 `--dev` 运行面，先确保 `--dev` 服务可用，再按需运行：
+- Playwright 分域 E2E
+- `smoke-runtime-health.sh`
+- `smoke-text-search.sh`
+- `smoke-image-search.sh`
+- `smoke-video-search.sh`
+- `smoke-document-search.sh`
+- `smoke-source-management.sh`
+
+也可以只跑其中一部分：
+
+```bash
+bash scripts/local/check-e2e.sh --ui
+bash scripts/local/check-e2e.sh --smoke
 ```
 
 ## 当前访问入口
@@ -222,8 +273,6 @@ UI 当前包含：
 - `UI_HOST` / `UI_PORT`
 - `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_URL`
 - `DEV_LOG_DIR`
-- `TEXT_SEARCH_MODEL_ID`
-- `TEXT_SEARCH_MODEL_REVISION`
 - `HF_ENDPOINT`
 - `HF_HUB_ENABLE_HF_TRANSFER`
 
@@ -245,7 +294,7 @@ UI 当前包含：
 - `bootstrap-linux.sh` 会准备 `.env`、运行目录、`.venv-test`、`.venv`、UI 依赖和 Playwright；加 `--dev` 时会准备 `.env.dev` 和对应运行目录。
 - `doctor.sh` 是第一诊断入口，用于检查工具、目录、端口、虚拟环境和 CUDA 可用性；它不是启动命令。
 - `run-qdrant.sh` 会启动或复用本地 Qdrant，也可由 `run.sh` 自动调用。
-- `run.sh` 会自动启动或复用 Qdrant，检查 app / sidecar / UI 端口是否空闲，并在健康检查通过后才报告启动成功；加 `--detach` 时会后台启动并写入 pid 文件。
+- `run.sh` 会自动启动或复用 Qdrant，检查 app / sidecar / UI 端口是否空闲，解析 `local_sidecar.active_model + version`，并在健康检查通过后才报告启动成功；加 `--detach` 时会后台启动并写入 pid 文件。
 - sidecar 首次冷启动加载 ColQwen 模型可能需要数分钟；首次真实导入或搜索明显慢于后续热路径属于预期行为。
 - `status.sh` 会报告 app、sidecar、UI 和 Qdrant 的 URL、ready 状态、pid、日志路径与配置来源；加 `--json` 时输出机器可读 JSON。
 - `stop.sh` 会停止指定本地服务，支持 `--all` 停止 app、sidecar、UI 和 Qdrant，并会优先使用 pid 文件再回退到端口 / 命令发现。
@@ -255,7 +304,8 @@ UI 当前包含：
 - `smoke-document-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 文档搜索 smoke；它会验证查询 PDF 上传、整份文档查询、页范围查询和 `document_page` 复用路径。
 - `check.sh` 是无 GPU 快速检查入口，不启动长驻服务。
 - `pnpm --dir ui test:e2e` 是当前阶段最小 Playwright UI smoke，固定使用 `--dev` 配置；若 `--dev` 服务未运行则会自行启动并在结束后自清理。
-- `download-model.sh` 会读取本次运行选中的 env 文件中的 `TEXT_SEARCH_MODEL_ID` / `TEXT_SEARCH_MODEL_REVISION`，并继承 `HF_ENDPOINT` / `HF_HUB_ENABLE_HF_TRANSFER` 来控制 Hugging Face 下载行为。
+- `download-model.sh` 会读取合并后配置中的 `provider.local_sidecar.active_model` 与对应 model 的 `version`，并继承选中 env 文件中的 `HF_ENDPOINT` / `HF_HUB_ENABLE_HF_TRANSFER` 来控制 Hugging Face 下载行为。
+- 需要临时下载其他 Hugging Face 仓库时，可额外传 `--hf-repo-id <repo_id>`，例如 `Qwen/Qwen3-VL-Embedding-2B`；这不会改写当前 env 文件。
 - 当 `HF_HUB_ENABLE_HF_TRANSFER=1` 时，下载会更激进，但重启后不会续传未完成的大文件；如果你更看重稳定续传，可以把它改成 `0`。
 
 ## 本地工作流状态

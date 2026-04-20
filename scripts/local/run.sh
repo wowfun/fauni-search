@@ -112,6 +112,28 @@ ensure_qdrant_ready() {
   return 1
 }
 
+dir_has_entries() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 1
+  find "$dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
+}
+
+ensure_runtime_generation_ready() {
+  local runtime_config_path="$APP_RUNTIME_DIR/runtime-config.json"
+
+  if [[ -f "$runtime_config_path" ]]; then
+    return 0
+  fi
+
+  if dir_has_entries "$APP_RUNTIME_DIR" || dir_has_entries "$QDRANT_STORAGE_DIR"; then
+    echo "[error] Legacy runtime data detected for this environment; run scripts/local/cutover-runtime.sh${FAUNI_ENV_ARG_HINT} before starting services"
+    return 1
+  fi
+
+  mkdir -p "$APP_RUNTIME_DIR"
+  printf '{}\n' >"$runtime_config_path"
+}
+
 ensure_port_free() {
   local label="$1"
   local host="$2"
@@ -151,6 +173,13 @@ if ! PYTHONPATH="$ROOT_DIR/sidecar/src" "$GPU_ENV_PYTHON" "$PROBE_PY" import-mod
   echo "[error] $GPU_ENV_PYTHON is missing sidecar runtime dependencies; run scripts/local/bootstrap-linux.sh${FAUNI_ENV_ARG_HINT} first"
   exit 1
 fi
+
+ensure_runtime_generation_ready
+
+CONFIG_EMBEDDING_MODEL_ID="$("$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/read_config.py" local-sidecar-active --field model_id)"
+CONFIG_EMBEDDING_MODEL_VERSION="$("$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/read_config.py" local-sidecar-active --field version)"
+export EMBEDDING_MODEL_ID="$CONFIG_EMBEDDING_MODEL_ID"
+export EMBEDDING_MODEL_REVISION="$CONFIG_EMBEDDING_MODEL_VERSION"
 
 ensure_port_free "app" "$APP_HOST" "$APP_PORT"
 ensure_port_free "sidecar" "$SIDECAR_HOST" "$SIDECAR_PORT"
@@ -205,6 +234,8 @@ wait_http_ok "ui" "http://$UI_HOST:$UI_PORT/" || {
 
 echo "[ok] Started app, sidecar, and UI"
 echo "[info] Config:  ${FAUNI_CONFIG_SOURCE#$ROOT_DIR/}"
+echo "[info] Models:  fauni.config.json + ${APP_RUNTIME_DIR}/runtime-config.json"
+echo "[info] Model:   $EMBEDDING_MODEL_ID@$EMBEDDING_MODEL_REVISION"
 echo "[info] App:     http://$APP_HOST:$APP_PORT/health"
 echo "[info] Sidecar: http://$SIDECAR_HOST:$SIDECAR_PORT/health"
 echo "[info] UI:      http://$UI_HOST:$UI_PORT/"

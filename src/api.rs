@@ -5,18 +5,12 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateLibraryRequest {
+    #[serde(default)]
+    pub(crate) library_id: Option<String>,
+    #[serde(default)]
+    pub(crate) display_name: Option<String>,
+    #[serde(default)]
     pub(crate) name: String,
-    pub(crate) config: Option<CreateLibraryConfigRequest>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreateLibraryConfigRequest {
-    pub(crate) enabled_index_lines: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct LibraryConfigPayload {
-    pub(crate) enabled_index_lines: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,18 +21,11 @@ pub(crate) struct LibrariesListData {
 #[derive(Debug, Serialize)]
 pub(crate) struct LibrarySnapshot {
     pub(crate) id: String,
+    pub(crate) display_name: String,
     pub(crate) name: String,
-    pub(crate) config: LibraryConfigPayload,
-    pub(crate) index_lines: Vec<LibraryIndexLineStatus>,
     pub(crate) counts: LibraryCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) latest_job_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct LibraryIndexLineStatus {
-    pub(crate) index_line: String,
-    pub(crate) status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,10 +82,9 @@ pub(crate) struct ModelCatalogEntry {
     pub(crate) provider_id: String,
     pub(crate) provider_kind: String,
     pub(crate) model_id: String,
+    pub(crate) model_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model_revision: Option<String>,
-    #[serde(default)]
-    pub(crate) supported_index_lines: Vec<String>,
     #[serde(default)]
     pub(crate) embedding_capabilities: EmbeddingCapabilities,
     pub(crate) editable: bool,
@@ -112,39 +98,35 @@ pub(crate) struct ModelCatalogData {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ContentTypeBindingPayload {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) model: String,
+    #[serde(default)]
+    pub(crate) vector_type: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ContentTypesPayload {
+    #[serde(default)]
+    pub(crate) content_types: BTreeMap<String, ContentTypeBindingPayload>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct GlobalContentTypesData {
+    pub(crate) content_types: ContentTypesPayload,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LibraryContentTypesData {
+    pub(crate) content_types: ContentTypesPayload,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) struct ModelSelectionPayload {
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct ModelSelectionOverridePayload {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) model_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct ModelDefaultsPayload {
-    #[serde(default)]
-    pub(crate) index_lines: BTreeMap<String, ModelSelectionPayload>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct ModelOverridesPayload {
-    #[serde(default)]
-    pub(crate) index_lines: BTreeMap<String, ModelSelectionOverridePayload>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct GlobalModelDefaultsData {
-    pub(crate) defaults: ModelDefaultsPayload,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct LibraryModelOverridesData {
-    pub(crate) overrides: ModelOverridesPayload,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -153,6 +135,7 @@ pub(crate) struct ResolvedModelSelectionPayload {
     pub(crate) provider_id: String,
     pub(crate) provider_kind: String,
     pub(crate) model_id: String,
+    pub(crate) model_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model_revision: Option<String>,
     #[serde(default)]
@@ -163,9 +146,97 @@ pub(crate) struct ResolvedModelSelectionPayload {
     pub(crate) last_probed_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ResolvedContentModelSelectionPayload {
+    pub(crate) binding_source: String,
+    pub(crate) content_type: String,
+    pub(crate) provider_id: String,
+    pub(crate) provider_kind: String,
+    pub(crate) model_id: String,
+    pub(crate) model_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_revision: Option<String>,
+    pub(crate) vector_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vector_space_id: Option<String>,
+    #[serde(default)]
+    pub(crate) embedding_capabilities: EmbeddingCapabilities,
+    pub(crate) status: String,
+    pub(crate) message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_probed_at: Option<String>,
+}
+
 #[derive(Debug, Serialize, Default)]
-pub(crate) struct ResolvedModelsData {
-    pub(crate) index_lines: BTreeMap<String, ResolvedModelSelectionPayload>,
+pub(crate) struct ResolvedContentModelsData {
+    pub(crate) content_types: BTreeMap<String, ResolvedContentModelSelectionPayload>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct VectorSpaceDiagnosticSnapshot {
+    pub(crate) vector_space_id: String,
+    pub(crate) lifecycle_state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) content_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vector_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) retired_at_ms: Option<u128>,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub(crate) struct VectorSpaceDiagnosticsData {
+    pub(crate) vector_spaces: Vec<VectorSpaceDiagnosticSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeProcessHealthSnapshot {
+    pub(crate) component_id: String,
+    pub(crate) display_name: String,
+    pub(crate) status: String,
+    pub(crate) message: String,
+    pub(crate) last_checked_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) details: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeProviderHealthSnapshot {
+    pub(crate) provider_id: String,
+    pub(crate) display_name: String,
+    pub(crate) provider_kind: String,
+    pub(crate) enabled: bool,
+    pub(crate) status: String,
+    pub(crate) message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_probed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) embedding_capabilities: Option<EmbeddingCapabilities>,
+    #[serde(default)]
+    pub(crate) execution_input_types: Vec<String>,
+    #[serde(default)]
+    pub(crate) runtime_adapters: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeHealthData {
+    pub(crate) app: RuntimeProcessHealthSnapshot,
+    pub(crate) qdrant: RuntimeProcessHealthSnapshot,
+    pub(crate) providers: Vec<RuntimeProviderHealthSnapshot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,6 +262,20 @@ pub(crate) struct ModelTestData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) pooled_vector: Vec<f32>,
     pub(crate) input_summary: ModelTestInputSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) comparison: Option<ModelTestComparisonData>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ModelTestComparisonData {
+    pub(crate) input_modality: String,
+    pub(crate) operation_kind: String,
+    pub(crate) vector_shape: Vec<usize>,
+    pub(crate) vectors: Vec<Vec<f32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pooled_vector: Vec<f32>,
+    pub(crate) input_summary: ModelTestInputSummary,
+    pub(crate) similarity_to_primary: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -425,7 +510,7 @@ pub(crate) struct TextSearchRequest {
     pub(crate) top_k: Option<usize>,
     pub(crate) cursor: Option<String>,
     pub(crate) debug: Option<bool>,
-    pub(crate) target_index_lines: Option<Vec<String>>,
+    pub(crate) target_content_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -436,7 +521,7 @@ pub(crate) struct ImageSearchRequest {
     pub(crate) top_k: Option<usize>,
     pub(crate) cursor: Option<String>,
     pub(crate) debug: Option<bool>,
-    pub(crate) target_index_lines: Option<Vec<String>>,
+    pub(crate) target_content_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -447,7 +532,7 @@ pub(crate) struct VideoSearchRequest {
     pub(crate) top_k: Option<usize>,
     pub(crate) cursor: Option<String>,
     pub(crate) debug: Option<bool>,
-    pub(crate) target_index_lines: Option<Vec<String>>,
+    pub(crate) target_content_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,7 +543,7 @@ pub(crate) struct DocumentSearchRequest {
     pub(crate) top_k: Option<usize>,
     pub(crate) cursor: Option<String>,
     pub(crate) debug: Option<bool>,
-    pub(crate) target_index_lines: Option<Vec<String>>,
+    pub(crate) target_content_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,8 +575,18 @@ pub(crate) struct TextSearchData {
     pub(crate) results: Vec<SearchResultItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unsupported_content_types: Vec<UnsupportedContentTypeSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) debug: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct UnsupportedContentTypeSnapshot {
+    pub(crate) content_type: String,
+    pub(crate) model: String,
+    pub(crate) vector_type: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Serialize)]

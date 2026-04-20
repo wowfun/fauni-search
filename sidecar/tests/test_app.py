@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fauni_sidecar.app import EmbedRequest, SidecarApiError, create_app
+from fauni_sidecar.runtime import resolve_local_sidecar_model_from_runtime_config
 
 
 class FakeRuntime:
@@ -31,6 +34,7 @@ class FakeRuntime:
                 "vector_types": ["multi_vector_late_interaction"],
                 "supports_mixed_inputs": False,
             },
+            "execution_input_types": ["text", "image", "document", "video"],
             "runtime_adapters": [
                 "document_query_via_page_images",
                 "video_query_via_frame_images",
@@ -279,6 +283,7 @@ def test_capabilities_exposes_query_embedding_operation() -> None:
         "vector_types": ["multi_vector_late_interaction"],
         "supports_mixed_inputs": False,
     }
+    assert payload["execution_input_types"] == ["text", "image", "document", "video"]
     assert payload["runtime_adapters"] == [
         "document_query_via_page_images",
         "video_query_via_frame_images",
@@ -480,3 +485,59 @@ def test_embed_runtime_failure_maps_to_runtime_unavailable() -> None:
     assert excinfo.value.status_code == 503
     assert excinfo.value.code == "runtime_unavailable"
     assert "CUDA is unavailable" in excinfo.value.message
+
+
+def test_runtime_model_falls_back_to_merged_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_config = tmp_path / "fauni.config.json"
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+
+    repo_config.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "local_sidecar": {
+                        "kind": "local_sidecar",
+                        "active_model": "model-a",
+                        "models": {
+                            "model-a": {
+                                "enabled": True,
+                                "version": "main",
+                                "embedding_capabilities": {
+                                    "input_types": ["text", "image"],
+                                    "vector_types": ["multi_vector_late_interaction"],
+                                    "supports_mixed_inputs": False,
+                                },
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "runtime-config.json").write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "local_sidecar": {
+                        "models": {
+                            "model-a": {
+                                "version": "custom-version",
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("EMBEDDING_MODEL_ID", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL_REVISION", raising=False)
+    monkeypatch.setenv("FAUNI_CONFIG_PATH", str(repo_config))
+    monkeypatch.setenv("APP_RUNTIME_DIR", str(runtime_dir))
+
+    model_id, model_version = resolve_local_sidecar_model_from_runtime_config()
+    assert model_id == "model-a"
+    assert model_version == "custom-version"

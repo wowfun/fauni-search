@@ -1,6 +1,6 @@
 use crate::{
     api::*,
-    indexing::build_search_response,
+    indexing::{build_search_response, ExecutedSearchGroup},
     model::{
         IncomingQueryImageUpload, ResolvedImageQueryInput, SourceActionKind, SourceActionScope,
         SourceActionTrigger, StagedSettingsModelTestFile,
@@ -27,10 +27,13 @@ struct ParsedModelTestForm {
     provider_id: String,
     model_id: String,
     input_modality: String,
+    comparison_input_modality: Option<String>,
     provider_enabled: Option<bool>,
     provider_base_url: Option<String>,
     text: Option<String>,
+    comparison_text: Option<String>,
     file: Option<PendingModelTestFile>,
+    comparison_file: Option<PendingModelTestFile>,
 }
 
 struct PendingModelTestFile {
@@ -43,24 +46,32 @@ pub fn build_app(state: SharedState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .route("/runtime-health", get(get_runtime_health))
+        .route("/settings/providers", get(list_provider_configs))
         .route(
-            "/settings/providers",
-            get(list_provider_configs),
+            "/settings/providers/:provider_id",
+            axum::routing::patch(update_provider_config),
         )
-        .route("/settings/providers/:provider_id", axum::routing::patch(update_provider_config))
         .route("/settings/model-catalog", get(get_model_catalog))
         .route(
-            "/settings/model-defaults",
-            get(get_global_model_defaults).patch(update_global_model_defaults),
+            "/settings/content-types",
+            get(get_global_content_types).patch(update_global_content_types),
         )
         .route("/settings/model-tests", post(test_model_selection))
         .route("/libraries", get(list_libraries).post(create_library))
         .route("/libraries/:library_id", get(get_library))
         .route(
-            "/libraries/:library_id/model-overrides",
-            get(get_library_model_overrides).patch(update_library_model_overrides),
+            "/libraries/:library_id/content-types",
+            get(get_library_content_types).patch(update_library_content_types),
         )
-        .route("/libraries/:library_id/resolved-models", get(get_resolved_models))
+        .route(
+            "/libraries/:library_id/resolved-content-models",
+            get(get_resolved_content_models),
+        )
+        .route(
+            "/libraries/:library_id/vector-space-diagnostics",
+            get(get_vector_space_diagnostics),
+        )
         .route("/libraries/:library_id/imports", post(import_paths))
         .route(
             "/libraries/:library_id/source-roots",
@@ -146,17 +157,19 @@ async fn root() -> Json<RootPayload> {
         stage: "search workspace",
         routes: vec![
             "GET /health",
+            "GET /runtime-health",
             "GET /settings/providers",
             "PATCH /settings/providers/{provider_id}",
             "GET /settings/model-catalog",
-            "GET /settings/model-defaults",
-            "PATCH /settings/model-defaults",
+            "GET /settings/content-types",
+            "PATCH /settings/content-types",
             "POST /settings/model-tests",
             "GET /libraries",
             "POST /libraries",
-            "GET /libraries/{library_id}/model-overrides",
-            "PATCH /libraries/{library_id}/model-overrides",
-            "GET /libraries/{library_id}/resolved-models",
+            "GET /libraries/{library_id}/content-types",
+            "PATCH /libraries/{library_id}/content-types",
+            "GET /libraries/{library_id}/resolved-content-models",
+            "GET /libraries/{library_id}/vector-space-diagnostics",
             "GET /libraries/{library_id}/source-roots",
             "POST /libraries/{library_id}/source-roots",
             "GET /libraries/{library_id}/source-roots/{source_root_id}",
@@ -198,6 +211,15 @@ async fn health(State(state): State<SharedState>) -> Json<HealthPayload> {
     })
 }
 
+async fn get_runtime_health(
+    State(state): State<SharedState>,
+) -> Json<SuccessEnvelope<RuntimeHealthData>> {
+    let mut state = state.write().await;
+    Json(SuccessEnvelope {
+        data: state.get_runtime_health().await,
+    })
+}
+
 async fn list_provider_configs(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<ProvidersListData>> {
@@ -227,21 +249,21 @@ async fn get_model_catalog(
     })
 }
 
-async fn get_global_model_defaults(
+async fn get_global_content_types(
     State(state): State<SharedState>,
-) -> Json<SuccessEnvelope<GlobalModelDefaultsData>> {
+) -> Json<SuccessEnvelope<GlobalContentTypesData>> {
     let state = state.read().await;
     Json(SuccessEnvelope {
-        data: state.get_global_model_defaults(),
+        data: state.get_global_content_types(),
     })
 }
 
-async fn update_global_model_defaults(
+async fn update_global_content_types(
     State(state): State<SharedState>,
-    Json(request): Json<ModelDefaultsPayload>,
-) -> Result<Json<SuccessEnvelope<GlobalModelDefaultsData>>, ApiError> {
+    Json(request): Json<ContentTypesPayload>,
+) -> Result<Json<SuccessEnvelope<GlobalContentTypesData>>, ApiError> {
     let mut state = state.write().await;
-    let data = state.update_global_model_defaults(request).await?;
+    let data = state.update_global_content_types(request).await?;
     Ok(Json(SuccessEnvelope { data }))
 }
 
@@ -250,7 +272,14 @@ async fn test_model_selection(
     mut multipart: Multipart,
 ) -> Result<Json<SuccessEnvelope<ModelTestData>>, ApiError> {
     let form = parse_model_test_form(&mut multipart).await?;
-    let staged_file = stage_model_test_file(form.file.as_ref(), &form.input_modality)?;
+    let staged_file = stage_model_test_file(form.file.as_ref(), &form.input_modality, "file")?;
+    let comparison_staged_file = stage_model_test_file(
+        form.comparison_file.as_ref(),
+        form.comparison_input_modality
+            .as_deref()
+            .unwrap_or_default(),
+        "comparison_file",
+    )?;
 
     let result = {
         let mut state = state.write().await;
@@ -263,11 +292,17 @@ async fn test_model_selection(
                 form.provider_base_url.clone(),
                 form.text.as_deref(),
                 staged_file.as_ref(),
+                form.comparison_input_modality.as_deref(),
+                form.comparison_text.as_deref(),
+                comparison_staged_file.as_ref(),
             )
             .await
     };
 
     if let Some(file) = &staged_file {
+        remove_temp_query_asset_file(&file.path);
+    }
+    if let Some(file) = &comparison_staged_file {
         remove_temp_query_asset_file(&file.path);
     }
 
@@ -296,10 +331,13 @@ async fn parse_model_test_form(multipart: &mut Multipart) -> Result<ParsedModelT
     let mut provider_id = None;
     let mut model_id = None;
     let mut input_modality = None;
+    let mut comparison_input_modality = None;
     let mut provider_enabled = None;
     let mut provider_base_url = None;
     let mut text = None;
+    let mut comparison_text = None;
     let mut file = None;
+    let mut comparison_file = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|error| {
         ApiError::validation_failed(
@@ -312,14 +350,20 @@ async fn parse_model_test_form(multipart: &mut Multipart) -> Result<ParsedModelT
             "provider_id" => provider_id = Some(read_text_multipart_field(field).await?),
             "model_id" => model_id = Some(read_text_multipart_field(field).await?),
             "input_modality" => input_modality = Some(read_text_multipart_field(field).await?),
+            "comparison_input_modality" => {
+                comparison_input_modality = Some(read_text_multipart_field(field).await?)
+            }
             "provider_enabled" => {
                 provider_enabled = Some(parse_bool_form_field(
                     &field_name,
                     &read_text_multipart_field(field).await?,
                 )?)
             }
-            "provider_base_url" => provider_base_url = Some(read_text_multipart_field(field).await?),
+            "provider_base_url" => {
+                provider_base_url = Some(read_text_multipart_field(field).await?)
+            }
             "text" => text = Some(read_text_multipart_field(field).await?),
+            "comparison_text" => comparison_text = Some(read_text_multipart_field(field).await?),
             "file" => {
                 if file.is_some() {
                     return Err(ApiError::validation_failed(
@@ -339,6 +383,30 @@ async fn parse_model_test_form(multipart: &mut Multipart) -> Result<ParsedModelT
                     )
                 })?;
                 file = Some(PendingModelTestFile {
+                    original_filename: filename,
+                    content_type,
+                    bytes: bytes.to_vec(),
+                });
+            }
+            "comparison_file" => {
+                if comparison_file.is_some() {
+                    return Err(ApiError::validation_failed(
+                        "Settings model test accepts exactly one comparison file input.",
+                        Some(json!({ "field": "comparison_file" })),
+                    ));
+                }
+                let filename = field.file_name().map(str::to_string);
+                let content_type = field
+                    .content_type()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                let bytes = field.bytes().await.map_err(|error| {
+                    ApiError::validation_failed(
+                        format!("Settings comparison model test file could not be read: {error}"),
+                        Some(json!({ "field": "comparison_file" })),
+                    )
+                })?;
+                comparison_file = Some(PendingModelTestFile {
                     original_filename: filename,
                     content_type,
                     bytes: bytes.to_vec(),
@@ -374,10 +442,13 @@ async fn parse_model_test_form(multipart: &mut Multipart) -> Result<ParsedModelT
                 Some(json!({ "field": "input_modality" })),
             )
         })?,
+        comparison_input_modality,
         provider_enabled,
         provider_base_url,
         text,
+        comparison_text,
         file,
+        comparison_file,
     })
 }
 
@@ -406,13 +477,23 @@ fn parse_bool_form_field(field: &str, value: &str) -> Result<bool, ApiError> {
 fn stage_model_test_file(
     pending_file: Option<&PendingModelTestFile>,
     input_modality: &str,
+    file_field: &str,
 ) -> Result<Option<StagedSettingsModelTestFile>, ApiError> {
     match input_modality {
+        "" => {
+            if pending_file.is_some() {
+                return Err(ApiError::validation_failed(
+                    "comparison_file requires comparison_input_modality.",
+                    Some(json!({ "field": file_field })),
+                ));
+            }
+            Ok(None)
+        }
         QUERY_KIND_TEXT => {
             if pending_file.is_some() {
                 return Err(ApiError::validation_failed(
                     "text model test does not accept a file input.",
-                    Some(json!({ "field": "file" })),
+                    Some(json!({ "field": file_field })),
                 ));
             }
             Ok(None)
@@ -421,23 +502,21 @@ fn stage_model_test_file(
             let file = pending_file.ok_or_else(|| {
                 ApiError::validation_failed(
                     "image model test requires one file input.",
-                    Some(json!({ "field": "file" })),
+                    Some(json!({ "field": file_field })),
                 )
             })?;
-            let extension = infer_query_image_extension(
-                file.original_filename.as_deref(),
-                &file.content_type,
-            )
-            .ok_or_else(|| {
-                ApiError::validation_failed(
+            let extension =
+                infer_query_image_extension(file.original_filename.as_deref(), &file.content_type)
+                    .ok_or_else(|| {
+                        ApiError::validation_failed(
                     "Only common image files are accepted as settings model test images right now.",
                     Some(json!({
-                        "field": "file",
+                        "field": file_field,
                         "content_type": file.content_type,
                         "filename": file.original_filename,
                     })),
                 )
-            })?;
+                    })?;
             Ok(Some(persist_settings_model_test_image(
                 IncomingQueryImageUpload {
                     bytes: file.bytes.clone(),
@@ -470,32 +549,43 @@ async fn create_library(
     ))
 }
 
-async fn get_library_model_overrides(
+async fn get_library_content_types(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
-) -> Result<Json<SuccessEnvelope<LibraryModelOverridesData>>, ApiError> {
+) -> Result<Json<SuccessEnvelope<LibraryContentTypesData>>, ApiError> {
     let state = state.read().await;
     Ok(Json(SuccessEnvelope {
-        data: state.get_library_model_overrides(&library_id)?,
+        data: state.get_library_content_types(&library_id)?,
     }))
 }
 
-async fn update_library_model_overrides(
+async fn update_library_content_types(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
-    Json(request): Json<ModelOverridesPayload>,
-) -> Result<Json<SuccessEnvelope<LibraryModelOverridesData>>, ApiError> {
+    Json(request): Json<ContentTypesPayload>,
+) -> Result<Json<SuccessEnvelope<LibraryContentTypesData>>, ApiError> {
     let mut state = state.write().await;
-    let data = state.update_library_model_overrides(&library_id, request).await?;
+    let data = state
+        .update_library_content_types(&library_id, request)
+        .await?;
     Ok(Json(SuccessEnvelope { data }))
 }
 
-async fn get_resolved_models(
+async fn get_resolved_content_models(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
-) -> Result<Json<SuccessEnvelope<ResolvedModelsData>>, ApiError> {
+) -> Result<Json<SuccessEnvelope<ResolvedContentModelsData>>, ApiError> {
     let mut state = state.write().await;
-    let data = state.get_resolved_models(&library_id).await?;
+    let data = state.get_resolved_content_models(&library_id).await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+async fn get_vector_space_diagnostics(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<VectorSpaceDiagnosticsData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.get_vector_space_diagnostics(&library_id).await?;
     Ok(Json(SuccessEnvelope { data }))
 }
 
@@ -909,14 +999,27 @@ async fn search_text(
         let mut state = state.write().await;
         state.prepare_text_search(&request).await?
     };
-
-    let query_embedding = embed_query_text(
-        request.text.trim(),
-        Some(provider_context_payload(&plan.resolved_query_model)),
-    )
-    .await?;
-    let candidates = query_qdrant(&plan, &query_embedding).await?;
-    let response = build_search_response(plan, query_embedding, candidates)?;
+    let mut executed_groups = Vec::new();
+    for group in &plan.execution_groups {
+        let query_embedding = embed_query_text(
+            request.text.trim(),
+            Some(provider_context_payload(&group.resolved_model)),
+        )
+        .await?;
+        let candidates = query_qdrant(
+            &plan.library_id,
+            &group.vector_space_id,
+            plan.active_visual_unit_ids.len(),
+            plan.cursor_offset.saturating_add(plan.top_k),
+            &query_embedding,
+        )
+        .await?;
+        executed_groups.push(ExecutedSearchGroup {
+            query_embedding,
+            candidates,
+        });
+    }
+    let response = build_search_response(plan, executed_groups)?;
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
@@ -937,14 +1040,28 @@ async fn search_image(
             Some(visual_unit.locator.clone()),
         ),
     };
-    let query_embedding = embed_query_image(
-        query_path,
-        query_locator,
-        Some(provider_context_payload(&plan.resolved_query_model)),
-    )
-    .await?;
-    let candidates = query_qdrant(&plan, &query_embedding).await?;
-    let response = build_search_response(plan, query_embedding, candidates)?;
+    let mut executed_groups = Vec::new();
+    for group in &plan.execution_groups {
+        let query_embedding = embed_query_image(
+            query_path,
+            query_locator.clone(),
+            Some(provider_context_payload(&group.resolved_model)),
+        )
+        .await?;
+        let candidates = query_qdrant(
+            &plan.library_id,
+            &group.vector_space_id,
+            plan.active_visual_unit_ids.len(),
+            plan.cursor_offset.saturating_add(plan.top_k),
+            &query_embedding,
+        )
+        .await?;
+        executed_groups.push(ExecutedSearchGroup {
+            query_embedding,
+            candidates,
+        });
+    }
+    let response = build_search_response(plan, executed_groups)?;
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
@@ -958,14 +1075,28 @@ async fn search_video(
         state.prepare_video_search(&request).await?
     };
 
-    let query_embedding = embed_query_video(
-        query_input.path.as_str(),
-        query_input.locator.clone(),
-        Some(provider_context_payload(&plan.resolved_query_model)),
-    )
-    .await?;
-    let candidates = query_qdrant(&plan, &query_embedding).await?;
-    let response = build_search_response(plan, query_embedding, candidates)?;
+    let mut executed_groups = Vec::new();
+    for group in &plan.execution_groups {
+        let query_embedding = embed_query_video(
+            query_input.path.as_str(),
+            query_input.locator.clone(),
+            Some(provider_context_payload(&group.resolved_model)),
+        )
+        .await?;
+        let candidates = query_qdrant(
+            &plan.library_id,
+            &group.vector_space_id,
+            plan.active_visual_unit_ids.len(),
+            plan.cursor_offset.saturating_add(plan.top_k),
+            &query_embedding,
+        )
+        .await?;
+        executed_groups.push(ExecutedSearchGroup {
+            query_embedding,
+            candidates,
+        });
+    }
+    let response = build_search_response(plan, executed_groups)?;
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
@@ -979,13 +1110,27 @@ async fn search_document(
         state.prepare_document_search(&request).await?
     };
 
-    let query_embedding = embed_query_document(
-        query_input.path.as_str(),
-        query_input.locator,
-        Some(provider_context_payload(&plan.resolved_query_model)),
-    )
-    .await?;
-    let candidates = query_qdrant(&plan, &query_embedding).await?;
-    let response = build_search_response(plan, query_embedding, candidates)?;
+    let mut executed_groups = Vec::new();
+    for group in &plan.execution_groups {
+        let query_embedding = embed_query_document(
+            query_input.path.as_str(),
+            query_input.locator.clone(),
+            Some(provider_context_payload(&group.resolved_model)),
+        )
+        .await?;
+        let candidates = query_qdrant(
+            &plan.library_id,
+            &group.vector_space_id,
+            plan.active_visual_unit_ids.len(),
+            plan.cursor_offset.saturating_add(plan.top_k),
+            &query_embedding,
+        )
+        .await?;
+        executed_groups.push(ExecutedSearchGroup {
+            query_embedding,
+            candidates,
+        });
+    }
+    let response = build_search_response(plan, executed_groups)?;
     Ok(Json(SuccessEnvelope { data: response }))
 }

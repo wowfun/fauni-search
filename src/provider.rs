@@ -1,16 +1,17 @@
 use crate::{
-    api::{
-        ApiError, EmbeddingCapabilities, ModelDefaultsPayload, ModelOverridesPayload,
-        ModelSelectionOverridePayload, ModelSelectionPayload, ProviderProbeSnapshot,
+    api::{ApiError, EmbeddingCapabilities, ProviderProbeSnapshot},
+    config::{
+        load_merged_runtime_config, load_merged_runtime_config_from_paths,
+        resolve_local_sidecar_active_model,
     },
     model::{ProviderConfigRecord, ResolvedExecutionModelSelection},
-    MULTIVECTOR_INDEX_LINE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     env,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -21,12 +22,13 @@ pub(crate) const DASHSCOPE_PROVIDER_KIND: &str = "dashscope";
 
 pub(crate) const QUERY_KIND_TEXT: &str = "text";
 pub(crate) const QUERY_KIND_IMAGE: &str = "image";
+pub(crate) const QUERY_KIND_VIDEO: &str = "video";
+pub(crate) const QUERY_KIND_DOCUMENT: &str = "document";
 pub(crate) const VECTOR_TYPE_SINGLE: &str = "single_vector";
 pub(crate) const VECTOR_TYPE_INDEPENDENT: &str = "independent_vectors";
-pub(crate) const VECTOR_TYPE_MULTI_VECTOR_LATE_INTERACTION: &str =
-    "multi_vector_late_interaction";
+pub(crate) const VECTOR_TYPE_MULTI_VECTOR_LATE_INTERACTION: &str = "multi_vector_late_interaction";
 
-const DASHSCOPE_MULTIVECTOR_MODEL_IDS: &[&str] = &[
+const DASHSCOPE_SUPPORTED_CONTENT_MODEL_IDS: &[&str] = &[
     "multimodal-embedding-v1",
     "qwen2.5-vl-embedding",
     "qwen3-vl-embedding",
@@ -42,10 +44,6 @@ pub(crate) struct ProviderRuntimeModelSnapshot {
     pub(crate) model_revision: Option<String>,
 }
 
-pub(crate) fn supported_index_lines() -> [&'static str; 1] {
-    [MULTIVECTOR_INDEX_LINE]
-}
-
 pub(crate) fn empty_embedding_capabilities() -> EmbeddingCapabilities {
     EmbeddingCapabilities::default()
 }
@@ -56,6 +54,15 @@ pub(crate) fn local_sidecar_embedding_capabilities() -> EmbeddingCapabilities {
         vector_types: vec![VECTOR_TYPE_MULTI_VECTOR_LATE_INTERACTION.to_string()],
         supports_mixed_inputs: false,
     }
+}
+
+pub(crate) fn local_sidecar_execution_input_types() -> Vec<String> {
+    vec![
+        QUERY_KIND_TEXT.to_string(),
+        QUERY_KIND_IMAGE.to_string(),
+        QUERY_KIND_DOCUMENT.to_string(),
+        QUERY_KIND_VIDEO.to_string(),
+    ]
 }
 
 pub(crate) fn dashscope_embedding_capabilities(model_id: &str) -> EmbeddingCapabilities {
@@ -88,7 +95,17 @@ pub(crate) fn embedding_capabilities_supports_input_type(
     capabilities: &EmbeddingCapabilities,
     input_type: &str,
 ) -> bool {
-    capabilities.input_types.iter().any(|value| value == input_type)
+    capabilities
+        .input_types
+        .iter()
+        .any(|value| value == input_type)
+}
+
+pub(crate) fn execution_input_types_support_input_type(
+    execution_input_types: &[String],
+    input_type: &str,
+) -> bool {
+    execution_input_types.iter().any(|value| value == input_type)
 }
 
 pub(crate) fn default_provider_configs() -> BTreeMap<String, ProviderConfigRecord> {
@@ -102,8 +119,7 @@ pub(crate) fn default_provider_configs() -> BTreeMap<String, ProviderConfigRecor
             enabled: true,
             base_url: None,
             readonly_reason: Some(
-                "Connection and model are derived from the local runtime environment."
-                    .to_string(),
+                "Connection and model are derived from the local runtime environment.".to_string(),
             ),
         },
     );
@@ -123,34 +139,41 @@ pub(crate) fn default_provider_configs() -> BTreeMap<String, ProviderConfigRecor
     configs
 }
 
-pub(crate) fn default_global_model_defaults() -> ModelDefaultsPayload {
-    let mut index_lines = BTreeMap::new();
-    index_lines.insert(
-        MULTIVECTOR_INDEX_LINE.to_string(),
-        default_local_sidecar_model_selection(),
-    );
-    ModelDefaultsPayload { index_lines }
-}
-
-pub(crate) fn default_library_model_overrides() -> ModelOverridesPayload {
-    ModelOverridesPayload::default()
-}
-
-pub(crate) fn default_local_sidecar_model_selection() -> ModelSelectionPayload {
-    let runtime = fallback_local_sidecar_runtime_model();
-    ModelSelectionPayload {
-        provider_id: LOCAL_SIDECAR_PROVIDER_ID.to_string(),
-        model_id: runtime.model_id,
-    }
-}
-
 pub(crate) fn fallback_local_sidecar_runtime_model() -> ProviderRuntimeModelSnapshot {
-    let model_id = env::var("TEXT_SEARCH_MODEL_ID")
+    if let Ok(loaded) = load_merged_runtime_config() {
+        if let Ok(active_model) = resolve_local_sidecar_active_model(&loaded.config) {
+            return ProviderRuntimeModelSnapshot {
+                model_id: active_model.model_id,
+                model_revision: Some(active_model.version),
+            };
+        }
+    }
+
+    let repo_path = env::var("FAUNI_CONFIG_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("fauni.config.json"));
+    let runtime_path = env::var("APP_RUNTIME_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|runtime_dir| PathBuf::from(runtime_dir).join("runtime-config.json"))
+        .unwrap_or_else(|| PathBuf::from(".fauni-missing-runtime-config.json"));
+    if let Ok(loaded) = load_merged_runtime_config_from_paths(&repo_path, &runtime_path) {
+        if let Ok(active_model) = resolve_local_sidecar_active_model(&loaded.config) {
+            return ProviderRuntimeModelSnapshot {
+                model_id: active_model.model_id,
+                model_revision: Some(active_model.version),
+            };
+        }
+    }
+
+    let model_id = env::var("EMBEDDING_MODEL_ID")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "runtime-bound-local-sidecar".to_string());
-    let model_revision = env::var("TEXT_SEARCH_MODEL_REVISION")
+    let model_revision = env::var("EMBEDDING_MODEL_REVISION")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -161,80 +184,15 @@ pub(crate) fn fallback_local_sidecar_runtime_model() -> ProviderRuntimeModelSnap
     }
 }
 
-pub(crate) fn ensure_default_model_config_state(
-    provider_configs: &mut BTreeMap<String, ProviderConfigRecord>,
-    global_model_defaults: &mut ModelDefaultsPayload,
-) {
-    let defaults = default_provider_configs();
-    for (provider_id, config) in defaults {
-        provider_configs.entry(provider_id).or_insert(config);
-    }
-
-    if !global_model_defaults
-        .index_lines
-        .contains_key(MULTIVECTOR_INDEX_LINE)
-    {
-        global_model_defaults.index_lines.insert(
-            MULTIVECTOR_INDEX_LINE.to_string(),
-            default_local_sidecar_model_selection(),
-        );
-    }
-}
-
-pub(crate) fn normalize_model_defaults(
-    payload: ModelDefaultsPayload,
-) -> Result<ModelDefaultsPayload, ApiError> {
-    let selection = payload
-        .index_lines
-        .get(MULTIVECTOR_INDEX_LINE)
-        .cloned()
-        .ok_or_else(|| {
-            ApiError::validation_failed(
-                "model defaults must include index_lines.multivector.",
-                Some(json!({ "field": "index_lines.multivector" })),
-            )
-        })?;
-
-    let mut index_lines = BTreeMap::new();
-    index_lines.insert(
-        MULTIVECTOR_INDEX_LINE.to_string(),
-        normalize_model_selection(selection, "index_lines.multivector")?,
-    );
-    Ok(ModelDefaultsPayload { index_lines })
-}
-
-pub(crate) fn normalize_model_overrides(
-    payload: ModelOverridesPayload,
-) -> Result<ModelOverridesPayload, ApiError> {
-    let mut normalized = ModelOverridesPayload::default();
-    if let Some(selection) = payload.index_lines.get(MULTIVECTOR_INDEX_LINE).cloned() {
-        normalized.index_lines.insert(
-            MULTIVECTOR_INDEX_LINE.to_string(),
-            normalize_model_selection_override(selection, "index_lines.multivector")?,
-        );
-    }
-    Ok(normalized)
-}
-
-pub(crate) fn effective_library_model_overrides_payload(
-    overrides: &ModelOverridesPayload,
-) -> ModelOverridesPayload {
-    let mut payload = overrides.clone();
-    payload
-        .index_lines
-        .entry(MULTIVECTOR_INDEX_LINE.to_string())
-        .or_default();
-    payload
-}
-
-pub(crate) fn provider_context_payload(
-    selection: &ResolvedExecutionModelSelection,
-) -> Value {
+pub(crate) fn provider_context_payload(selection: &ResolvedExecutionModelSelection) -> Value {
     json!({
         "provider_id": selection.summary.provider_id,
         "provider_kind": selection.summary.provider_kind,
         "model_id": selection.summary.model_id,
+        "model_version": selection.summary.model_version,
         "model_revision": selection.summary.model_revision,
+        "vector_type": selection.vector_type,
+        "vector_space_id": selection.vector_space_id,
         "binding_source": selection.summary.binding_source,
     })
 }
@@ -256,46 +214,6 @@ pub(crate) fn current_rfc3339_timestamp() -> String {
                 .map(|duration| duration.as_secs().to_string())
                 .unwrap_or_else(|_| "0".to_string())
         })
-}
-
-fn normalize_model_selection(
-    selection: ModelSelectionPayload,
-    field_prefix: &str,
-) -> Result<ModelSelectionPayload, ApiError> {
-    let provider_id = normalize_provider_id(&selection.provider_id, field_prefix)?;
-    let model_id = normalize_required_string(
-        &selection.model_id,
-        &format!("{field_prefix}.model_id"),
-    )?;
-    validate_provider_selection_shape(&provider_id, &model_id, field_prefix)?;
-
-    Ok(ModelSelectionPayload {
-        provider_id,
-        model_id,
-    })
-}
-
-fn normalize_model_selection_override(
-    selection: ModelSelectionOverridePayload,
-    field_prefix: &str,
-) -> Result<ModelSelectionOverridePayload, ApiError> {
-    let provider_id = selection
-        .provider_id
-        .map(|value| normalize_provider_id(&value, field_prefix))
-        .transpose()?;
-    let model_id = selection
-        .model_id
-        .map(|value| normalize_required_string(&value, &format!("{field_prefix}.model_id")))
-        .transpose()?;
-
-    if let (Some(provider_id), Some(model_id)) = (provider_id.as_deref(), model_id.as_deref()) {
-        validate_provider_selection_shape(provider_id, model_id, field_prefix)?;
-    }
-
-    Ok(ModelSelectionOverridePayload {
-        provider_id,
-        model_id,
-    })
 }
 
 pub(crate) fn normalize_provider_id(value: &str, field_prefix: &str) -> Result<String, ApiError> {
@@ -343,12 +261,12 @@ pub(crate) fn validate_provider_selection_shape(
     model_id: &str,
     field_prefix: &str,
 ) -> Result<(), ApiError> {
-    if provider_id == DASHSCOPE_PROVIDER_ID && !is_supported_dashscope_multivector_model(model_id) {
+    if provider_id == DASHSCOPE_PROVIDER_ID && !is_supported_dashscope_content_model(model_id) {
         return Err(ApiError::validation_failed(
-            "model_id is not supported for multivector DashScope selection.",
+            "model_id is not supported for the current DashScope content-type execution slice.",
             Some(json!({
                 "field": format!("{field_prefix}.model_id"),
-                "supported": DASHSCOPE_MULTIVECTOR_MODEL_IDS,
+                "supported": DASHSCOPE_SUPPORTED_CONTENT_MODEL_IDS,
                 "received": model_id,
             })),
         ));
@@ -357,10 +275,10 @@ pub(crate) fn validate_provider_selection_shape(
     Ok(())
 }
 
-pub(crate) fn dashscope_multivector_model_ids() -> &'static [&'static str] {
-    DASHSCOPE_MULTIVECTOR_MODEL_IDS
+pub(crate) fn dashscope_supported_content_model_ids() -> &'static [&'static str] {
+    DASHSCOPE_SUPPORTED_CONTENT_MODEL_IDS
 }
 
-pub(crate) fn is_supported_dashscope_multivector_model(model_id: &str) -> bool {
-    DASHSCOPE_MULTIVECTOR_MODEL_IDS.contains(&model_id)
+pub(crate) fn is_supported_dashscope_content_model(model_id: &str) -> bool {
+    DASHSCOPE_SUPPORTED_CONTENT_MODEL_IDS.contains(&model_id)
 }

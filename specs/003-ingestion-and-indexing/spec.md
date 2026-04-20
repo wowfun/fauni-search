@@ -69,23 +69,24 @@
 - 原始文件失效、路径失联、来源根停用、来源根移除或规则变化导致脱离覆盖范围时，会影响源内容的可用性与后续摄取候选，但不应把同一内容误判为新的身份
 - 当前阶段当源内容因文件消失或脱离覆盖范围而失效时，应先保留结构化记录，并在新的有效索引激活后退出新的搜索结果，而不是立即硬删除
 
-## 摄取运行、索引线与作用域
+## 摄取运行、向量空间与作用域
 
 - 摄取运行面向单个库发起，是一次把显式输入或来源覆盖范围收敛为结构化对象边界的稳定处理尝试
-- 索引运行面向单个库与单条索引线发起，是一次把当前库快照推进为可激活索引的稳定构建尝试
+- 索引运行面向单个库发起，并按当前已解析执行签名拆分为一个或多个 `vector_space` 子构建；每个子构建都是一次把该库当前快照推进为可激活索引的稳定尝试
 - 摄取运行的稳定输入与状态至少包括：目标库、接入来源、摄取模式、覆盖范围摘要、阶段状态与已落盘检查点
-- 索引运行的稳定输入与状态至少包括：目标库、目标索引线、触发来源、阶段状态、已落盘检查点与所依赖的摄取结果边界
-- 索引线是库内承载某一类向量表示的稳定构建线，作用域限定在单个库内
-- 本专题中，单向量（single-vector）与多向量（multivector）是两条等权正式索引线
-- 每个库维护一个库级稳定配置 `enabled_index_lines`，用于声明当前允许存在的索引线集合
-- 新建库默认启用列表为 `[single-vector]`；启用列表允许为空，表示该库当前不维护任何可搜索索引线
-- 只有出现在 `enabled_index_lines` 中的索引线，才允许被构建并持有激活索引
-- 每条已启用索引线至多持有一个当前激活索引；不同索引线可以分别构建、分别激活、分别恢复，不要求始终同步推进到同一内容版本
-- 某条索引线从 `enabled_index_lines` 中移除后，其当前激活索引应立即失活，并进入延迟清理窗口
-- 某条索引线重新加入 `enabled_index_lines` 后，应基于当前库快照重新完成全量构建；在新的激活索引生成前，该索引线不可搜索
-- 搜索期如何选择已启用索引线，以及针对未启用索引线请求的拒绝语义，由 [004-search](../004-search/spec.md) 定义
+- 索引运行的稳定输入与状态至少包括：目标库、目标 `vector_space` 集合、触发来源、阶段状态、已落盘检查点与所依赖的摄取结果边界
+- `vector_space` 是库内承载某一类向量表示与执行签名的稳定构建空间，作用域限定在单个库内
+- 当前切片中，`vector_space` 的执行签名至少包含：`provider_id`、`model_id`、`version` 与 `vector_type`
+- 多个内容类型若绑定到同一个执行签名，则共享同一个 `vector_space`
+- 同一次 import、`refresh` 或 `rescan` 可以在单个索引运行内同时推进多个 `vector_space`；是否共享同一次编码与写入批次，由执行签名分组决定
+- 每个已解析 `vector_space` 至多持有一个当前激活索引；不同 `vector_space` 可以分别构建、分别激活、分别恢复，不要求始终同步推进到同一内容版本
+- 某个内容类型改绑到新的执行签名后，旧 `vector_space` 的当前激活索引应立即失活，并进入延迟清理窗口
+- “立即失活”在结构化真相上的最小要求是：当前库的 active vector space reference 集合必须在配置生效后立即移除这些旧 `vector_space`
+- 进入延迟清理窗口的旧 `vector_space` 应形成稳定的 retired inventory 记录，至少标识该空间已退役以及其进入清理窗口的时间边界
+- 新的 `vector_space` 在新的激活索引生成前不可搜索
+- 搜索期如何选择已启用内容类型，以及针对未启用内容类型请求的拒绝语义，由 [004-search](../004-search/spec.md) 定义
 - 摄取与索引在需要模型能力的阶段所依赖的提供方能力、提供方绑定与运行时探测语义，由 [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义
-- 索引线只承载检索索引与向量状态，不重新定义源内容、视觉单元或派生资产的基础身份
+- `vector_space` 只承载检索索引与向量状态，不重新定义源内容、视觉单元或派生资产的基础身份
 
 ## 稳定阶段模型与检查点
 
@@ -108,22 +109,24 @@
 ## 内容版本、暂存与激活
 
 - 摄取运行负责把显式输入或覆盖候选收敛为源内容、视觉单元与派生资产的稳定处理边界
-- 针对某条索引线的一次构建边界，会形成一个新的内容版本，即使该次运行只处理了部分变化内容
-- 同一次摄取结果可以分别驱动多条索引线的独立构建，不要求它们始终同步切换到同一内容版本
+- 针对某个 `vector_space` 的一次构建边界，会形成一个新的内容版本，即使该次运行只处理了部分变化内容
+- 同一次摄取结果可以分别驱动多个 `vector_space` 的独立构建，不要求它们始终同步切换到同一内容版本
 - 本专题中的内容版本只承载摄取 / 索引处理边界与激活关系，不重新定义源内容、视觉单元或派生资产的基础身份
 - 每次索引运行在激活前都应先生成与目标内容版本对应的暂存索引
 - 暂存索引可以持有完整候选载荷与验证上下文，但在激活前不应被当前搜索流量视为 active
 - 当前切片中，active namespace 在激活前必须先把本次候选写入 staging namespace；staging 的具体物理 collection naming 保持实现细节，不构成稳定契约
-- 激活索引代表某个库在某条已启用索引线上的当前生效索引，是对外承担可检索事实的唯一线级入口
-- 新内容版本只有在验证通过后才能以原子方式替换该索引线的当前激活索引
+- 激活索引代表某个库在某个已解析 `vector_space` 上的当前生效索引，是对外承担可检索事实的唯一空间级入口
+- 新内容版本只有在验证通过后才能以原子方式替换该 `vector_space` 的当前激活索引
 - 当前切片中的 import、`refresh` 与 `rescan` 都沿用同一激活语义：验证通过前只允许写 staging，不允许边写边直接替换当前 active
 - 对来源变更驱动的增量 `refresh` / `rescan`，当前切片允许基于当前 active 的 staging 副本执行“删除旧点 + 写入新点”的增量替换；未变化对象不要求重新编码
+- 对同一次运行内的多个 `vector_space`，激活与失败语义按空间独立成立：某个 `vector_space` 的失败不得隐式回滚已成功激活的其他 `vector_space`
+- 当单次 import、`refresh` 或 `rescan` 同时推进多个 `vector_space` 时，若其中部分空间失败，运行级任务可以进入失败终态，但已成功激活的 `vector_space` 与已落盘的结构化对象边界不得因此被回滚
 
 ## 重启恢复与重新判定
 
-- 当前切片中，active index reference 会随结构化 durable snapshot 跨 restart 保留
-- 应用启动后，必须把已保留的 active index reference 与检索后端中的 stable active namespace naming `index_{library_id}_{index_line}` 重新对照判定
-- 当前切片中，该 stable active namespace 由 alias 或等价机制承接；若结构化记录存在，但 active alias 缺失、alias target 缺失，或只剩同名旧物理 collection，则该索引线必须转为 inactive；随后搜索应返回 `not_ready`
+- 当前切片中，active vector space reference 会随结构化 durable snapshot 跨 restart 保留
+- 应用启动后，必须把已保留的 active vector space reference 与检索后端中的 stable active namespace naming `vector_space_{library_id}_{vector_space_id}` 重新对照判定
+- 当前切片中，该 stable active namespace 由 alias 或等价机制承接；若结构化记录存在，但 active alias 缺失、alias target 缺失，或只剩同名旧物理 collection，则该 `vector_space` 必须转为 inactive；随后搜索应返回 `not_ready`
 - 应用启动只恢复 durable truth，不自动触发 `refresh`、`rescan`、自动重建索引或补做停机期间的 filesystem drift reconciliation
 - 来源根 watcher 在启动后只重新播种运行时观察状态；是否需要推进新的 `refresh` / `rescan` 仍由后续显式触发或新的 watcher 事件决定
 
