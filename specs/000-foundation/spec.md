@@ -6,7 +6,7 @@
 
 - 本地优先（Local-First）
 - 单向量（single-vector）
-- 多向量（multivector）
+- 多向量迟交互（multi_vector_late_interaction）
 - 多库（Multi-Library）
 - 单用户（Single-User）
 - 提供方驱动架构（Provider-based architecture）
@@ -32,7 +32,7 @@
 - 采用纯视觉检索路线，不引入 OCR 或文本解析主链
 - 支持三类查询输入：文本、图片、视频
 - 支持三类检索对象：文档页、图片、视频片段
-- 单向量与多向量均为一等能力
+- 单向量与 `multi_vector_late_interaction` 均为一等能力
 - 系统采用多库（Multi-Library）组织模型，并按单用户（Single-User）使用场景设计
 - 不包含内建微调（Fine-Tuning）工作流
 

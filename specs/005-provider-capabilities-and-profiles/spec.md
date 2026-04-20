@@ -159,8 +159,9 @@ Execution Input Types 的约束：
 - 可选 `last_probed_at`
 
 `binding_source` 当前至少包括：
-- `global_default`
-- `library_override`
+- `global_content_type`
+- `library_content_type`
+- `settings_model_test`
 
 ## 当前切片的正式执行语义
 
@@ -188,14 +189,14 @@ Execution Input Types 的约束：
 - `vector_space_id` 只作为派生执行诊断事实返回；它不得成为用户主配置输入
 - 本地 sidecar 加载、本地主服务 fallback 摘要与本地下载脚本都应默认以 `local_sidecar.active_model` 对应 model 的 `version` 作为执行版本
 - Settings 必须提供“测试当前 Provider + 模型配置”的诊断入口，用于在保存前直接验证当前草稿是否能返回 embedding
-- Settings 模型测试固定使用当前未保存草稿，而不是已持久化的 defaults / overrides
+- Settings 模型测试固定使用当前未保存草稿，而不是已持久化的 global content types / library content types 绑定
 - Settings 模型测试只应回传当前 provider 的可编辑草稿字段；`local_sidecar` 这类 runtime-bound provider 的连接信息只可展示、不可作为测试草稿重新提交
 - Settings 模型测试的输入模态必须由当前模型目录项或等价运行时能力快照中的 `Embedding Capabilities.input_types` 驱动
 - 当前切片中，Settings 模型测试只要求承接 `text` 与 `image`
 - Settings 模型测试除主输入外，还应允许一个可选的第二输入；第二输入的模态应独立选择，但同样必须受 `Embedding Capabilities.input_types` 约束
 - 当提供第二输入时，Settings 模型测试除返回第二输入对应的向量结果外，还必须返回第二输入与主输入之间的相似度
-- Settings 模型测试中的跨模态相似度是模型诊断能力；它不改变正式索引、正式搜索或 `multivector` 的执行语义
-- Settings 模型测试是纯诊断能力，不创建 job，不写 durable state，不改变全局默认、库级覆盖或已解析模型选择
+- Settings 模型测试中的跨模态相似度是模型诊断能力；它不改变正式索引、正式搜索或 `vector_space + multi_vector_late_interaction` 的执行语义
+- Settings 模型测试是纯诊断能力，不创建 job，不写 durable state，不改变已持久化的全局 content types、库级 content types 或已解析模型选择
 - 当前切片中，`dashscope` 仍只作为配置与未来兼容字段存在；在 Settings 模型测试中选择它时，必须显式返回 `not_supported`
 - 文档与视频查询能力属于 runtime adapter，不属于模型原生能力；它们只允许在运行时诊断或调试面中以命名 adapter 列表呈现
 - 文档与视频查询能力虽然不属于模型原生能力，但在当前切片中属于 `local_sidecar` 的正式执行能力；搜索是否可执行必须以 Execution Input Types 判定，而不是以 `EmbeddingCapabilities.input_types` 判定

@@ -15,7 +15,7 @@ async fn create_library(app: &support::TestApp, name: &str) -> String {
         .post_json(
             "/libraries",
             json!({
-                "name": name
+                "display_name": name
             }),
         )
         .await
@@ -78,8 +78,8 @@ fn dashscope_content_type_payload() -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn provider_settings_bootstrap_defaults_and_resolved_content_models() {
-    let env = TestEnv::new("provider-settings-defaults").await;
+async fn provider_settings_bootstrap_global_content_types_and_resolved_content_models() {
+    let env = TestEnv::new("provider-settings-global-content-types").await;
     let app = env.boot().await;
 
     let providers = app.get_json("/settings/providers").await;
@@ -96,19 +96,20 @@ async fn provider_settings_bootstrap_defaults_and_resolved_content_models() {
     assert!(provider_ids.contains(&DASHSCOPE_PROVIDER_ID));
     assert!(!provider_ids.contains(&"qdrant"));
 
-    let defaults = app.get_json("/settings/content-types").await;
-    assert_eq!(defaults.status, StatusCode::OK);
-    let defaults_body = defaults.json();
+    let global_content_types = app.get_json("/settings/content-types").await;
+    assert_eq!(global_content_types.status, StatusCode::OK);
+    let global_content_types_body = global_content_types.json();
     assert_eq!(
-        defaults_body["data"]["content_types"]["content_types"]["image"]["model"],
+        global_content_types_body["data"]["content_types"]["content_types"]["image"]["model"],
         json!(format!("{LOCAL_SIDECAR_PROVIDER_ID}/{DEFAULT_MODEL_ID}"))
     );
     assert_eq!(
-        defaults_body["data"]["content_types"]["content_types"]["document"]["vector_type"],
+        global_content_types_body["data"]["content_types"]["content_types"]["document"]
+            ["vector_type"],
         json!("multi_vector_late_interaction")
     );
 
-    let library_id = create_library(&app, "provider-defaults").await;
+    let library_id = create_library(&app, "provider-global-content-types").await;
 
     let content_types = app
         .get_json(&format!("/libraries/{library_id}/content-types"))
@@ -126,7 +127,7 @@ async fn provider_settings_bootstrap_defaults_and_resolved_content_models() {
     let resolved_body = resolved.json();
     assert_eq!(
         resolved_body["data"]["content_types"]["document"]["binding_source"],
-        "global_default"
+        "global_content_type"
     );
     assert_eq!(
         resolved_body["data"]["content_types"]["document"]["provider_id"],
@@ -202,7 +203,7 @@ async fn model_catalog_exposes_runtime_model_versions_and_supported_entries() {
 async fn settings_model_tests_only_cover_native_embedding_inputs_without_mutating_saved_config() {
     let env = TestEnv::new("provider-settings-model-tests").await;
     let app = env.boot().await;
-    let defaults_before = app.get_json("/settings/content-types").await.json();
+    let global_content_types_before = app.get_json("/settings/content-types").await.json();
     let providers_before = app.get_json("/settings/providers").await.json();
 
     let text_response = app
@@ -300,9 +301,9 @@ async fn settings_model_tests_only_cover_native_embedding_inputs_without_mutatin
     assert_eq!(video_response.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(video_response.json()["error"]["code"], "validation_failed");
 
-    let defaults_after = app.get_json("/settings/content-types").await.json();
+    let global_content_types_after = app.get_json("/settings/content-types").await.json();
     let providers_after = app.get_json("/settings/providers").await.json();
-    assert_eq!(defaults_before, defaults_after);
+    assert_eq!(global_content_types_before, global_content_types_after);
     let provider_projection = |body: &serde_json::Value| {
         body["data"]["providers"]
             .as_array()
@@ -325,10 +326,10 @@ async fn settings_model_tests_only_cover_native_embedding_inputs_without_mutatin
 }
 
 #[tokio::test]
-async fn dashscope_provider_config_and_library_content_type_override_take_effect() {
-    let env = TestEnv::new("provider-settings-library-override").await;
+async fn dashscope_provider_config_and_library_content_types_take_effect() {
+    let env = TestEnv::new("provider-settings-library-content-types").await;
     let app = env.boot().await;
-    let library_id = create_library(&app, "provider-library-override").await;
+    let library_id = create_library(&app, "provider-library-content-types").await;
 
     let provider = app
         .patch_json(
@@ -375,7 +376,7 @@ async fn dashscope_provider_config_and_library_content_type_override_take_effect
     let resolved_body = resolved.json();
     assert_eq!(
         resolved_body["data"]["content_types"]["document"]["binding_source"],
-        "library_override"
+        "library_content_type"
     );
     assert_eq!(
         resolved_body["data"]["content_types"]["document"]["provider_id"],
@@ -465,7 +466,7 @@ async fn provider_settings_persist_across_restart() {
     let resolved_body = resolved.json();
     assert_eq!(
         resolved_body["data"]["content_types"]["image"]["binding_source"],
-        "library_override"
+        "library_content_type"
     );
     assert_eq!(
         resolved_body["data"]["content_types"]["image"]["provider_id"],

@@ -845,7 +845,6 @@ impl AppState {
         LibrarySnapshot {
             id: library.id.clone(),
             display_name: library.display_name.clone(),
-            name: library.display_name.clone(),
             counts: LibraryCounts {
                 accepted_items: library
                     .sources

@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-04-21
+### Changed
+- Renamed the top-level search debug summary field from `repr_kind` to `vector_type` and aligned smoke-script JSON summaries plus operator specs with the new name.
+
 ## 2026-04-20
 ### Changed
 - Started the config-file cutover for provider/model/runtime selection with tracked `fauni.config.json`, merged `${APP_RUNTIME_DIR}/runtime-config.json`, `local_sidecar.active_model + version` resolution, config-backed Settings writes, and explicit legacy-runtime cutover tooling for default and `--dev` environments.
@@ -7,6 +11,8 @@
 - Advanced the internal `index_line -> vector_space` refactor by deriving `vector_space_id` from config-backed model state, executing import/source-action/search work per space, preserving partial-success activations under failed jobs, and immediately retiring superseded active spaces on content-type rebinds.
 - Added durable retired-`vector_space` inventory, a maintenance cleanup loop, runtime-health snapshots, and library-scoped vector-space diagnostics so execution state, provider probes, and stale Qdrant namespaces are observable and eventually reaped instead of being silently dropped.
 - Finished the tracked `ui/` TypeScript cutover for Vite/Playwright support files, split the old monolithic smoke suite into domain specs, promoted `display_name` and runtime-health/vector-space diagnostics in the shared workspace, and added dedicated local `runtime-health` / `check-e2e` operator entry points.
+- Removed the remaining compatibility shims for library `name`, sidecar `target_index_lines`, and durable `name` / `active_index_lines`, and added explicit legacy-runtime cleanup tooling for archived runtime data and stale Qdrant collections.
+- Standardized the active terminology on `global_content_type` / `library_content_type` / `settings_model_test` and `multi_vector_late_interaction`, updated the related specs/UI/docs, and added a terminology audit to catch regressions.
 
 ## 2026-04-19
 ### Changed

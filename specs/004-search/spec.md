@@ -96,8 +96,9 @@
 
 ## 调试与错误语义
 
-- `debug=true` 时，稳定返回的调试信息至少包括：命中的 `content_type`、各内容类型原始分数摘要，以及 `backend`、`repr_kind`、派生 `vector_space`、Execution Input Types 等技术元信息
+- `debug=true` 时，稳定返回的调试信息至少包括：命中的 `content_type`、各内容类型原始分数摘要，以及 `backend`、`vector_type`、派生 `vector_space`、Execution Input Types 等技术元信息
 - 当前切片中，`debug=true` 的稳定最小实现至少应返回：参与本次查询的 `content_type` 列表、每个内容类型上的原始分数摘要、参与执行的 `vector_space` 摘要，以及当前后端 / 表征类型摘要
+- 当前切片中，`debug.vector_type` 的正式公开值固定为 `multi_vector_late_interaction`
 - 公开结果中的 `score` 与调试原始分数都只用于当前响应内的排序解释与诊断，不承诺跨内容类型或跨查询请求可直接比较
 - 显式请求未启用内容类型时，应返回明确不可用状态
 - 请求命中已启用但未就绪的内容类型时，应返回明确未就绪状态，而不是静默返回空结果

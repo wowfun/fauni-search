@@ -11,7 +11,7 @@
   - 单个临时上传文档
   - 库内文档对象引用，且使用 `source_id`
 - 当前阶段硬验收结果对象固定为 `document_page + image`；`video_segment` 保留为可选扩展命中，但不作为首轮验收阻塞项
-- 当前阶段索引主线固定为 `multivector first`
+- 当前阶段索引主线固定为 `multi_vector_late_interaction` `vector_space` 路线
 - 当前阶段首个查询文档格式固定为 `PDF`
 
 ## 当前阶段工作流
@@ -79,7 +79,7 @@
 
 ## 阶段验收摘要
 
-- 用户能够创建或选择启用了 `multivector` 的目标库，并在工作台中始终看到明确库上下文
+- 用户能够创建或选择启用了 `multi_vector_late_interaction` content types 的目标库，并在工作台中始终看到明确库上下文
 - 用户能够在共享搜索工作区切换到 `Document` 模式，并通过临时上传 PDF 提供查询文档
 - 用户能够在 `Document` 模式下不指定页范围直接按整份文档发起搜索
 - 用户能够在 `Document` 模式下指定页范围，以该文档片段作为实际查询输入发起搜索

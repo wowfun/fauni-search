@@ -105,7 +105,9 @@ pub(crate) fn execution_input_types_support_input_type(
     execution_input_types: &[String],
     input_type: &str,
 ) -> bool {
-    execution_input_types.iter().any(|value| value == input_type)
+    execution_input_types
+        .iter()
+        .any(|value| value == input_type)
 }
 
 pub(crate) fn default_provider_configs() -> BTreeMap<String, ProviderConfigRecord> {

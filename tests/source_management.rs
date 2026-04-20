@@ -15,7 +15,7 @@ async fn disabled_source_root_refresh_is_rejected_without_queueing_a_job() {
         .post_json(
             "/libraries",
             json!({
-                "name": "disabled-root"
+                "display_name": "disabled-root"
             }),
         )
         .await
@@ -75,7 +75,7 @@ async fn source_root_patch_updates_rules_and_disabled_state() {
         .post_json(
             "/libraries",
             json!({
-                "name": "patch-root"
+                "display_name": "patch-root"
             }),
         )
         .await
@@ -148,7 +148,7 @@ async fn source_root_delete_removes_it_from_listing_and_detail() {
         .post_json(
             "/libraries",
             json!({
-                "name": "delete-root"
+                "display_name": "delete-root"
             }),
         )
         .await

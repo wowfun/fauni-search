@@ -426,7 +426,7 @@ pub(crate) fn build_search_response(
         unsupported_content_types: plan.unsupported_content_types,
         debug: plan.debug.then_some(json!({
             "backend": "qdrant",
-            "repr_kind": "multivector",
+            "vector_type": "multi_vector_late_interaction",
             "content_types": content_types_debug,
             "vector_spaces": vector_spaces.into_values().collect::<Vec<_>>(),
             "query_vector_count": executed_groups

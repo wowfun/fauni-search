@@ -139,8 +139,13 @@ def assert_result_kinds(label: str, search_data: dict, required_kinds: set[str])
             + json.dumps(search_data, ensure_ascii=False)
         )
     debug = search_data.get("debug") or {}
-    if debug.get("backend") != "qdrant" or debug.get("repr_kind") != "multivector":
-        raise SystemExit(f"[error] {label} did not report the qdrant multivector backend")
+    if (
+        debug.get("backend") != "qdrant"
+        or debug.get("vector_type") != "multi_vector_late_interaction"
+    ):
+        raise SystemExit(
+            f"[error] {label} did not report the qdrant multi_vector_late_interaction backend"
+        )
     return result_kinds
 
 
@@ -303,7 +308,7 @@ def main() -> int:
         "ranged_result_kinds": sorted(ranged_result_kinds),
         "document_page_reuse_result_kinds": sorted(reuse_result_kinds),
         "backend": temp_search.get("debug", {}).get("backend"),
-        "repr_kind": temp_search.get("debug", {}).get("repr_kind"),
+        "vector_type": temp_search.get("debug", {}).get("vector_type"),
         "pdf_path": str(pdf_path),
         "image_path": str(image_path),
     }

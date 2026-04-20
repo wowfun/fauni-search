@@ -86,7 +86,7 @@
 
 - 使用 `Playwright` 覆盖共享搜索工作区中的视频搜索闭环
 - 当前阶段 Playwright 至少覆盖以下路径：
-  - 创建启用 `multivector` 的库
+  - 创建启用 `multi_vector_late_interaction` content types 的库
   - 先让视频、图片或 PDF 内容进入可搜索状态
   - 切换到 `Video` 模式
   - 通过临时上传视频或库内视频对象引用提供查询视频
@@ -115,14 +115,14 @@
   - 临时上传视频 + 可选时间范围能够触发真实 `/search/video`
   - 库内 `source_id + 可选时间范围` 能再次触发真实 `/search/video`
   - 同一结果集中能看到 `video_segment`、`image` 与 `document_page`
-  - 后端为 `qdrant`，表征为 `multivector`
+  - 后端为 `qdrant`，表征为 `multi_vector_late_interaction`
 - GPU smoke 与手工验收可以先通过 local-only manifest 自动派生所需截图和 clip，而不是手工维护第二套视频子样本
 
 ## 当前阶段场景矩阵
 
 | 场景 | 优先验证层 | 说明 |
 | --- | --- | --- |
-| 创建或选择启用 `multivector` 的目标库 | UI E2E + Rust 主服务 | 证明当前工作台始终有明确库上下文 |
+| 创建或选择启用 `multi_vector_late_interaction` content types 的目标库 | UI E2E + Rust 主服务 | 证明当前工作台始终有明确库上下文 |
 | 查询视频上传成功创建临时资产 | Rust 主服务 + UI E2E | 验证临时查询资产链路 |
 | 非视频上传被拒绝 | Rust 主服务 + UI E2E | 验证输入错误不被伪装成无结果 |
 | 时间范围缺失时按整段视频查询 | Rust 主服务 + UI E2E + GPU smoke | 验证默认整段视频语义 |

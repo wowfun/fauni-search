@@ -17,7 +17,7 @@ async fn libraries_and_source_roots_survive_restart() {
         .post_json(
             "/libraries",
             json!({
-                "name": "restart-persistence"
+                "display_name": "restart-persistence"
             }),
         )
         .await;

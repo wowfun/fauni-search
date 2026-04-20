@@ -13,6 +13,16 @@ pub(crate) struct CreateLibraryRequest {
     pub(crate) name: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateLibraryApiRequest {
+    #[serde(default)]
+    pub(crate) library_id: Option<String>,
+    #[serde(default)]
+    pub(crate) display_name: Option<String>,
+    #[serde(default, flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct LibrariesListData {
     pub(crate) libraries: Vec<LibrarySnapshot>,
@@ -22,7 +32,6 @@ pub(crate) struct LibrariesListData {
 pub(crate) struct LibrarySnapshot {
     pub(crate) id: String,
     pub(crate) display_name: String,
-    pub(crate) name: String,
     pub(crate) counts: LibraryCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) latest_job_id: Option<String>,

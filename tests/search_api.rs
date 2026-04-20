@@ -7,7 +7,7 @@ use support::{MultipartFile, TestEnv};
 
 fn example_video_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("data/example/generate_q2_report_from_csv_bank_data-720-512.mp4")
+        .join("data/example/lib/generate_q2_report_from_csv_bank_data-720-512.mp4")
 }
 
 #[tokio::test]
@@ -18,7 +18,7 @@ async fn search_text_rejects_empty_text() {
         .post_json(
             "/libraries",
             json!({
-                "name": "search-validation"
+                "display_name": "search-validation"
             }),
         )
         .await
@@ -48,7 +48,7 @@ async fn search_text_reports_not_ready_when_library_has_no_active_index() {
         .post_json(
             "/libraries",
             json!({
-                "name": "search-not-ready"
+                "display_name": "search-not-ready"
             }),
         )
         .await
@@ -85,7 +85,7 @@ async fn search_text_rejects_target_content_types_that_are_not_enabled() {
         .post_json(
             "/libraries",
             json!({
-                "name": "search-target-content-types"
+                "display_name": "search-target-content-types"
             }),
         )
         .await
@@ -117,7 +117,7 @@ async fn search_text_not_ready_includes_latest_job_details() {
         .post_json(
             "/libraries",
             json!({
-                "name": "search-latest-job"
+                "display_name": "search-latest-job"
             }),
         )
         .await
@@ -177,7 +177,7 @@ async fn search_video_uses_execution_input_types_for_local_sidecar() {
         .post_json(
             "/libraries",
             json!({
-                "name": "search-video-execution-inputs"
+                "display_name": "search-video-execution-inputs"
             }),
         )
         .await
@@ -192,7 +192,8 @@ async fn search_video_uses_execution_input_types_for_local_sidecar() {
                 field_name: "file".to_string(),
                 filename: "query-video.mp4".to_string(),
                 content_type: "video/mp4".to_string(),
-                bytes: std::fs::read(example_video_path()).expect("example video should be readable"),
+                bytes: std::fs::read(example_video_path())
+                    .expect("example video should be readable"),
             }),
         )
         .await
@@ -225,7 +226,7 @@ async fn search_document_uses_execution_input_types_for_local_sidecar() {
         .post_json(
             "/libraries",
             json!({
-                "name": "search-document-execution-inputs"
+                "display_name": "search-document-execution-inputs"
             }),
         )
         .await

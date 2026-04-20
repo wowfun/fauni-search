@@ -23,7 +23,7 @@ async fn create_library_requires_display_name_or_library_id() {
     assert_eq!(invalid_body["error"]["code"], "validation_failed");
     assert_eq!(invalid_body["error"]["details"]["field"], "display_name");
 
-    let valid = app
+    let legacy_name = app
         .post_json(
             "/libraries",
             json!({
@@ -31,11 +31,24 @@ async fn create_library_requires_display_name_or_library_id() {
             }),
         )
         .await;
+    assert_eq!(legacy_name.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let legacy_name_body = legacy_name.json();
+    assert_eq!(legacy_name_body["error"]["code"], "validation_failed");
+    assert_eq!(legacy_name_body["error"]["details"]["field"], "name");
+
+    let valid = app
+        .post_json(
+            "/libraries",
+            json!({
+                "display_name": "demo"
+            }),
+        )
+        .await;
     assert_eq!(valid.status, StatusCode::CREATED);
     let valid_body = valid.json();
     assert_eq!(valid_body["data"]["id"], "demo");
     assert_eq!(valid_body["data"]["display_name"], "demo");
-    assert_eq!(valid_body["data"]["name"], "demo");
+    assert!(valid_body["data"].get("name").is_none());
     assert!(valid_body["data"].get("index_lines").is_none());
 }
 

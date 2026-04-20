@@ -206,8 +206,13 @@ def main() -> int:
             "[error] image search did not return both image and document_page results: "
             + json.dumps(searched, ensure_ascii=False)
         )
-    if debug.get("backend") != "qdrant" or debug.get("repr_kind") != "multivector":
-        raise SystemExit("[error] image search did not report the qdrant multivector backend")
+    if (
+        debug.get("backend") != "qdrant"
+        or debug.get("vector_type") != "multi_vector_late_interaction"
+    ):
+        raise SystemExit(
+            "[error] image search did not report the qdrant multi_vector_late_interaction backend"
+        )
 
     image_result = next((item for item in searched.get("results", []) if item.get("kind") == "image"), None)
     if not image_result:
@@ -247,10 +252,10 @@ def main() -> int:
         )
     if (
         library_object_debug.get("backend") != "qdrant"
-        or library_object_debug.get("repr_kind") != "multivector"
+        or library_object_debug.get("vector_type") != "multi_vector_late_interaction"
     ):
         raise SystemExit(
-            "[error] library-object image search did not report the qdrant multivector backend"
+            "[error] library-object image search did not report the qdrant multi_vector_late_interaction backend"
         )
 
     document_page_status, document_page_payload = post_json(
@@ -281,10 +286,10 @@ def main() -> int:
         )
     if (
         document_page_debug.get("backend") != "qdrant"
-        or document_page_debug.get("repr_kind") != "multivector"
+        or document_page_debug.get("vector_type") != "multi_vector_late_interaction"
     ):
         raise SystemExit(
-            "[error] document-page library-object image search did not report the qdrant multivector backend"
+            "[error] document-page library-object image search did not report the qdrant multi_vector_late_interaction backend"
         )
 
     summary = {
@@ -299,7 +304,7 @@ def main() -> int:
         "library_object_result_kinds": sorted(library_object_result_kinds),
         "document_page_library_object_result_kinds": sorted(document_page_result_kinds),
         "backend": debug.get("backend"),
-        "repr_kind": debug.get("repr_kind"),
+        "vector_type": debug.get("vector_type"),
         "query_vector_count": debug.get("query_vector_count"),
         "library_object_query_vector_count": library_object_debug.get("query_vector_count"),
         "document_page_query_vector_count": document_page_debug.get("query_vector_count"),

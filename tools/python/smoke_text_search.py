@@ -169,8 +169,13 @@ def main() -> int:
             "[error] search did not return both image and document_page results: "
             + json.dumps(searched, ensure_ascii=False)
         )
-    if debug.get("backend") != "qdrant" or debug.get("repr_kind") != "multivector":
-        raise SystemExit("[error] search did not report the qdrant multivector backend")
+    if (
+        debug.get("backend") != "qdrant"
+        or debug.get("vector_type") != "multi_vector_late_interaction"
+    ):
+        raise SystemExit(
+            "[error] search did not report the qdrant multi_vector_late_interaction backend"
+        )
 
     summary = {
         "status": "ok",
@@ -179,7 +184,7 @@ def main() -> int:
         "accepted": len(imported["accepted"]),
         "result_kinds": sorted(result_kinds),
         "backend": debug.get("backend"),
-        "repr_kind": debug.get("repr_kind"),
+        "vector_type": debug.get("vector_type"),
         "query_vector_count": debug.get("query_vector_count"),
         "retrieved_points": debug.get("retrieved_points"),
         "pdf_path": str(pdf_path),

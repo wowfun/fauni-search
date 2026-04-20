@@ -89,6 +89,12 @@ export interface ModelSelectionPayload {
   model_id: string;
 }
 
+export type BindingSource =
+  | "global_content_type"
+  | "library_content_type"
+  | "settings_model_test"
+  | string;
+
 export interface GlobalContentTypesData {
   content_types: ContentTypesPayload;
 }
@@ -98,7 +104,7 @@ export interface LibraryContentTypesData {
 }
 
 export interface ResolvedModelSelectionPayload {
-  binding_source: string;
+  binding_source: BindingSource;
   provider_id: string;
   provider_kind: string;
   model_id: string;
@@ -111,7 +117,7 @@ export interface ResolvedModelSelectionPayload {
 }
 
 export interface ResolvedContentModelSelectionPayload {
-  binding_source: string;
+  binding_source: BindingSource;
   content_type: string;
   provider_id: string;
   provider_kind: string;
@@ -217,7 +223,6 @@ export interface ModelTestComparisonData {
 export interface LibrarySnapshot {
   id: string;
   display_name: string;
-  name?: string;
   counts: LibraryCounts;
   latest_job_id?: string | null;
 }

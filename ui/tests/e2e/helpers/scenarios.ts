@@ -520,6 +520,9 @@ export function registerSettingsScenarios() {
     await expect(page.getByTestId("settings-workspace")).not.toContainText("selection_kind");
     await expect(page.getByTestId("settings-workspace")).not.toContainText("variant");
     await expect(page.getByTestId("resolved-content-models-panel")).toContainText(localModelId);
+    await expect(page.getByTestId("resolved-content-models-panel")).toContainText(
+      "global content type"
+    );
 
     await page.getByTestId("provider-config-id").selectOption("dashscope");
     await page.getByTestId("provider-base-url").fill("https://dashscope.aliyuncs.com");
@@ -578,7 +581,7 @@ export function registerSettingsScenarios() {
       body: JSON.stringify({
         data: {
           resolved_model: {
-            binding_source: "settings_draft",
+            binding_source: "settings_model_test",
             provider_id: "local_sidecar",
             provider_kind: "local_sidecar",
             model_id: localModelId,
@@ -589,7 +592,7 @@ export function registerSettingsScenarios() {
               supports_mixed_inputs: false,
             },
             status: "available",
-            message: `Validated ${modality} draft.`,
+            message: `Validated settings model test via ${operationKindByModality[modality]}.`,
             last_probed_at: "2026-04-19T00:00:00Z",
           },
           input_modality: modality,
@@ -643,6 +646,7 @@ export function registerSettingsScenarios() {
 
     const globalPanel = page.getByTestId("global-model-test-panel");
     await expect(globalPanel).toContainText(localModelId);
+    await expect(globalPanel).toContainText("settings model test");
     await expect(page.getByTestId("global-model-test-support-message")).toContainText("text, image");
     await expect(page.getByTestId("global-model-capabilities")).toContainText("inputs text, image");
     await expect(page.getByTestId("global-model-capabilities")).toContainText(

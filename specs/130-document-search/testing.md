@@ -82,7 +82,7 @@
 
 - 使用 `Playwright` 覆盖共享搜索工作区中的文档搜索闭环
 - 当前阶段 Playwright 至少覆盖以下路径：
-  - 创建启用 `multivector` 的库
+  - 创建启用 `multi_vector_late_interaction` content types 的库
   - 先让 PDF、图片或视频内容进入可搜索状态
   - 切换到 `Document` 模式
   - 通过临时上传 PDF 提供查询文档
@@ -109,7 +109,7 @@
   - `document_page` 结果复用查询
   - 同一结果集中至少能看到 `document_page` 与 `image`
   - 若当前阶段本地 fixture 与实现已经具备稳定跨文档到视频时刻的召回，再额外验证 `video_segment`
-  - 后端为 `qdrant`，表征为 `multivector`
+  - 后端为 `qdrant`，表征为 `multi_vector_late_interaction`
 
 ## 当前阶段场景矩阵
 

@@ -15,7 +15,7 @@ async fn jobs_endpoints_expose_import_jobs_and_library_filtering() {
         .post_json(
             "/libraries",
             json!({
-                "name": "jobs-first"
+                "display_name": "jobs-first"
             }),
         )
         .await
@@ -26,7 +26,7 @@ async fn jobs_endpoints_expose_import_jobs_and_library_filtering() {
         .post_json(
             "/libraries",
             json!({
-                "name": "jobs-second"
+                "display_name": "jobs-second"
             }),
         )
         .await

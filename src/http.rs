@@ -539,14 +539,39 @@ fn stage_model_test_file(
 
 async fn create_library(
     State(state): State<SharedState>,
-    Json(request): Json<CreateLibraryRequest>,
+    Json(request): Json<CreateLibraryApiRequest>,
 ) -> Result<(StatusCode, Json<SuccessEnvelope<LibrarySnapshot>>), ApiError> {
+    let request = normalize_create_library_request(request)?;
     let mut state = state.write().await;
     let snapshot = state.create_library(request)?;
     Ok((
         StatusCode::CREATED,
         Json(SuccessEnvelope { data: snapshot }),
     ))
+}
+
+fn normalize_create_library_request(
+    request: CreateLibraryApiRequest,
+) -> Result<CreateLibraryRequest, ApiError> {
+    if request.extra.contains_key("name") {
+        return Err(ApiError::validation_failed(
+            "Library name must be provided via display_name; the legacy name field is no longer accepted.",
+            Some(json!({ "field": "name" })),
+        ));
+    }
+
+    if let Some(field) = request.extra.keys().next() {
+        return Err(ApiError::validation_failed(
+            "Create library request contains an unsupported field.",
+            Some(json!({ "field": field })),
+        ));
+    }
+
+    Ok(CreateLibraryRequest {
+        library_id: request.library_id,
+        display_name: request.display_name,
+        name: String::new(),
+    })
 }
 
 async fn get_library_content_types(

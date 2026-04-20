@@ -134,35 +134,30 @@ class ColQwenRuntime:
                 {
                     "operation_kind": "query_embedding",
                     "supported": can_service,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "text",
                     "model": self._model_metadata(),
                 },
                 {
                     "operation_kind": "image_query_embedding",
                     "supported": can_service,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": self._model_metadata(),
                 },
                 {
                     "operation_kind": "video_query_embedding",
                     "supported": can_service,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": self._model_metadata(),
                 },
                 {
                     "operation_kind": "document_query_embedding",
                     "supported": can_service,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": self._model_metadata(),
                 },
                 {
                     "operation_kind": "document_embedding",
                     "supported": can_service,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": self._model_metadata(),
                 }

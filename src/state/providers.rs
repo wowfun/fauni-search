@@ -406,9 +406,9 @@ impl AppState {
         let mut content_types = BTreeMap::new();
         for (content_type, binding) in effective {
             let binding_source = if library.content_type_overrides.contains_key(&content_type) {
-                "library_override"
+                "library_content_type"
             } else {
-                "global_default"
+                "global_content_type"
             };
             content_types.insert(
                 content_type.clone(),
@@ -705,7 +705,7 @@ impl AppState {
                     .cloned()
                     .unwrap_or_default();
                 let resolved_model = ResolvedModelSelectionPayload {
-                    binding_source: "settings_draft".to_string(),
+                    binding_source: "settings_model_test".to_string(),
                     provider_id: provider.provider_id.clone(),
                     provider_kind: provider.provider_kind.clone(),
                     model_id: runtime_model.model_id,
@@ -715,7 +715,7 @@ impl AppState {
                     embedding_capabilities,
                     status: "available".to_string(),
                     message: format!(
-                        "Validated settings draft via {}.",
+                        "Validated settings model test via {}.",
                         model_test_operation_kind(&input_modality)
                     ),
                     last_probed_at: probe.last_probed_at.clone(),
@@ -724,7 +724,7 @@ impl AppState {
                     Some(provider_context_payload(&ResolvedExecutionModelSelection {
                         summary: resolved_model.clone(),
                         vector_type,
-                        vector_space_id: "settings_draft".to_string(),
+                        vector_space_id: "settings_model_test".to_string(),
                         execution_input_types: self
                             .provider_execution_input_types
                             .get(LOCAL_SIDECAR_PROVIDER_ID)

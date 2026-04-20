@@ -43,7 +43,6 @@ class FakeRuntime:
                 {
                     "operation_kind": "query_embedding",
                     "supported": True,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "text",
                     "model": {
                         "model_id": "fake/model",
@@ -57,7 +56,6 @@ class FakeRuntime:
                 {
                     "operation_kind": "image_query_embedding",
                     "supported": True,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": {
                         "model_id": "fake/model",
@@ -71,7 +69,6 @@ class FakeRuntime:
                 {
                     "operation_kind": "video_query_embedding",
                     "supported": True,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": {
                         "model_id": "fake/model",
@@ -85,7 +82,6 @@ class FakeRuntime:
                 {
                     "operation_kind": "document_query_embedding",
                     "supported": True,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": {
                         "model_id": "fake/model",
@@ -99,7 +95,6 @@ class FakeRuntime:
                 {
                     "operation_kind": "document_embedding",
                     "supported": True,
-                    "target_index_lines": ["multivector"],
                     "input_kind": "local_file",
                     "model": {
                         "model_id": "fake/model",
@@ -295,7 +290,7 @@ def test_capabilities_exposes_query_embedding_operation() -> None:
         "document_query_embedding",
         "document_embedding",
     ]
-    assert payload["operations"][0]["target_index_lines"] == ["multivector"]
+    assert "target_index_lines" not in payload["operations"][0]
 
 
 def test_embed_returns_query_vectors() -> None:

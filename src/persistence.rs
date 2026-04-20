@@ -25,9 +25,9 @@ pub(crate) struct DurableAppStateSnapshot {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DurableLibraryRecord {
     pub(crate) id: String,
-    #[serde(alias = "name")]
     pub(crate) display_name: String,
     pub(crate) source_roots: BTreeMap<String, DurableSourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
@@ -35,7 +35,7 @@ pub(crate) struct DurableLibraryRecord {
     pub(crate) source_order: Vec<String>,
     pub(crate) visual_units: BTreeMap<String, VisualUnitRecord>,
     pub(crate) visual_unit_order: Vec<String>,
-    #[serde(default, alias = "active_index_lines")]
+    #[serde(default)]
     pub(crate) active_vector_spaces: BTreeSet<String>,
     #[serde(default)]
     pub(crate) retired_vector_spaces: BTreeMap<String, RetiredVectorSpaceRecord>,
@@ -180,4 +180,65 @@ fn current_unix_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn decode_durable_state_snapshot_rejects_legacy_library_fields() {
+        let payload = r#"{
+          "version": 1,
+          "library_order": ["demo"],
+          "libraries": {
+            "demo": {
+              "id": "demo",
+              "name": "Demo",
+              "source_roots": {},
+              "source_root_order": [],
+              "sources": {},
+              "source_order": [],
+              "visual_units": {},
+              "visual_unit_order": [],
+              "active_index_lines": ["legacy-index"],
+              "retired_vector_spaces": {}
+            }
+          }
+        }"#;
+
+        let error = decode_durable_state_snapshot(Path::new("legacy-state.sqlite"), payload)
+            .expect_err("legacy durable payload should no longer decode");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let message = error.to_string();
+        assert!(message.contains("unknown field `name`") || message.contains("display_name"));
+    }
+
+    #[test]
+    fn decode_durable_state_snapshot_rejects_legacy_active_index_lines_field() {
+        let payload = r#"{
+          "version": 1,
+          "library_order": ["demo"],
+          "libraries": {
+            "demo": {
+              "id": "demo",
+              "display_name": "Demo",
+              "source_roots": {},
+              "source_root_order": [],
+              "sources": {},
+              "source_order": [],
+              "visual_units": {},
+              "visual_unit_order": [],
+              "active_index_lines": ["legacy-index"],
+              "retired_vector_spaces": {}
+            }
+          }
+        }"#;
+
+        let error = decode_durable_state_snapshot(Path::new("legacy-state.sqlite"), payload)
+            .expect_err("legacy active_index_lines payload should no longer decode");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("active_index_lines"));
+    }
 }

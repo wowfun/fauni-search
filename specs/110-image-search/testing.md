@@ -82,7 +82,7 @@
 
 - 使用 `Playwright` 覆盖共享搜索工作区中的图片搜索闭环
 - 当前阶段 Playwright 至少覆盖以下 3 条路径：
-  - 创建启用 `multivector` 的库
+  - 创建启用 `multi_vector_late_interaction` content types 的库
   - 先让图片 / PDF 内容进入可搜索状态
   - 切换到 `Image` 模式
   - 通过文件选择或剪贴板粘贴提供查询图片
@@ -104,7 +104,7 @@
 
 | 场景 | 优先验证层 | 说明 |
 | --- | --- | --- |
-| 创建或选择启用 `multivector` 的目标库 | UI E2E + Rust 主服务 | 证明当前工作台始终有明确库上下文 |
+| 创建或选择启用 `multi_vector_late_interaction` content types 的目标库 | UI E2E + Rust 主服务 | 证明当前工作台始终有明确库上下文 |
 | 查询图片上传成功创建临时资产 | Rust 主服务 + UI E2E | 验证临时查询资产链路 |
 | 剪贴板粘贴图片成功进入查询资产链路 | UI E2E | 验证工作区支持像搜索框一样的粘贴图片入口 |
 | 非图片上传被拒绝 | Rust 主服务 + UI E2E | 验证输入错误不被伪装成无结果 |

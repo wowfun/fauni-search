@@ -113,9 +113,10 @@
 - `debug` 载荷继续承接更细粒度的后端原始分数与技术诊断；公开 `score` 不能替代这些调试字段
 - 当前切片中，`debug` 载荷的稳定最小结构至少应支持：
   - `backend`
-  - `repr_kind`
+  - `vector_type`
   - `content_types`
   - `vector_spaces`
+- 当前切片中，`debug.vector_type` 的正式公开值固定为 `multi_vector_late_interaction`
 - 搜索请求若同时携带多种查询输入、显式请求未启用内容类型，或命中已启用但未就绪的目标内容类型，应通过统一错误载荷返回失败
 - `unsupported_content_types` 的稳定最小编码应为对象数组；每项至少应支持：
   - `content_type`
@@ -142,12 +143,11 @@
 - `POST /libraries` 的请求载荷至少应支持：
   - 可选 `library_id`
   - 可选 `display_name`
-- 当前切片中，若仍保留旧 `name` 输入字段，它只能作为 `display_name` 的兼容别名，不得再承担稳定身份语义
+- `POST /libraries` 不再承接旧 `name` 输入字段；若请求仍携带该字段，应通过统一错误载荷返回 `validation_failed`
 - 若未提供 `library_id`，服务端必须从 `display_name` 生成 slug 风格稳定标识，并在冲突时自动追加后缀
 - `GET /libraries` 与 `GET /libraries/{library_id}` 的库快照至少应返回：
   - 稳定 `id`
   - `display_name`
-  - 当前切片可附带旧 `name` 兼容别名，但客户端不应再依赖它承接稳定身份
 - 库管理、来源根与规则管理、配置与绑定管理、收藏管理、搜索历史管理等资源型接口，应采用统一的资源快照载荷与列表 / 详情 / 变更响应形状
 - 若通过 HTTP 暴露，来源根资源接口的稳定入口应包括：
   - `GET /libraries/{library_id}/source-roots`
@@ -240,6 +240,10 @@
   - `status`
   - `message`
   - `last_probed_at`
+- 当前切片中，`resolved-content-models` 与 `POST /settings/model-tests` 返回中的 `binding_source` 正式公开值固定为：
+  - `global_content_type`
+  - `library_content_type`
+  - `settings_model_test`
 - `GET /libraries/{library_id}/vector-space-diagnostics` 的稳定最小返回应支持 `vector_spaces` 数组
 - 每个 vector-space diagnostics 条目至少应支持：
   - `vector_space_id`
@@ -343,6 +347,12 @@
   - `execution_input_types`：当前执行面可承接的查询输入
   - `runtime_adapters`：工程增强后的输入适配能力
 - `execution_input_types` 必须由 `operations + runtime_adapters` 派生，而不是由 `embedding_capabilities` 反推
+- `GET /capabilities` 中的 `operations` 应返回结构化操作数组；每项至少应支持：
+  - `operation_kind`
+  - `supported`
+  - `input_kind`
+  - `model`
+- `operations` 条目不得再暴露旧 `target_index_lines` 字段；调用方应通过 `operation_kind` 与顶层 `embedding_capabilities.vector_types` 理解当前执行面
 - 若某个能力响应项可用于 Settings 模型测试，其可测试模态必须由 `embedding_capabilities.input_types` 推导，而不是由工程增强操作列表反推
 - 推理 / 编码请求至少应显式携带：
   - `operation_kind`

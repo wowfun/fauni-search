@@ -3,8 +3,8 @@ use crate::{
     model::{ProviderConfigRecord, VisualUnitRecord},
     provider::{
         current_rfc3339_timestamp, local_sidecar_embedding_capabilities,
-        local_sidecar_execution_input_types, ProviderRuntimeModelSnapshot,
-        QUERY_KIND_DOCUMENT, QUERY_KIND_IMAGE, QUERY_KIND_TEXT, QUERY_KIND_VIDEO,
+        local_sidecar_execution_input_types, ProviderRuntimeModelSnapshot, QUERY_KIND_DOCUMENT,
+        QUERY_KIND_IMAGE, QUERY_KIND_TEXT, QUERY_KIND_VIDEO,
     },
     SIDECAR_REQUEST_TIMEOUT_SECS,
 };

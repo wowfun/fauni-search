@@ -1183,7 +1183,7 @@ fn build_search_response_returns_qdrant_results_after_import() {
                 &job_id,
                 prepared,
                 ImportJobOutcome::completed(
-                    "Accepted 2 path(s); indexed 3 visual unit(s) into the active multivector collection."
+                    "Accepted 2 path(s); indexed 3 visual unit(s) into the active vector_space namespace."
                         .to_string(),
                     2,
                     BTreeSet::from([available_vector_space_id()]),
@@ -1249,7 +1249,10 @@ fn build_search_response_returns_qdrant_results_after_import() {
         .preview
         .url
         .starts_with("http://127.0.0.1:53210/libraries/")));
-    assert_eq!(response.debug.as_ref().unwrap()["repr_kind"], "multivector");
+    assert_eq!(
+        response.debug.as_ref().unwrap()["vector_type"],
+        "multi_vector_late_interaction"
+    );
     assert_eq!(
         response.debug.as_ref().unwrap()["vector_spaces"][0]["vector_space_id"],
         available_vector_space_id()
@@ -2839,7 +2842,7 @@ fn available_provider_selection() -> ResolvedExecutionModelSelection {
         vector_space_id: available_vector_space_id(),
         execution_input_types: local_sidecar_execution_input_types(),
         summary: ResolvedModelSelectionPayload {
-            binding_source: "global_default".to_string(),
+            binding_source: "global_content_type".to_string(),
             provider_id: LOCAL_SIDECAR_PROVIDER_ID.to_string(),
             provider_kind: LOCAL_SIDECAR_PROVIDER_KIND.to_string(),
             model_id: "athrael-soju/colqwen3.5-4.5B-v3".to_string(),
@@ -2892,7 +2895,7 @@ fn default_resolved_content_models() -> BTreeMap<String, ResolvedContentModelSel
         (
             "image".to_string(),
             ResolvedContentModelSelectionPayload {
-                binding_source: "global_default".to_string(),
+                binding_source: "global_content_type".to_string(),
                 content_type: "image".to_string(),
                 provider_id: summary.provider_id.clone(),
                 provider_kind: summary.provider_kind.clone(),
@@ -2910,7 +2913,7 @@ fn default_resolved_content_models() -> BTreeMap<String, ResolvedContentModelSel
         (
             "document".to_string(),
             ResolvedContentModelSelectionPayload {
-                binding_source: "global_default".to_string(),
+                binding_source: "global_content_type".to_string(),
                 content_type: "document".to_string(),
                 provider_id: summary.provider_id.clone(),
                 provider_kind: summary.provider_kind.clone(),
@@ -2928,7 +2931,7 @@ fn default_resolved_content_models() -> BTreeMap<String, ResolvedContentModelSel
         (
             "video".to_string(),
             ResolvedContentModelSelectionPayload {
-                binding_source: "global_default".to_string(),
+                binding_source: "global_content_type".to_string(),
                 content_type: "video".to_string(),
                 provider_id: summary.provider_id.clone(),
                 provider_kind: summary.provider_kind.clone(),

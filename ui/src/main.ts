@@ -2,6 +2,7 @@ import "./style.css";
 import type {
   ApiErrorPayload,
   AppState,
+  BindingSource,
   ContentTypeBindingPayload,
   ContentTypesPayload,
   EmbeddingCapabilities,
@@ -344,12 +345,12 @@ function selectedLibrary(): LibrarySnapshot | null {
 }
 
 function libraryDisplayName(
-  library: Pick<LibrarySnapshot, "display_name" | "name" | "id"> | null | undefined
+  library: Pick<LibrarySnapshot, "display_name" | "id"> | null | undefined
 ): string {
   if (!library) {
     return "";
   }
-  return library.display_name?.trim() || library.name?.trim() || library.id;
+  return library.display_name?.trim() || library.id;
 }
 
 function emptyInventorySummary(): InventorySummary {
@@ -444,11 +445,24 @@ function formatResolvedContentModel(selection: ResolvedContentModelSelectionPayl
   return formatResolvedModel(selection);
 }
 
+function formatBindingSource(bindingSource: BindingSource | undefined) {
+  switch (bindingSource) {
+    case "global_content_type":
+      return "global content type";
+    case "library_content_type":
+      return "library content type";
+    case "settings_model_test":
+      return "settings model test";
+    default:
+      return bindingSource ? bindingSource.replaceAll("_", " ") : "unknown";
+  }
+}
+
 function formatResolvedModelContext(selection: ResolvedModelSelectionPayload | undefined) {
   if (!selection) {
     return "未解析";
   }
-  const parts = [selection.binding_source, selection.status];
+  const parts = [formatBindingSource(selection.binding_source), selection.status];
   const provider = state.providerConfigs.find((item) => item.provider_id === selection.provider_id);
   if (provider?.base_url) {
     parts.push(provider.base_url);
@@ -2602,7 +2616,7 @@ function renderResolvedContentModelsPanel(library: LibrarySnapshot | null) {
         <li class="provider-resolution-row">
           <div>
             <strong>${escapeHtml(contentType)}</strong>
-            <span class="helper">${escapeHtml(formatResolvedContentModel(selection))} · ${escapeHtml(selection.binding_source)}</span>
+            <span class="helper">${escapeHtml(formatResolvedContentModel(selection))} · ${escapeHtml(formatBindingSource(selection.binding_source))}</span>
             <span class="helper">${escapeHtml(formatResolvedContentModelContext(selection))}</span>
             <span class="helper">${escapeHtml(`vector_type ${selection.vector_type}`)}</span>
             ${

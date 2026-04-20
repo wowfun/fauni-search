@@ -57,7 +57,7 @@
 
 - 使用 `cargo test` 覆盖当前阶段最贴近业务改动的逻辑
 - 优先覆盖：
-  - 建库配置中 `multivector` 的显式启用约束
+  - 建库配置中 `multi_vector_late_interaction` 的显式启用约束
   - 路径导入的部分接受与逐项原因汇总
   - 任务阶段推进与工作台所需任务摘要
   - 文本搜索命中 `document_page` / `image`
@@ -76,7 +76,7 @@
 
 - 使用 `Playwright` 覆盖单页工作台闭环
 - 当前阶段第一条 UI smoke 固定为最小 happy path：
-  - 创建启用 `multivector` 的库
+  - 创建启用 `multi_vector_late_interaction` content types 的库
   - 触发 demo 导入
   - 等待后台任务完成
   - 执行文本搜索
@@ -96,7 +96,7 @@
 
 | 场景 | 优先验证层 | 说明 |
 | --- | --- | --- |
-| 创建或选择启用 `multivector` 的目标库 | UI E2E + Rust 主服务 | 证明当前工作台始终有明确库上下文 |
+| 创建或选择启用 `multi_vector_late_interaction` content types 的目标库 | UI E2E + Rust 主服务 | 证明当前工作台始终有明确库上下文 |
 | 路径导入的部分接受与逐项原因 | Rust 主服务 + UI E2E | 验证有效项进入单任务、无效项有逐项反馈 |
 | 任务面板阶段显示与失败摘要 | Rust 主服务 + UI E2E | 验证嵌入式任务观察面 |
 | 文本查询命中文档页 | Rust 主服务 + GPU smoke | 证明 `document_page` 命中路径 |

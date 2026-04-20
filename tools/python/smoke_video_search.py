@@ -181,9 +181,12 @@ def require_result_kinds(payload: dict, expected: set[str], label: str) -> None:
             + json.dumps(payload, ensure_ascii=False)
         )
     debug = payload.get("debug") or {}
-    if debug.get("backend") != "qdrant" or debug.get("repr_kind") != "multivector":
+    if (
+        debug.get("backend") != "qdrant"
+        or debug.get("vector_type") != "multi_vector_late_interaction"
+    ):
         raise SystemExit(
-            f"[error] {label} did not report the qdrant multivector backend: "
+            f"[error] {label} did not report the qdrant multi_vector_late_interaction backend: "
             + json.dumps(payload, ensure_ascii=False)
         )
 
@@ -377,7 +380,7 @@ def main() -> int:
             {item["kind"] for item in video_segment_object_search["results"]}
         ),
         "backend": temp_asset_search.get("debug", {}).get("backend"),
-        "repr_kind": temp_asset_search.get("debug", {}).get("repr_kind"),
+        "vector_type": temp_asset_search.get("debug", {}).get("vector_type"),
     }
 
     if args.json:
@@ -400,7 +403,7 @@ def main() -> int:
             f"{payload['video_segment_object_result_kinds']}"
         )
         print(f"backend: {payload['backend']}")
-        print(f"repr_kind: {payload['repr_kind']}")
+        print(f"vector_type: {payload['vector_type']}")
     return 0
 
 
