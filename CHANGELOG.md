@@ -1,10 +1,20 @@
 # CHANGELOG
 
+## 2026-04-20
+### Changed
+- Started the config-file cutover for provider/model/runtime selection with tracked `fauni.config.json`, merged `${APP_RUNTIME_DIR}/runtime-config.json`, `local_sidecar.active_model + version` resolution, config-backed Settings writes, and explicit legacy-runtime cutover tooling for default and `--dev` environments.
+- Continued the library/content-type control-plane migration by splitting `library_id` from `display_name`, moving search targeting and skipped-search diagnostics to `target_content_types` / `unsupported_content_types`, and removing the remaining public `index_lines`-style contract remnants from library, settings, and search surfaces.
+- Advanced the internal `index_line -> vector_space` refactor by deriving `vector_space_id` from config-backed model state, executing import/source-action/search work per space, preserving partial-success activations under failed jobs, and immediately retiring superseded active spaces on content-type rebinds.
+- Added durable retired-`vector_space` inventory, a maintenance cleanup loop, runtime-health snapshots, and library-scoped vector-space diagnostics so execution state, provider probes, and stale Qdrant namespaces are observable and eventually reaped instead of being silently dropped.
+- Finished the tracked `ui/` TypeScript cutover for Vite/Playwright support files, split the old monolithic smoke suite into domain specs, promoted `display_name` and runtime-health/vector-space diagnostics in the shared workspace, and added dedicated local `runtime-health` / `check-e2e` operator entry points.
+
 ## 2026-04-19
 ### Changed
+- Renamed the runtime model env contract from `TEXT_SEARCH_*` to `EMBEDDING_*` across local scripts, Rust/provider bootstrap, sidecar runtime loading, test harnesses, and operator docs, while keeping `download-model.sh` aligned with the new names.
 - Added the first runnable `005-provider-capabilities-and-profiles` slice across the Rust app and Settings workspace, covering durable provider/model defaults, library overrides, resolved-model summaries, `remote_http` as a configurable-but-not-executable shell, and black-box API/UI coverage for the new control surface.
 - Simplified the public `005` surface to a strict pre-stable `provider_id + model_id` contract by removing `selection_kind`, `variant`, and the unused `region` field, tightening `multivector` model validation, and surfacing the exact active model more directly across Settings and shared provider summaries.
 - Reframed the current `005` capability surface around `EmbeddingCapabilities`, separating native embedding facts from runtime adapters, limiting Settings model tests to native `text` / `image` inputs, and fixing the local-sidecar draft-test flow so runtime-derived connection details stay display-only.
+- Extended Settings model tests to support an optional second native input with independent modality selection, returning both inputs' vectors plus cosine similarity derived from their pooled vectors for same-modality and cross-modality diagnostics.
 - Completed the current search-controls slice by adding opaque cursor pagination, `visual_unit.kind` / `path_prefix` / `source_type` / `time_range` filtering, and richer `debug` search diagnostics in the Rust app, while tightening the shared `004/009` specs and adding narrow search-response / search-plan coverage.
 - Extended the shared search workspace with a lightweight search-filter dock, deterministic `Load more` pagination behavior backed by saved search snapshots, and UI coverage for filter payload wiring and local invalid-time-range rejection.
 
