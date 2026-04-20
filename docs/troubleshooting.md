@@ -152,11 +152,12 @@ tail -n 50 data/runtime/dev/logs/qdrant.log
 - 确认 `qdrant` 命令可执行
 - 再检查 `DEV_LOG_DIR` 下的 `qdrant.log`
 
-## 旧 `index_*` collection 需要手工清理
+## 旧 collection 或 legacy 归档需要清理
 
 症状：
 - app 启动后原本已有库变成 `not_ready`
 - 你在 Qdrant storage 或 `GET /collections` 中还能看到旧 `index_*` 物理 collection
+- 你在当前环境的 runtime root 下还能看到 `legacy-*` 归档目录
 - 你刚切到新的 alias 语义实现后，`refresh` / `rescan` 无法接管这些旧 collection
 
 检查：
@@ -178,7 +179,19 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 处理：
 - 当前 `index_{library_id}_{index_line}` 承担的是 active logical namespace；旧“直接物理 `index_*` collection”不再兼容
 - `run.sh` / `stop.sh` 不会替你自动迁移或自动删除这些旧 collection
-- 先在选中 profile 下手工删除旧物理 `index_*` collection，再让新的导入、`refresh` 或 `rescan` 重建当前 active alias 与其物理 target
+- 先用 `cleanup-legacy-runtime.sh` 扫描当前环境的 legacy 归档与旧 collection：
+
+```bash
+bash scripts/local/cleanup-legacy-runtime.sh --json
+```
+
+- 确认 app、sidecar、UI 和 Qdrant 都已停止后，再显式执行删除：
+
+```bash
+bash scripts/local/cleanup-legacy-runtime.sh --execute
+```
+
+- `cleanup-legacy-runtime.sh` 会清理当前环境下的 `legacy-*` 归档、旧 `index_*` / `text_search_*` / 直接物理 `vector_space_*` collections，但会保留 alias 当前 target 和全部 `vector_space_stage_*`
 - 如果你只是清掉了 collection 文件而没有重新构建索引，库会停在 `not_ready`，这是预期行为
 
 ## 索引完成后 `free -h` 仍显示高内存占用
@@ -247,6 +260,13 @@ bash scripts/local/cutover-runtime.sh --dev
 ```
 
 - `cutover-runtime.sh` 只归档旧 `app/` 与 `qdrant/`，不会移动下载缓存、模型缓存或日志
+- cutover 完成后，如需清掉归档目录和旧世代 collection，再执行：
+
+```bash
+bash scripts/local/cleanup-legacy-runtime.sh --json
+bash scripts/local/cleanup-legacy-runtime.sh --execute
+```
+
 - UI 启不来：先看 `ui.log`，常见是端口冲突或 `ui/node_modules` 没准备好
 
 如果以上都不明显，回到第一步重新跑：

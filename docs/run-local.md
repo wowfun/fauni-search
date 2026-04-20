@@ -15,7 +15,7 @@
   - 通过 PDF 上传进入文档查询链路，并可选指定 `start_page/end_page` 页范围，或从库内 `document_page` 结果对象直接复用为查询文档
   - 显式 `not_ready` 反馈和真实搜索结果列表
 - 当前 sidecar 已经具备真实的 ColQwen `query_embedding`、`image_query_embedding`、`video_query_embedding`、`document_embedding` 与 `document_query_embedding` 能力，并提供 `/health`、`/capabilities`、`/embed`。
-- 当前 app 已经接通真实的 `app -> sidecar -> Qdrant` multivector 搜索链，当前可实际命中 `image`、真实页级 `document_page` 与 `video_segment`。
+- 当前 app 已经接通真实的 `app -> sidecar -> Qdrant` `vector_space` 搜索链，当前向量表征固定为 `multi_vector_late_interaction`，可实际命中 `image`、真实页级 `document_page` 与 `video_segment`。
 - repo 基线现在默认让 `local_sidecar/athrael-soju/colqwen3.5-4.5B-v3` 承接 `image`、`document`、`video` 三类 content types；模型原生 `EmbeddingCapabilities` 仍只声明 `text,image`，`document/video` 通过 runtime execution inputs 与 adapter 链路执行。
 - 当前仍然是早期工作台，不包含完整产品控制面，但已经具备文本、图片、视频与文档四种查询主链。
 - 默认使用根 `.env` 作为本地运行时配置；传 `--dev` 时使用 `.env.dev`。同一次运行中，被选中的 env 文件是端口、URL、日志目录和运行时目录的单一事实源。
@@ -76,6 +76,15 @@ bash scripts/local/cutover-runtime.sh
 bash scripts/local/cutover-runtime.sh --dev
 ```
 
+`cutover-runtime.sh` 负责把旧世代 `app/` 与 `qdrant/` 归档到同环境下的 `legacy-*` 目录，并初始化新的 `${APP_RUNTIME_DIR}/runtime-config.json`。如果确认不再需要这些归档或旧世代 collection，可以再显式执行：
+
+```bash
+bash scripts/local/cleanup-legacy-runtime.sh --json
+bash scripts/local/cleanup-legacy-runtime.sh --execute
+```
+
+`cleanup-legacy-runtime.sh` 只清理当前环境下的 `legacy-*` 归档和旧 `index_*` / `text_search_*` / 直接物理 `vector_space_*` collections；它不会删除 alias 当前 target，也不会把 `vector_space_stage_*` 当成 legacy 数据误删。
+
 如果这套服务需要和默认 `.env` 服务同时存在，给日常命令统一加 `--dev`：
 
 ```bash
@@ -133,7 +142,7 @@ bash scripts/local/smoke-text-search.sh
 bash scripts/local/smoke-text-search.sh --dev --json
 ```
 
-该脚本会创建一个临时库，导入一张现有图片 fixture 和一个写入 `APP_RUNTIME_DIR/smoke-text-search/` 的多页 PDF，随后验证文本查询能够同时返回 `image` 与 `document_page`，并确认搜索后端是 `qdrant` / `multivector`。
+该脚本会创建一个临时库，导入一张现有图片 fixture 和一个写入 `APP_RUNTIME_DIR/smoke-text-search/` 的多页 PDF，随后验证文本查询能够同时返回 `image` 与 `document_page`，并确认搜索后端是 `qdrant`，表征类型是 `multi_vector_late_interaction`。
 
 图片查询对应 smoke：
 
@@ -141,7 +150,7 @@ bash scripts/local/smoke-text-search.sh --dev --json
 bash scripts/local/smoke-image-search.sh --dev --json
 ```
 
-该脚本会创建一个临时库，导入同一组图片 / PDF 内容，上传一张临时查询图片，然后验证 `/search/image` 能够同时返回 `image` 与 `document_page`，并确认搜索后端是 `qdrant` / `multivector`。
+该脚本会创建一个临时库，导入同一组图片 / PDF 内容，上传一张临时查询图片，然后验证 `/search/image` 能够同时返回 `image` 与 `document_page`，并确认搜索后端是 `qdrant`，表征类型是 `multi_vector_late_interaction`。
 随后它还会复用库内返回的 `image` 结果对象，以 `library_object` 形式再次发起图片搜索，并验证这条路径也能命中 `image` 与 `document_page`。
 最后它还会复用库内返回的 `document_page` 对象，以 `library_object` 形式再次发起图片搜索，并验证文档页 query image 链路也能命中 `image` 与 `document_page`。
 
@@ -157,7 +166,7 @@ bash scripts/local/smoke-video-search.sh --dev --json
 - 库内 `source_id + 指定时间范围` 的 `/search/video`
 - 库内 `video_segment` 直接作为查询视频片段再次发起 `/search/video`
 - 统一结果列表能同时返回 `video_segment`、`image` 与 `document_page`
-- 搜索后端是 `qdrant` / `multivector`
+- 搜索后端是 `qdrant`，表征类型是 `multi_vector_late_interaction`
 
 文档查询对应 smoke：
 
@@ -171,7 +180,7 @@ bash scripts/local/smoke-document-search.sh --dev --json
 - 指定单页范围的文档查询
 - 把库内返回的 `document_page` 结果对象直接复用为查询文档
 - 统一结果列表能稳定返回 `document_page` 与 `image`
-- 搜索后端是 `qdrant` / `multivector`
+- 搜索后端是 `qdrant`，表征类型是 `multi_vector_late_interaction`
 
 运行时健康与 `vector_space` 诊断对应 smoke：
 

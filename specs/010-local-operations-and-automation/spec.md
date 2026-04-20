@@ -56,6 +56,7 @@
 - `run-qdrant.sh` 承接 Qdrant 本地进程启动或复用
 - `run.sh` 承接 app、sidecar 与 UI 的启动；默认前台运行，`--detach` 时进入分离运行
 - `cutover-runtime.sh` 承接 runtime 世代切换；它按当前环境单独归档旧 `app/` 与 `qdrant/`，并初始化新的 `${APP_RUNTIME_DIR}/runtime-config.json`
+- `cleanup-legacy-runtime.sh` 承接旧世代 runtime 清理；默认只扫描并报告当前环境的 legacy 归档与旧 Qdrant collections，只有显式 `--execute` 才执行删除
 - `run.sh` 启动 app、sidecar 与 UI 前应先确认 Qdrant 可访问；若不可访问，应自动调用同一配置上下文下的 `run-qdrant.sh` 启动或复用 Qdrant，并在 Qdrant 仍不可访问时失败
 - `run.sh` 启动前必须解析合并后的 provider/model 配置，并为本地 sidecar 与本地 app 导出所需的运行时模型环境变量
 - `run.sh` 若检测到当前环境下仍存在未 cutover 的旧世代 runtime 数据，必须拒绝启动并明确提示先执行 `cutover-runtime.sh`
@@ -76,8 +77,15 @@
 - `status.sh` 应报告每个服务的 URL、ready 状态、pid、日志路径与配置来源
 - `stop.sh` 应优先复用 pid 文件，并保留端口 / 命令发现兜底，避免 pid 文件缺失时无法停止本仓库服务
 - 旧 runtime-token Qdrant collections 的清理属于 operator/manual concern，不属于 `run.sh` / `stop.sh` 的自动职责
-- 本次 alias cutover 后，旧 `text_search_*` collection 与旧“直接物理 `index_*` collection”的清理同样属于 operator/manual concern；`run.sh` / `stop.sh` 不负责自动迁移或自动删除这些旧 collections
-- 如需兼容切换，操作员应先在选中配置下手工清理旧物理 `index_*` collections，再让新机制重建 active alias 与其物理 target
+- 本次 alias cutover 后，旧 `text_search_*` collection、旧“直接物理 `index_*` collection”与旧“直接物理 `vector_space_*` collection”的清理同样属于 operator/manual concern；`run.sh` / `stop.sh` 不负责自动迁移或自动删除这些 collections
+- `cleanup-legacy-runtime.sh` 应只作用于选中 env 对应的 runtime root，并支持：
+  - 默认 scan-only 输出
+  - `--execute` 显式删除
+  - `--json` 机器可读摘要
+- `cleanup-legacy-runtime.sh` 在执行删除前必须确认选中 env 下的 app、sidecar、UI 与 Qdrant 均未运行；若仍有任一服务运行，脚本必须拒绝执行删除
+- `cleanup-legacy-runtime.sh --execute` 应删除该 env root 下全部 `legacy-*` 归档目录，以及 Qdrant storage 中旧世代 `index_*`、`text_search_*` 与直接物理 `vector_space_*` collections
+- `cleanup-legacy-runtime.sh` 不得删除 alias 当前 target，也不得把当前命名方案中的 `vector_space_stage_*` collections 当成 legacy collection 误删
+- 如需兼容切换，操作员应先执行 `cutover-runtime.sh` 归档旧世代 runtime，再按需执行 `cleanup-legacy-runtime.sh --execute` 清理旧归档与旧 collections
 - `cutover-runtime.sh` 只归档旧 `${APP_RUNTIME_DIR}/state.sqlite` 所在 `app/` 目录与 `QDRANT_STORAGE_DIR` 所在 `qdrant/` 目录；它不归档下载缓存、模型缓存、日志或其他工具缓存
 
 ## 快速检查与 smoke
@@ -88,7 +96,7 @@
 - `smoke-image-search.sh` 若存在，用于真实图片查询链路验证，并应复用与 `smoke-text-search.sh` 相同的本地配置选择、服务前置与 JSON 输出约定
 - `smoke-runtime-health.sh` 若存在，用于真实运行时健康与 `vector_space` 诊断链路验证，并应复用与其他 smoke 相同的本地配置选择、服务前置与 JSON 输出约定
 - `check-e2e.sh` 若存在，应作为 Playwright UI smoke 与本地 smoke 的统一聚合入口，并默认面向 `--dev` 隔离运行面
-- smoke 的机器可读摘要至少包含：`status`、`library_id`、`job_id`、`result_kinds`、`backend`、`repr_kind`
+- smoke 的机器可读摘要至少包含：`status`、`library_id`、`job_id`、`result_kinds`、`backend`、`vector_type`
 - `smoke-runtime-health.sh` 的机器可读摘要至少还应包含：
   - `runtime_health`
   - `vector_space_ids`
