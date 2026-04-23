@@ -1,8 +1,26 @@
 # CHANGELOG
 
+## 2026-04-23
+### Changed
+- Refined the shipped `008` Search shell to match the new prototype direction: the top status capsule now uses `Ready`, the empty-state headline is centered, the text composer is a true single-line strip with the lens aligned to the input, the formal `Search` action sits beside the library scope selector, and active search feedback is reduced to a simple `搜索中...` line above the results surface.
+- Simplified the shipped `008` Search reading surface: redundant result/detail headings and helper copy were removed, `document_page` result rows now use a lightweight static `PDF` placeholder instead of live PDF iframe thumbnails, duplicate document/page cues were dropped from the thumbnail area, and preview/reuse actions now live only on result items instead of being repeated in the detail panel.
+
+## 2026-04-22
+### Changed
+- Removed the remaining `demo import` / `run demo` assumptions from the shipped Search surface and its closest browser harnesses, so the formal product path now goes through real library creation, real import, and submitted search only.
+- Landed the main `008` workspace direction in the shipped UI and prototypes: the shell now uses a lighter brand/status app bar plus left sidebar, Search is composer-first with scope-aware current-library and `所有库` text search, and the supplemental prototype was rebuilt/split around the same software-style IA with `Ready`, `Unified · Native · Powerful`, and the quieter search-first layout.
+- Completed a broader Search reading-flow cleanup: readiness copy now distinguishes missing source roots, missing content, config blockers, and in-flight jobs; empty results and config failures use the same reason model; `所有库` results can be grouped, focused, and reused in place; cross-library reuse switches back into the hit library when a query mode requires a bound library; and the results surface now has clearer grouped/focused/default reading states.
+- Reshaped `Inventory` / `库管理` and `Settings` into fuller workspaces: `库管理` is now preview-first with a dedicated current-library management/readiness band and direct jump into `Settings > 当前库覆盖`, while `Settings` moved to a chapter-first IA with section roles, summary metrics, and a stronger overview-before-editor flow.
+- Reworked the closest Playwright helpers and regressions to match the shipped `008` shell and Search behavior, including live filter toggles, non-demo searchability setup, the new left-sidebar `工具` entry, and the cross-library Search flows described above.
+
 ## 2026-04-21
 ### Changed
+- Added and iterated on the first standalone `008` Search HTML prototype, then split it into dedicated `Ready` empty/results pages and trimmed the extra explanatory shell filler so it reads more like the intended product UI.
+- Landed the main `008-ui-ux` shell transition in the Vite workspace: Search moved from a three-column chrome to a stage-first desktop layout with a compact app bar, shared utility drawer, compressed reading-state Search stage, and denser result/detail surfaces, while Inventory and Settings shifted to the new list/detail and sectioned flows.
+- Expanded the `008` control plane and workspace actions with explicit cancel / retry / resume job flows, library archive / restore, library rename / delete, and maintenance actions such as `rebuild` and `cleanup_retired_vector_spaces`, all backed by focused Rust and Playwright coverage.
+- Tightened the surrounding stability and language work for that rollout: current-library popovers now stay anchored across polling, utilities no longer collapse on refresh, prep-state and invalid-time-range regressions were realigned to the live UI, and the main shell/product copy was normalized to Chinese task language where the shipped surface now expects it.
 - Renamed the top-level search debug summary field from `repr_kind` to `vector_type` and aligned smoke-script JSON summaries plus operator specs with the new name.
+- Added a black-box `search_api` success-path test with an in-process Qdrant stub so imported libraries now verify `debug.vector_type`, `target_content_types`, and the absence of legacy search debug fields at the HTTP layer.
 
 ## 2026-04-20
 ### Changed
