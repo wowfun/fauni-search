@@ -812,6 +812,11 @@ impl AppState {
         library_id: &str,
     ) -> Result<Vec<VectorSpaceExecutionGroup>, ApiError> {
         let bindings = self.configured_vector_space_bindings_for_library(library_id)?;
+        let active_visual_unit_count = self
+            .libraries
+            .get(library_id)
+            .map(|library| library.visual_units.len())
+            .unwrap_or(0);
         let mut groups = Vec::new();
         for binding in bindings {
             let summary = self
@@ -825,7 +830,9 @@ impl AppState {
                 return Err(model_selection_error(&summary));
             }
             groups.push(VectorSpaceExecutionGroup {
+                library_id: library_id.to_string(),
                 vector_space_id: binding.vector_space_id.clone(),
+                active_visual_unit_count,
                 content_types: binding.content_types.clone(),
                 resolved_model: ResolvedExecutionModelSelection {
                     summary,

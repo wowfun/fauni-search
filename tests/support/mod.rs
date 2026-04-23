@@ -2,10 +2,10 @@
 
 use axum::{
     body::{to_bytes, Body},
-    extract::Json,
+    extract::{Json, Path as AxumPath, State},
     http::{header, Method, Request, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use fauni_search::{build_app, new_state};
@@ -15,10 +15,10 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle, time::Duration};
 use tower::util::ServiceExt;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -33,6 +33,7 @@ const TEST_ENV_KEYS: &[&str] = &[
     "FAUNI_ENV",
     "EMBEDDING_MODEL_ID",
     "EMBEDDING_MODEL_REVISION",
+    "FAUNI_TEST_SIDECAR_EMBED_DELAY_MS",
 ];
 
 pub struct TestEnv {
@@ -40,10 +41,19 @@ pub struct TestEnv {
     restore: EnvRestore,
     pub runtime_dir: PathBuf,
     _sidecar_stub: SidecarStub,
+    _qdrant_stub: Option<QdrantStub>,
 }
 
 impl TestEnv {
     pub async fn new(name: &str) -> Self {
+        Self::new_inner(name, false).await
+    }
+
+    pub async fn new_with_qdrant(name: &str) -> Self {
+        Self::new_inner(name, true).await
+    }
+
+    async fn new_inner(name: &str, with_qdrant: bool) -> Self {
         let lock = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -62,12 +72,18 @@ impl TestEnv {
         env::set_var("EMBEDDING_MODEL_ID", "athrael-soju/colqwen3.5-4.5B-v3");
         env::set_var("EMBEDDING_MODEL_REVISION", "main");
         let sidecar_stub = SidecarStub::start("127.0.0.1:39011").await;
+        let qdrant_stub = if with_qdrant {
+            Some(QdrantStub::start("127.0.0.1:63999").await)
+        } else {
+            None
+        };
 
         Self {
             _env_lock: lock,
             restore,
             runtime_dir,
             _sidecar_stub: sidecar_stub,
+            _qdrant_stub: qdrant_stub,
         }
     }
 
@@ -420,37 +436,63 @@ async fn sidecar_capabilities() -> impl IntoResponse {
 }
 
 async fn sidecar_embed(Json(payload): Json<Value>) -> impl IntoResponse {
+    let delay_ms = env::var("FAUNI_TEST_SIDECAR_EMBED_DELAY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+
     let operation_kind = payload
         .get("operation_kind")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let (vectors, pooled_vector) = match operation_kind {
-        "query_embedding" => (
-            vec![vec![0.1_f32, 0.2, 0.3], vec![0.4, 0.5, 0.6]],
-            vec![0.25_f32, 0.35, 0.45],
-        ),
-        "image_query_embedding" => (vec![vec![1.0_f32, 2.0, 3.0]], vec![1.0_f32, 2.0, 3.0]),
-        "video_query_embedding" => (
-            vec![vec![4.0_f32, 5.0, 6.0], vec![7.0, 8.0, 9.0]],
-            vec![5.5_f32, 6.5, 7.5],
-        ),
-        "document_query_embedding" => {
-            (vec![vec![10.0_f32, 11.0, 12.0]], vec![10.0_f32, 11.0, 12.0])
-        }
-        "document_embedding" => (vec![vec![13.0_f32, 14.0, 15.0]], vec![13.0_f32, 14.0, 15.0]),
-        _ => (vec![vec![0.0_f32, 0.0, 0.0]], vec![0.0_f32, 0.0, 0.0]),
+    let embeddings = match operation_kind {
+        "query_embedding" => vec![json!({
+            "vectors": [[0.1_f32, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            "pooled_vector": [0.25_f32, 0.35, 0.45]
+        })],
+        "image_query_embedding" => vec![json!({
+            "vectors": [[1.0_f32, 2.0, 3.0]],
+            "pooled_vector": [1.0_f32, 2.0, 3.0]
+        })],
+        "video_query_embedding" => vec![json!({
+            "vectors": [[4.0_f32, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            "pooled_vector": [5.5_f32, 6.5, 7.5]
+        })],
+        "document_query_embedding" => vec![json!({
+            "vectors": [[10.0_f32, 11.0, 12.0]],
+            "pooled_vector": [10.0_f32, 11.0, 12.0]
+        })],
+        "document_embedding" => payload
+            .pointer("/inputs/documents")
+            .and_then(Value::as_array)
+            .map(|documents| {
+                documents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, document)| {
+                        let base = 13.0_f32 + index as f32;
+                        json!({
+                            "path": document.get("path").cloned().unwrap_or(Value::Null),
+                            "source_type": "pdf",
+                            "kind": "document_page",
+                            "locator": document.get("locator").cloned().unwrap_or(Value::Null),
+                            "vectors": [[base, base + 1.0, base + 2.0]],
+                            "pooled_vector": [base, base + 1.0, base + 2.0]
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        _ => vec![json!({
+            "vectors": [[0.0_f32, 0.0, 0.0]],
+            "pooled_vector": [0.0_f32, 0.0, 0.0]
+        })],
     };
 
-    Json(json!({
-        "data": {
-            "embeddings": [
-                {
-                    "vectors": vectors,
-                    "pooled_vector": pooled_vector
-                }
-            ]
-        }
-    }))
+    Json(json!({ "data": { "embeddings": embeddings } }))
 }
 
 fn sidecar_operation_payload(operation_kind: &str) -> Value {
@@ -462,4 +504,278 @@ fn sidecar_operation_payload(operation_kind: &str) -> Value {
             "revision": "main"
         }
     })
+}
+
+#[derive(Clone, Default)]
+struct QdrantStubState {
+    aliases: BTreeMap<String, String>,
+    collections: BTreeMap<String, QdrantCollection>,
+}
+
+#[derive(Clone, Default)]
+struct QdrantCollection {
+    vector_size: usize,
+    points: BTreeMap<u64, Value>,
+}
+
+struct QdrantStub {
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl QdrantStub {
+    async fn start(address: &str) -> Self {
+        let state = Arc::new(Mutex::new(QdrantStubState::default()));
+        let app = Router::new()
+            .route("/collections", get(qdrant_list_collections))
+            .route("/aliases", get(qdrant_list_aliases))
+            .route("/collections/aliases", post(qdrant_update_aliases))
+            .route(
+                "/collections/:collection_name",
+                get(qdrant_get_collection)
+                    .put(qdrant_create_collection)
+                    .delete(qdrant_delete_collection),
+            )
+            .route(
+                "/collections/:collection_name/points",
+                put(qdrant_upsert_points),
+            )
+            .route(
+                "/collections/:collection_name/points/query",
+                post(qdrant_query_points),
+            )
+            .route(
+                "/collections/:collection_name/points/delete",
+                post(qdrant_delete_points),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind(address)
+            .await
+            .expect("qdrant test stub should bind");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+            let _ = server.await;
+        });
+        Self {
+            shutdown: Some(shutdown_tx),
+            task,
+        }
+    }
+}
+
+impl Drop for QdrantStub {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.abort();
+    }
+}
+
+async fn qdrant_list_collections(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+) -> impl IntoResponse {
+    let state = state.lock().unwrap();
+    let collections = state
+        .collections
+        .keys()
+        .map(|name| json!({ "name": name }))
+        .collect::<Vec<_>>();
+    Json(json!({ "result": { "collections": collections } }))
+}
+
+async fn qdrant_list_aliases(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+) -> impl IntoResponse {
+    let state = state.lock().unwrap();
+    let aliases = state
+        .aliases
+        .iter()
+        .map(|(alias_name, collection_name)| {
+            json!({
+                "alias_name": alias_name,
+                "collection_name": collection_name,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({ "result": { "aliases": aliases } }))
+}
+
+async fn qdrant_update_aliases(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let mut state = state.lock().unwrap();
+    if let Some(actions) = payload.get("actions").and_then(Value::as_array) {
+        for action in actions {
+            if let Some(alias_name) = action
+                .pointer("/delete_alias/alias_name")
+                .and_then(Value::as_str)
+            {
+                state.aliases.remove(alias_name);
+            }
+            if let (Some(alias_name), Some(collection_name)) = (
+                action
+                    .pointer("/create_alias/alias_name")
+                    .and_then(Value::as_str),
+                action
+                    .pointer("/create_alias/collection_name")
+                    .and_then(Value::as_str),
+            ) {
+                state
+                    .aliases
+                    .insert(alias_name.to_string(), collection_name.to_string());
+            }
+        }
+    }
+    (StatusCode::OK, Json(json!({ "status": "ok" })))
+}
+
+async fn qdrant_get_collection(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+    AxumPath(collection_name): AxumPath<String>,
+) -> impl IntoResponse {
+    let state = state.lock().unwrap();
+    let Some(collection) = state.collections.get(&collection_name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "status": { "error": "not found" } })),
+        );
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "result": {
+                "config": {
+                    "params": {
+                        "vectors": {
+                            "mv": {
+                                "size": collection.vector_size
+                            }
+                        }
+                    }
+                }
+            }
+        })),
+    )
+}
+
+async fn qdrant_create_collection(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+    AxumPath(collection_name): AxumPath<String>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let init_from = payload
+        .pointer("/init_from/collection")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let vector_size = payload
+        .pointer("/vectors/mv/size")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_default();
+
+    let mut state = state.lock().unwrap();
+    let mut collection = init_from
+        .and_then(|source| state.collections.get(&source).cloned())
+        .unwrap_or_default();
+    collection.vector_size = vector_size.max(collection.vector_size);
+    state.collections.insert(collection_name, collection);
+
+    (StatusCode::OK, Json(json!({ "status": "ok" })))
+}
+
+async fn qdrant_delete_collection(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+    AxumPath(collection_name): AxumPath<String>,
+) -> impl IntoResponse {
+    let mut state = state.lock().unwrap();
+    state.collections.remove(&collection_name);
+    (StatusCode::OK, Json(json!({ "status": "ok" })))
+}
+
+async fn qdrant_upsert_points(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+    AxumPath(collection_name): AxumPath<String>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let mut state = state.lock().unwrap();
+    let collection = state.collections.entry(collection_name).or_default();
+    if let Some(points) = payload.get("points").and_then(Value::as_array) {
+        for point in points {
+            let Some(point_id) = point.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            if let Some(point_payload) = point.get("payload") {
+                collection.points.insert(point_id, point_payload.clone());
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "status": "ok" })))
+}
+
+async fn qdrant_query_points(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+    AxumPath(collection_name): AxumPath<String>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let state = state.lock().unwrap();
+    let resolved_name = state
+        .aliases
+        .get(&collection_name)
+        .cloned()
+        .unwrap_or(collection_name);
+    let points = state
+        .collections
+        .get(&resolved_name)
+        .map(|collection| {
+            collection
+                .points
+                .values()
+                .enumerate()
+                .map(|(index, point_payload)| {
+                    json!({
+                        "score": 1.0_f32 - (index as f32 * 0.1_f32),
+                        "payload": point_payload,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let limit = payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(points.len());
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "result": {
+                "points": points.into_iter().take(limit).collect::<Vec<_>>()
+            }
+        })),
+    )
+}
+
+async fn qdrant_delete_points(
+    State(state): State<Arc<Mutex<QdrantStubState>>>,
+    AxumPath(collection_name): AxumPath<String>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let mut state = state.lock().unwrap();
+    if let Some(collection) = state.collections.get_mut(&collection_name) {
+        if let Some(point_ids) = payload.get("points").and_then(Value::as_array) {
+            for point_id in point_ids.iter().filter_map(Value::as_u64) {
+                collection.points.remove(&point_id);
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "status": "ok" })))
 }

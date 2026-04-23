@@ -62,4 +62,9 @@ async fn import_paths_partially_accepts_and_queues_a_job() {
     assert_eq!(body["data"]["job"]["job_id"], job_id);
     assert_eq!(body["data"]["job"]["status"], "queued");
     assert_eq!(body["data"]["job"]["phase"], "intake");
+    assert_eq!(body["data"]["job"]["retryable"], true);
+    assert_eq!(
+        body["data"]["job"]["retried_from_job_id"],
+        serde_json::Value::Null
+    );
 }

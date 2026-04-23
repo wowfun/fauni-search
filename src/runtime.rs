@@ -1,8 +1,9 @@
 use crate::{
     indexing::{index_source_action_visual_units, index_visual_units},
     model::{
-        ImportJobOutcome, PreparedImport, PreparedSourceAction, RetiredVectorSpaceCleanupCandidate,
-        SourceActionJobOutcome, SourceActionPlan, SourceActionSummary,
+        ImportJobOutcome, MaintenanceActionPlan, PreparedImport, PreparedSourceAction,
+        RetiredVectorSpaceCleanupCandidate, SourceActionJobOutcome, SourceActionPlan,
+        SourceActionSummary,
     },
     qdrant::cleanup_retired_vector_space_namespace,
     state::SharedState,
@@ -11,6 +12,16 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+async fn job_cancellation_requested(state: &SharedState, job_id: &str) -> bool {
+    let state = state.read().await;
+    state.job_cancellation_requested(job_id)
+}
+
+async fn job_is_terminal(state: &SharedState, job_id: &str) -> bool {
+    let state = state.read().await;
+    state.job_is_terminal(job_id)
+}
 
 pub fn spawn_runtime_maintenance(state: SharedState) {
     let reaper_state = state.clone();
@@ -133,6 +144,10 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
 }
 
 pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared: PreparedImport) {
+    if job_is_terminal(&state, &job_id).await {
+        return;
+    }
+
     let execution_groups = {
         let mut state = state.write().await;
         match state
@@ -186,6 +201,9 @@ pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared:
         let mut indexed_vector_spaces = 0_usize;
         let mut failures = Vec::new();
         for batch in &prepared.vector_space_batches {
+            if job_cancellation_requested(&state, &job_id).await {
+                break;
+            }
             let Some(group) = execution_groups.get(&batch.vector_space_id) else {
                 failures.push(format!(
                     "vector_space {}: missing resolved execution group",
@@ -213,7 +231,23 @@ pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared:
             activated_vector_spaces.insert(batch.vector_space_id.clone());
         }
 
-        if failures.is_empty() {
+        if job_cancellation_requested(&state, &job_id).await {
+            if activated_vector_spaces.is_empty() {
+                ImportJobOutcome::canceled(
+                    "Import canceled before any vector-space activation.".to_string(),
+                    prepared.accepted.len(),
+                )
+            } else {
+                ImportJobOutcome::canceled_with_activations(
+                    format!(
+                        "Import canceled after activating {} vector space(s); structured sources and visual units were kept for consistency.",
+                        activated_vector_spaces.len()
+                    ),
+                    prepared.accepted.len(),
+                    activated_vector_spaces,
+                )
+            }
+        } else if failures.is_empty() {
             ImportJobOutcome::completed(
                 format!(
                     "Accepted {} path(s); indexed {} visual unit(s) across {} vector space(s) and activated the resulting namespaces.",
@@ -253,6 +287,10 @@ pub(crate) async fn run_source_action_job(
     job_id: String,
     plan: SourceActionPlan,
 ) {
+    if job_is_terminal(&state, &job_id).await {
+        return;
+    }
+
     {
         let mut state = state.write().await;
         state.mark_source_action_running(&plan, &job_id);
@@ -297,6 +335,19 @@ pub(crate) async fn run_source_action_job(
 
     let outcome = match prepared {
         Ok(prepared) => {
+            if job_cancellation_requested(&state, &job_id).await {
+                let outcome = SourceActionJobOutcome::canceled(
+                    plan.action,
+                    0,
+                    "Canceled before applying any structured source updates.".to_string(),
+                );
+                let mut state = state.write().await;
+                if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
+                    tracing::warn!("Failed to finalize source action job {job_id}: {message}");
+                }
+                return;
+            }
+
             if prepared.requires_index_update() {
                 {
                     let mut state = state.write().await;
@@ -320,6 +371,9 @@ pub(crate) async fn run_source_action_job(
                 let mut activated_vector_spaces = BTreeSet::new();
                 let mut failures = Vec::new();
                 for batch in prepared.vector_space_batches.clone() {
+                    if job_cancellation_requested(&state, &job_id).await {
+                        break;
+                    }
                     let Some(group) = execution_groups.get(&batch.vector_space_id) else {
                         failures.push(format!(
                             "vector_space {}: missing resolved execution group",
@@ -346,7 +400,23 @@ pub(crate) async fn run_source_action_job(
                     activated_vector_spaces.insert(batch.vector_space_id.clone());
                 }
 
-                let outcome = if failures.is_empty() {
+                let outcome = if job_cancellation_requested(&state, &job_id).await {
+                    if activated_vector_spaces.is_empty() {
+                        SourceActionJobOutcome::canceled(
+                            plan.action,
+                            0,
+                            "Canceled before activating any vector-space updates.".to_string(),
+                        )
+                    } else {
+                        SourceActionJobOutcome::canceled_with_structured_changes(
+                            plan.action,
+                            prepared.accepted_root_count,
+                            activated_vector_spaces,
+                            "Canceled after partial activation; structured source updates were kept for consistency."
+                                .to_string(),
+                        )
+                    }
+                } else if failures.is_empty() {
                     SourceActionJobOutcome::completed(&prepared)
                 } else {
                     let activated_count = activated_vector_spaces.len();
@@ -369,7 +439,15 @@ pub(crate) async fn run_source_action_job(
                 return;
             }
 
-            let outcome = SourceActionJobOutcome::completed(&prepared);
+            let outcome = if job_cancellation_requested(&state, &job_id).await {
+                SourceActionJobOutcome::canceled(
+                    plan.action,
+                    0,
+                    "Canceled before applying structured source updates.".to_string(),
+                )
+            } else {
+                SourceActionJobOutcome::completed(&prepared)
+            };
             let mut state = state.write().await;
             if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
                 tracing::warn!("Failed to finalize source action job {job_id}: {message}");
@@ -391,5 +469,88 @@ pub(crate) async fn run_source_action_job(
     };
     if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
         tracing::warn!("Failed to finalize source action job {job_id}: {message}");
+    }
+}
+
+pub(crate) async fn run_maintenance_action_job(
+    state: SharedState,
+    job_id: String,
+    plan: MaintenanceActionPlan,
+) {
+    if job_is_terminal(&state, &job_id).await {
+        return;
+    }
+
+    {
+        let mut state = state.write().await;
+        state.update_job_snapshot(
+            &job_id,
+            "running",
+            "cleanup",
+            0,
+            format!(
+                "Cleaning {} retired vector-space namespace(s).",
+                plan.target_vector_space_ids.len()
+            ),
+        );
+    }
+
+    let total = plan.target_vector_space_ids.len();
+    let mut cleaned = Vec::<RetiredVectorSpaceCleanupCandidate>::new();
+    let mut failures = Vec::<String>::new();
+
+    for (index, vector_space_id) in plan.target_vector_space_ids.iter().enumerate() {
+        if job_cancellation_requested(&state, &job_id).await {
+            break;
+        }
+        {
+            let mut state = state.write().await;
+            state.update_job_snapshot(
+                &job_id,
+                "running",
+                "cleanup",
+                index,
+                format!(
+                    "Cleaning retired vector-space {vector_space_id} ({}/{total}).",
+                    index + 1
+                ),
+            );
+        }
+
+        match cleanup_retired_vector_space_namespace(&plan.library_id, vector_space_id).await {
+            Ok(()) => cleaned.push(RetiredVectorSpaceCleanupCandidate {
+                library_id: plan.library_id.clone(),
+                vector_space_id: vector_space_id.clone(),
+            }),
+            Err(error) => failures.push(format!("{vector_space_id}: {error}")),
+        }
+    }
+
+    if job_cancellation_requested(&state, &job_id).await {
+        let mut state = state.write().await;
+        if let Err(message) = state.forget_cleaned_retired_vector_spaces(&cleaned) {
+            tracing::warn!("Failed to persist maintenance cancel progress for {job_id}: {message}");
+        }
+        if let Err(message) = state.finalize_job_as_canceled(
+            &job_id,
+            cleaned.len(),
+            if cleaned.is_empty() {
+                "Cleanup canceled before deleting any retired vector-space namespace.".to_string()
+            } else {
+                format!(
+                    "Cleanup canceled after deleting {} retired vector-space namespace(s).",
+                    cleaned.len()
+                )
+            },
+        ) {
+            tracing::warn!("Failed to finalize canceled maintenance job {job_id}: {message}");
+        }
+        return;
+    }
+
+    let mut state = state.write().await;
+    if let Err(message) = state.finalize_maintenance_action_job(&job_id, &plan, &cleaned, &failures)
+    {
+        tracing::warn!("Failed to finalize maintenance action job {job_id}: {message}");
     }
 }

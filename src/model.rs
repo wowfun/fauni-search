@@ -1,8 +1,8 @@
 use crate::api::{
-    ImportAcceptedItem, ImportRejectedItem, JobSnapshot, ProviderConfigSnapshot,
-    ResolvedContentModelSelectionPayload, ResolvedModelSelectionPayload, SourceRootCoverageSummary,
-    SourceRootLastAction, SourceRootRulesPayload, UnsupportedContentTypeSnapshot,
-    VisualUnitSnapshot, VisualUnitSummary,
+    ImportAcceptedItem, ImportPathsRequest, ImportRejectedItem, JobSnapshot,
+    ProviderConfigSnapshot, ResolvedContentModelSelectionPayload, ResolvedModelSelectionPayload,
+    SourceRootCoverageSummary, SourceRootLastAction, SourceRootRulesPayload,
+    UnsupportedContentTypeSnapshot, VisualUnitSnapshot, VisualUnitSummary,
 };
 use crate::config::ContentTypeOverrideRecord;
 use serde::{Deserialize, Serialize};
@@ -51,15 +51,26 @@ pub(crate) struct ResolvedExecutionModelSelection {
 
 #[derive(Clone, Debug)]
 pub(crate) struct VectorSpaceExecutionGroup {
+    pub(crate) library_id: String,
     pub(crate) vector_space_id: String,
+    pub(crate) active_visual_unit_count: usize,
     pub(crate) content_types: Vec<String>,
     pub(crate) resolved_model: ResolvedExecutionModelSelection,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SearchContentTypeDebugEntry {
+    pub(crate) library_id: String,
+    pub(crate) content_type: String,
+    pub(crate) resolved_model: ResolvedContentModelSelectionPayload,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct LibraryRecord {
     pub(crate) id: String,
     pub(crate) display_name: String,
+    pub(crate) lifecycle_state: String,
+    pub(crate) archived_at_ms: Option<u128>,
     pub(crate) content_type_overrides: BTreeMap<String, ContentTypeOverrideRecord>,
     pub(crate) source_roots: BTreeMap<String, SourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
@@ -157,6 +168,37 @@ impl VisualUnitRecord {
 #[derive(Clone)]
 pub(crate) struct JobRecord {
     pub(crate) snapshot: JobSnapshot,
+    pub(crate) cancellation_requested: bool,
+    pub(crate) replay: Option<JobReplayAction>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct JobQueueContext {
+    pub(crate) attempt: u32,
+    pub(crate) retried_from_job_id: Option<String>,
+}
+
+impl Default for JobQueueContext {
+    fn default() -> Self {
+        Self {
+            attempt: 1,
+            retried_from_job_id: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum JobReplayAction {
+    Import {
+        request: ImportPathsRequest,
+    },
+    SourceAction {
+        scope: SourceActionScope,
+        action: SourceActionKind,
+    },
+    Maintenance {
+        action: MaintenanceActionKind,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -218,8 +260,10 @@ pub(crate) struct ImportRejection {
     pub(crate) message: String,
 }
 
+#[derive(Debug)]
 pub(crate) struct PreparedImport {
     pub(crate) library_id: String,
+    pub(crate) request: ImportPathsRequest,
     pub(crate) accepted: Vec<ImportAcceptedItem>,
     pub(crate) rejected: Vec<ImportRejectedItem>,
     pub(crate) sources: Vec<SourceRecord>,
@@ -232,6 +276,7 @@ pub(crate) struct PreparedImportVectorSpaceBatch {
     pub(crate) vector_space_id: String,
     pub(crate) content_types: Vec<String>,
     pub(crate) had_existing_index: bool,
+    pub(crate) stale_point_ids: Vec<u64>,
     pub(crate) visual_units: Vec<VisualUnitRecord>,
 }
 
@@ -241,7 +286,7 @@ pub(crate) struct RetiredVectorSpaceCleanupCandidate {
     pub(crate) vector_space_id: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct SourceActionPlan {
     pub(crate) library_id: String,
     pub(crate) action: SourceActionKind,
@@ -253,6 +298,7 @@ pub(crate) struct SourceActionPlan {
 pub(crate) enum SourceActionKind {
     Refresh,
     Rescan,
+    Rebuild,
 }
 
 impl SourceActionKind {
@@ -260,11 +306,33 @@ impl SourceActionKind {
         match self {
             Self::Refresh => "refresh",
             Self::Rescan => "rescan",
+            Self::Rebuild => "rebuild",
         }
     }
 
     pub(crate) fn is_rescan(self) -> bool {
         matches!(self, Self::Rescan)
+    }
+
+    pub(crate) fn requires_full_scan(self) -> bool {
+        matches!(self, Self::Rescan | Self::Rebuild)
+    }
+
+    pub(crate) fn rebuilds_from_scratch(self) -> bool {
+        matches!(self, Self::Rebuild)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaintenanceActionKind {
+    CleanupRetiredVectorSpaces,
+}
+
+impl MaintenanceActionKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CleanupRetiredVectorSpaces => "cleanup_retired_vector_spaces",
+        }
     }
 }
 
@@ -407,11 +475,66 @@ impl SourceActionJobOutcome {
             summary: format!("{} partially failed: {message}", action.as_str()),
         }
     }
+
+    pub(crate) fn canceled(action: SourceActionKind, completed: usize, message: String) -> Self {
+        Self {
+            status: "canceled",
+            phase: "canceled",
+            completed,
+            activated_vector_spaces: BTreeSet::new(),
+            apply_structured_changes: false,
+            summary: format!("{} canceled: {message}", action.as_str()),
+        }
+    }
+
+    pub(crate) fn canceled_with_structured_changes(
+        action: SourceActionKind,
+        completed: usize,
+        activated_vector_spaces: BTreeSet<String>,
+        message: String,
+    ) -> Self {
+        Self {
+            status: "canceled",
+            phase: "canceled",
+            completed,
+            activated_vector_spaces,
+            apply_structured_changes: true,
+            summary: format!("{} canceled: {message}", action.as_str()),
+        }
+    }
 }
 
+#[derive(Debug)]
 pub(crate) struct QueuedSourceAction {
     pub(crate) job_id: String,
     pub(crate) plan: SourceActionPlan,
+}
+
+#[derive(Debug)]
+pub(crate) enum RetryJobDispatch {
+    Import(PreparedImport),
+    SourceAction(QueuedSourceAction),
+    Maintenance(QueuedMaintenanceAction),
+}
+
+#[derive(Debug)]
+pub(crate) enum ResumeJobDispatch {
+    Import(PreparedImport),
+    SourceAction(SourceActionPlan),
+    Maintenance(MaintenanceActionPlan),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MaintenanceActionPlan {
+    pub(crate) library_id: String,
+    pub(crate) action: MaintenanceActionKind,
+    pub(crate) target_vector_space_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct QueuedMaintenanceAction {
+    pub(crate) job_id: String,
+    pub(crate) plan: MaintenanceActionPlan,
 }
 
 pub(crate) struct SourceRootScanResult {
@@ -477,10 +600,35 @@ impl ImportJobOutcome {
             summary: message,
         }
     }
+
+    pub(crate) fn canceled(message: String, completed: usize) -> Self {
+        Self {
+            status: "canceled",
+            phase: "canceled",
+            completed,
+            activated_vector_spaces: BTreeSet::new(),
+            summary: message,
+        }
+    }
+
+    pub(crate) fn canceled_with_activations(
+        message: String,
+        completed: usize,
+        activated_vector_spaces: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            status: "canceled",
+            phase: "canceled",
+            completed,
+            activated_vector_spaces,
+            summary: message,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SearchPlan {
+    pub(crate) search_scope_kind: String,
     pub(crate) library_id: String,
     pub(crate) top_k: usize,
     pub(crate) cursor_offset: usize,
@@ -490,9 +638,9 @@ pub(crate) struct SearchPlan {
     pub(crate) time_range_filter: Option<SearchTimeRangeFilter>,
     pub(crate) target_content_types: Vec<String>,
     pub(crate) unsupported_content_types: Vec<UnsupportedContentTypeSnapshot>,
-    pub(crate) active_visual_unit_ids: BTreeSet<String>,
+    pub(crate) active_visual_unit_refs: BTreeSet<String>,
     pub(crate) execution_groups: Vec<VectorSpaceExecutionGroup>,
-    pub(crate) resolved_content_models: BTreeMap<String, ResolvedContentModelSelectionPayload>,
+    pub(crate) debug_content_types: Vec<SearchContentTypeDebugEntry>,
     pub(crate) debug: bool,
 }
 

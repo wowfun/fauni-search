@@ -155,6 +155,8 @@ impl AppState {
                         DurableLibraryRecord {
                             id: library.id.clone(),
                             display_name: library.display_name.clone(),
+                            lifecycle_state: library.lifecycle_state.clone(),
+                            archived_at_ms: library.archived_at_ms,
                             source_roots: library
                                 .source_roots
                                 .iter()
@@ -200,6 +202,8 @@ impl AppState {
                     LibraryRecord {
                         id: library.id.clone(),
                         display_name: library.display_name,
+                        lifecycle_state: library.lifecycle_state,
+                        archived_at_ms: library.archived_at_ms,
                         content_type_overrides: BTreeMap::new(),
                         source_roots: library
                             .source_roots

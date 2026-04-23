@@ -10,6 +10,7 @@
 - 资源引用对象（Resource Reference）
 - 游标令牌（Cursor Token）
 - 搜索请求载荷（Search Request Payload）
+- 搜索范围载荷（Search Scope Payload）
 - 搜索响应载荷（Search Response Payload）
 - 任务动作载荷（Task Action Payload）
 - 任务快照载荷（Task Snapshot Payload）
@@ -71,7 +72,15 @@
   - `POST /search/image`
   - `POST /search/video`
   - `POST /search/document`
-- 这三类端点共享同一搜索请求封套，至少包含：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_content_types`
+- 这四类端点共享同一搜索请求封套，至少包含：`search_scope`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_content_types`
+- `search_scope` 必须编码为结构化对象；长期稳定最小编码至少包括：
+  - 单库：`{ "kind": "library", "library_id": "..." }`
+  - 所有库：`{ "kind": "all_libraries" }`
+  - 预留多库子集：`{ "kind": "library_set", "library_ids": ["...", "..."] }`
+- 当前第一阶段公开切片中：
+  - `/search/text` 必须接受 `library` 与 `all_libraries`
+  - `/search/image`、`/search/video` 与 `/search/document` 当前只接受 `library`
+  - 当请求给出当前端点尚不支持的 `search_scope.kind` 时，服务端必须通过统一错误载荷返回 `not_supported`
 - `/search/text` 的请求载荷必须携带 `text`
 - `/search/image` 的请求载荷必须携带 `image_input`
 - `/search/video` 的请求载荷必须携带 `video_input`
@@ -105,7 +114,7 @@
   - `filters.path_prefix`：单字符串或字符串数组
   - `filters.time_range`：`{ "start_ms": number, "end_ms": number }`
 - `filters.time_range` 若出现，必须同时包含可解析的 `start_ms` 与 `end_ms`；否则应通过统一错误载荷返回 `validation_failed`
-- 每个搜索结果项的稳定字段至少包括：`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选 `score`
+- 每个搜索结果项的稳定字段至少包括：`library_id`、`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选 `score`
 - 当前切片中，结果项上的 `cursor` 与响应级 `next_cursor` 共享同一续页令牌语义；若当前页后仍有更多结果，`next_cursor` 应可直接复用最后一个结果项上的 `cursor`
 - `preview` 必须编码为结构化资源引用对象；该对象至少包含一个可直接取用、对客户端保持不透明的 `url`，并可按需附带 `handle`
 - `neighbor_context` 不在搜索结果列表中默认内联返回；对象详情与展开接口负责承接该信息
@@ -140,14 +149,27 @@
 
 - 非搜索控制面接口族由 [008-ui-ux](../008-ui-ux/spec.md) 定义其存在与职责；本专题固定这些接口族的公开编码
 - 若通过 HTTP 暴露，库创建接口的稳定入口应包括 `POST /libraries`
+- 若通过 HTTP 暴露，库管理接口的稳定入口还应包括：
+  - `PATCH /libraries/{library_id}`
+  - `DELETE /libraries/{library_id}`
+  - `POST /libraries/{library_id}/archive`
+  - `POST /libraries/{library_id}/restore`
 - `POST /libraries` 的请求载荷至少应支持：
   - 可选 `library_id`
   - 可选 `display_name`
+- `PATCH /libraries/{library_id}` 的当前稳定变更载荷至少应支持：
+  - `display_name`
+- `PATCH /libraries/{library_id}` 不得允许客户端重写稳定 `library_id`
 - `POST /libraries` 不再承接旧 `name` 输入字段；若请求仍携带该字段，应通过统一错误载荷返回 `validation_failed`
 - 若未提供 `library_id`，服务端必须从 `display_name` 生成 slug 风格稳定标识，并在冲突时自动追加后缀
 - `GET /libraries` 与 `GET /libraries/{library_id}` 的库快照至少应返回：
   - 稳定 `id`
   - `display_name`
+  - `lifecycle_state`
+- `lifecycle_state` 的当前稳定公开值至少包括：
+  - `active`
+  - `archived`
+- 当 `lifecycle_state = archived` 时，库快照还应提供可选 `archived_at_ms`
 - 库管理、来源根与规则管理、配置与绑定管理、收藏管理、搜索历史管理等资源型接口，应采用统一的资源快照载荷与列表 / 详情 / 变更响应形状
 - 若通过 HTTP 暴露，来源根资源接口的稳定入口应包括：
   - `GET /libraries/{library_id}/source-roots`
@@ -292,17 +314,27 @@
 - `POST /settings/model-tests` 是纯诊断接口，不创建 job，不修改已持久化的 provider config、全局 `content_types` 或库级内容类型覆盖
 - `GET /libraries/{library_id}/sources` 当前阶段至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
 - 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与当前路径或等价来源定位摘要
+- 来源清单项可以按需附带代表性视觉对象摘要与稳定 `preview` 资源引用对象，用于来源浏览工作区中的预览优先详情面；这些附加字段不得把来源清单提升为独立 source detail 协议
 - 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
 - 若通过 HTTP 暴露，视觉对象预览资源的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}/preview`
 - 视觉对象详情响应至少应返回目标对象的稳定详情快照、稳定 `preview` 资源引用对象，并可附带 `neighbor_context`
 - 导入、刷新、重扫、重建、清理、维护，以及任务取消 / 重试 / 恢复等动作型接口，应采用显式动作载荷，而不是通过隐式读写触发后台执行
+- 若通过 HTTP 暴露，当前切片的正式任务动作入口应至少包括：
+  - `POST /jobs/{job_id}/cancel`
+  - `POST /jobs/{job_id}/resume`
 - 若通过 HTTP 暴露，当前正式导入动作入口应包括 `POST /libraries/{library_id}/imports`
 - 若通过 HTTP 暴露，库级来源管理动作入口的稳定入口应包括：
   - `POST /libraries/{library_id}/refresh`
   - `POST /libraries/{library_id}/rescan`
+- 若通过 HTTP 暴露，库级重建动作入口的稳定入口应包括：
+  - `POST /libraries/{library_id}/rebuild`
 - 若通过 HTTP 暴露，来源根级来源管理动作入口的稳定入口应包括：
   - `POST /libraries/{library_id}/source-roots/{source_root_id}/refresh`
   - `POST /libraries/{library_id}/source-roots/{source_root_id}/rescan`
+- 若通过 HTTP 暴露，库级维护动作入口可以采用显式动作载荷；当前切片的稳定入口应包括：
+  - `POST /libraries/{library_id}/maintenance`
+- `POST /libraries/{library_id}/maintenance` 当前切片至少应支持：
+  - `cleanup_retired_vector_spaces`
 - `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
 - 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/images`
 - 若通过 HTTP 暴露，临时查询视频上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/videos`
@@ -323,7 +355,29 @@
   - 规范化路径（若可得）
   - `reason_code`
   - `message`
-- 任务快照载荷至少应包含：`job_id`、`kind`、`status`、`phase`、`progress`、`cancelable`、`current_attempt`
+- 任务快照载荷至少应包含：`job_id`、`kind`、`status`、`phase`、`progress`、`cancelable`、`retryable`、`current_attempt`
+- 当任务由显式 retry 重新排队时，任务快照还应能表达其 retry lineage；当前切片中至少应暴露可选 `retried_from_job_id`
+- `POST /jobs/{job_id}/cancel` 的成功响应可以直接返回更新后的任务快照
+- `POST /jobs/{job_id}/resume` 的成功响应可以直接返回被重新打开的同一 job 快照
+- `POST /jobs/{job_id}/retry` 的成功响应可以直接返回新排队任务的快照
+- 当前切片中，`POST /jobs/{job_id}/cancel` 至少应支持：
+  - 对 queued 任务立即转入终态 `canceled`
+  - 对 running 任务记录 cancel request，并在下一个安全边界进入终态 `canceled`
+- 当前切片中，已进入终态或本身不可取消的任务，`POST /jobs/{job_id}/cancel` 应通过统一错误载荷返回 `conflict`
+- 当前切片中，`POST /jobs/{job_id}/retry` 至少应支持：
+  - 对 terminal `failed` / `canceled` 且 `retryable = true` 的任务，显式重新排队一个新任务
+  - 原任务保持历史终态，不因为 retry 被重新打开
+- 当前切片中，`POST /jobs/{job_id}/resume` 至少应支持：
+  - 对 terminal `failed` / `canceled` 且仍保留 replayable request 的任务，复用同一 `job_id` 进入新的 attempt
+  - resume 成功后，返回快照中的 `job_id` 必须保持不变，而 `current_attempt.attempt` 必须递增
+- 当前切片中的 retry 成功响应至少应让调用方知道：
+  - 新任务是一次显式 retry 产物
+  - 新任务当前 attempt 序号已经相对原任务递增
+  - 新任务来源于哪个历史 job
+- 当前切片中，`POST /jobs/{job_id}/retry` 不要求覆盖所有任务种类；至少应覆盖具有稳定重放语义的手动 import、手动来源管理与维护任务
+- 当前切片中，`POST /jobs/{job_id}/resume` 不要求覆盖所有任务种类；至少应覆盖具有稳定重放语义且仍保留 replayable request 的手动 import、手动来源管理与维护任务
+- 当前切片中，非终态任务、`completed` 任务、当前无法继续的任务，或已失去 replayable request 的 resume 请求，`POST /jobs/{job_id}/resume` 应通过统一错误载荷返回 `conflict`
+- 当前切片中，非终态任务、`completed` 任务、`retryable = false` 的任务，或当前已无法重放的 retry 请求，`POST /jobs/{job_id}/retry` 应通过统一错误载荷返回 `conflict`
 - 运行时健康快照载荷至少应包含：`runtime_kind`、`status`、`last_probe_at`、`diagnostics`
 - 管理列表型响应与搜索分页一样复用 `next_cursor` 语义，但不要求与搜索结果使用相同的列表字段名称
 - 本专题不强制控制面接口必须采用 HTTP 路由；若经由 IPC 或其他公开边界暴露，其请求 / 响应 payload 仍应复用本专题定义的稳定形状

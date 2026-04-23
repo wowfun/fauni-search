@@ -6,6 +6,7 @@
 
 - 搜索查询（Search Query）
 - 查询类型（Query Kind）
+- 搜索范围（Search Scope）
 - 搜索结果（Search Result）
 - 邻近上下文（Neighbor Context）
 - 视觉单元（Visual Unit）
@@ -61,9 +62,18 @@
 
 ## 搜索目标与公共控制项
 
-- 每次搜索请求都必须显式指向单个库
-- 默认情况下，搜索会并行查询该库全部已启用内容类型，并按这些内容类型当前解析出的一个或多个 `vector_space` 并行执行后再融合排序
-- 请求可以通过 `target_content_types` 显式限制本次查询的内容类型子集，但只能引用该库已启用内容类型
+- 每次搜索请求都必须显式携带结构化 `search_scope`
+- `search_scope` 长期上至少应支持：
+  - 单库：`library`
+  - 所有库：`all_libraries`
+  - 预留的多库子集：`library_set`
+- 当前第一阶段公开切片中：
+  - `text` 查询允许 `library` 与 `all_libraries`
+  - `image` / `video` / `document` 查询当前只允许 `library`
+  - 当端点尚不支持当前 `search_scope` 时，系统必须显式返回 `not_supported`
+- 当 `search_scope.kind = library` 时，默认情况下搜索会并行查询该库全部已启用内容类型，并按这些内容类型当前解析出的一个或多个 `vector_space` 并行执行后再融合排序
+- 当 `search_scope.kind = all_libraries` 时，系统必须只查询已进入可搜索状态的库，并在成功响应中显式保留每个命中的来源库身份
+- 请求可以通过 `target_content_types` 显式限制本次查询的内容类型子集；当前第一阶段中，这些内容类型约束必须按 `search_scope` 中实际参与的每个库分别验证
 - 若请求命中未启用内容类型，应返回明确不可用状态
 - 若请求显式命中，或默认会作用到任一已启用但尚未持有 active index 的内容类型，应返回明确未就绪状态，而不是静默忽略该内容类型、自动降级到其他内容类型或返回空结果
 - 若某个已启用内容类型绑定的模型不支持当前查询输入，应跳过该内容类型，并在成功响应中的 `unsupported_content_types` 返回结构化原因；只有当全部目标内容类型都不可执行时，才允许显式失败
@@ -71,7 +81,7 @@
 - 若多个目标内容类型解析到同一个 `vector_space`，系统应对该 `vector_space` 只生成一次查询 embedding 并复用到该空间承载的全部内容类型
 - 若目标内容类型解析到多个不同 `vector_space`，系统应按空间分别生成查询 embedding、分别检索，再进行跨空间混排
 - 搜索期提供方的能力、绑定与已解析提供方选择（Resolved Provider Selection）语义，由 [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义
-- 公共控制项固定包括：`library_id`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_content_types`
+- 公共控制项固定包括：`search_scope`、`filters`、`top_k`、`cursor`、`debug`，以及可选的 `target_content_types`
 - 正式公共过滤器固定包括：`visual_unit.kind`、`path_prefix`、`source_type`、`time_range`
 - 分页采用 `cursor` 语义；本专题不固定 cursor 的内部编码方式
 - 当前切片中，`path_prefix` 作用于结果对象的 `source_path` 前缀匹配；若提供多个前缀，则按“命中任一前缀即可保留”解释
@@ -83,7 +93,8 @@
 - 搜索结果默认返回有序的视觉单元列表
 - `document_page`、`image` 与 `video_segment` 允许在同一结果集中默认混排，并可按 `visual_unit.kind` 过滤
 - 公共结果允许返回稳定 `score` 字段；若返回，该值只表达当前响应内的相对排序强弱，不改变“结果顺序优先于分值解释”的公开语义
-- 公共结果卡片的稳定字段包括：`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选 `score`
+- 公共结果卡片的稳定字段包括：`library_id`、`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选 `score`
+- 当 `search_scope` 允许跨库命中时，每个结果项都必须携带其来源 `library_id`，以支撑对象详情、预览与对象复用动作
 - `preview` 承载可消费的预览引用语义，而不是要求直接暴露原始本地路径
 - 同一源内容下的多个命中默认全部返回
 - 按源内容聚合只作为可选视图语义存在，不取代默认的视觉单元返回粒度
@@ -103,6 +114,7 @@
 - 显式请求未启用内容类型时，应返回明确不可用状态
 - 请求命中已启用但未就绪的内容类型时，应返回明确未就绪状态，而不是静默返回空结果
 - 公开请求若携带多种查询输入，应返回明确“不支持”
+- 当前阶段中，若端点不支持请求给出的 `search_scope.kind`，应返回明确“不支持”
 - 文档查询若携带非法、越界或不可解析的页范围，应返回明确失败，而不是隐式回退到整份文档
 - 视频查询若携带非法、越界或不可解析的时间范围，应返回明确失败，而不是隐式回退到整段视频
 - 视频查询超出允许的大小或时长上限时，应返回明确拒绝，而不是静默截断或自动降级

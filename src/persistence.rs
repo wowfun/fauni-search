@@ -29,6 +29,10 @@ pub(crate) struct DurableAppStateSnapshot {
 pub(crate) struct DurableLibraryRecord {
     pub(crate) id: String,
     pub(crate) display_name: String,
+    #[serde(default = "default_library_lifecycle_state")]
+    pub(crate) lifecycle_state: String,
+    #[serde(default)]
+    pub(crate) archived_at_ms: Option<u128>,
     pub(crate) source_roots: BTreeMap<String, DurableSourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
     pub(crate) sources: BTreeMap<String, SourceRecord>,
@@ -39,6 +43,10 @@ pub(crate) struct DurableLibraryRecord {
     pub(crate) active_vector_spaces: BTreeSet<String>,
     #[serde(default)]
     pub(crate) retired_vector_spaces: BTreeMap<String, RetiredVectorSpaceRecord>,
+}
+
+fn default_library_lifecycle_state() -> String {
+    "active".to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize)]

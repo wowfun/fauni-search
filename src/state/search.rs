@@ -42,8 +42,12 @@ impl AppState {
                 Some(json!({ "field": "text" })),
             ));
         }
+        let search_scope = effective_search_scope_request(
+            request.search_scope.as_ref(),
+            request.library_id.as_deref(),
+        )?;
         self.prepare_search_scope(
-            request.library_id.trim(),
+            &search_scope,
             request.filters.as_ref(),
             request.top_k,
             request.cursor.as_deref(),
@@ -58,9 +62,13 @@ impl AppState {
         &mut self,
         request: &ImageSearchRequest,
     ) -> Result<(SearchPlan, ResolvedImageQueryInput), ApiError> {
+        let search_scope = effective_search_scope_request(
+            request.search_scope.as_ref(),
+            request.library_id.as_deref(),
+        )?;
         let plan = self
             .prepare_search_scope(
-                request.library_id.trim(),
+                &search_scope,
                 request.filters.as_ref(),
                 request.top_k,
                 request.cursor.as_deref(),
@@ -69,6 +77,18 @@ impl AppState {
                 "image",
             )
             .await?;
+        let plan_library_id = (!plan.library_id.trim().is_empty())
+            .then(|| plan.library_id.clone())
+            .ok_or_else(|| {
+            ApiError::not_supported(
+                "Current 110-image-search implementation only supports single-library search_scope.",
+                Some(json!({
+                    "field": "search_scope.kind",
+                    "supported": ["library"],
+                    "received": search_scope.kind,
+                })),
+            )
+        })?;
 
         match request.image_input.kind.as_str() {
             "temp_asset" => {
@@ -83,7 +103,7 @@ impl AppState {
                                 Some(json!({ "field": "image_input.temp_asset_id" })),
                             )
                         })?;
-                let asset = self.get_temp_query_asset(&plan.library_id, temp_asset_id)?;
+                let asset = self.get_temp_query_asset(&plan_library_id, temp_asset_id)?;
                 Ok((plan, ResolvedImageQueryInput::TempAsset(asset)))
             }
             "library_object" => {
@@ -98,7 +118,7 @@ impl AppState {
                                 Some(json!({ "field": "image_input.visual_unit_id" })),
                             )
                         })?;
-                let visual_unit = self.get_library_visual_unit(&plan.library_id, visual_unit_id)?;
+                let visual_unit = self.get_library_visual_unit(&plan_library_id, visual_unit_id)?;
                 if !matches!(visual_unit.kind.as_str(), "image" | "document_page") {
                     return Err(ApiError::not_supported(
                         "Current 110-image-search implementation only supports library image and document_page objects as query images.",
@@ -129,9 +149,13 @@ impl AppState {
         &mut self,
         request: &VideoSearchRequest,
     ) -> Result<(SearchPlan, ResolvedVideoQueryInput), ApiError> {
+        let search_scope = effective_search_scope_request(
+            request.search_scope.as_ref(),
+            request.library_id.as_deref(),
+        )?;
         let plan = self
             .prepare_search_scope(
-                request.library_id.trim(),
+                &search_scope,
                 request.filters.as_ref(),
                 request.top_k,
                 request.cursor.as_deref(),
@@ -140,6 +164,18 @@ impl AppState {
                 "video",
             )
             .await?;
+        let plan_library_id = (!plan.library_id.trim().is_empty())
+            .then(|| plan.library_id.clone())
+            .ok_or_else(|| {
+            ApiError::not_supported(
+                "Current 120-video-search implementation only supports single-library search_scope.",
+                Some(json!({
+                    "field": "search_scope.kind",
+                    "supported": ["library"],
+                    "received": search_scope.kind,
+                })),
+            )
+        })?;
 
         match request.video_input.kind.as_str() {
             "temp_asset" => {
@@ -154,7 +190,7 @@ impl AppState {
                                 Some(json!({ "field": "video_input.temp_asset_id" })),
                             )
                         })?;
-                let asset = self.get_temp_query_video_asset(&plan.library_id, temp_asset_id)?;
+                let asset = self.get_temp_query_video_asset(&plan_library_id, temp_asset_id)?;
                 let locator = resolve_video_query_locator(
                     request.video_input.locator.as_ref(),
                     asset.duration_ms,
@@ -182,7 +218,7 @@ impl AppState {
                     }
 
                     let visual_unit =
-                        self.get_library_visual_unit(&plan.library_id, visual_unit_id)?;
+                        self.get_library_visual_unit(&plan_library_id, visual_unit_id)?;
                     if visual_unit.kind != "video_segment" || visual_unit.source_type != "video" {
                         return Err(ApiError::not_supported(
                             "Current 120-video-search implementation only supports library video_segment objects as direct query video segments.",
@@ -213,7 +249,7 @@ impl AppState {
                         ),
                     )
                 })?;
-                let source = self.get_library_source(&plan.library_id, source_id)?;
+                let source = self.get_library_source(&plan_library_id, source_id)?;
                 if source.source_type != "video" {
                     return Err(ApiError::not_supported(
                         "Current 120-video-search implementation only supports library video sources as query videos.",
@@ -252,9 +288,13 @@ impl AppState {
         &mut self,
         request: &DocumentSearchRequest,
     ) -> Result<(SearchPlan, ResolvedDocumentQueryInput), ApiError> {
+        let search_scope = effective_search_scope_request(
+            request.search_scope.as_ref(),
+            request.library_id.as_deref(),
+        )?;
         let plan = self
             .prepare_search_scope(
-                request.library_id.trim(),
+                &search_scope,
                 request.filters.as_ref(),
                 request.top_k,
                 request.cursor.as_deref(),
@@ -263,6 +303,18 @@ impl AppState {
                 "document",
             )
             .await?;
+        let plan_library_id = (!plan.library_id.trim().is_empty())
+            .then(|| plan.library_id.clone())
+            .ok_or_else(|| {
+            ApiError::not_supported(
+                "Current 130-document-search implementation only supports single-library search_scope.",
+                Some(json!({
+                    "field": "search_scope.kind",
+                    "supported": ["library"],
+                    "received": search_scope.kind,
+                })),
+            )
+        })?;
 
         match request.document_input.kind.as_str() {
             "temp_asset" => {
@@ -277,7 +329,7 @@ impl AppState {
                                 Some(json!({ "field": "document_input.temp_asset_id" })),
                             )
                         })?;
-                let asset = self.get_temp_query_document_asset(&plan.library_id, temp_asset_id)?;
+                let asset = self.get_temp_query_document_asset(&plan_library_id, temp_asset_id)?;
                 let locator = resolve_document_query_locator(
                     request.document_input.locator.as_ref(),
                     asset.page_count,
@@ -298,7 +350,7 @@ impl AppState {
                         Some(json!({ "field": "document_input.source_id" })),
                     )
                 })?;
-                let source = self.get_library_source(&plan.library_id, source_id)?;
+                let source = self.get_library_source(&plan_library_id, source_id)?;
                 if source.source_type != "pdf" {
                     return Err(ApiError::not_supported(
                         "Current 130-document-search implementation only supports library PDF sources as query documents.",
@@ -334,6 +386,187 @@ impl AppState {
     }
 
     pub(crate) async fn prepare_search_scope(
+        &mut self,
+        search_scope: &SearchScopeRequest,
+        filters: Option<&Value>,
+        top_k: Option<usize>,
+        cursor: Option<&str>,
+        debug: Option<bool>,
+        target_content_types: Option<&Vec<String>>,
+        query_input_type: &str,
+    ) -> Result<SearchPlan, ApiError> {
+        match search_scope.kind.trim() {
+            "library" => {
+                let library_id = search_scope
+                    .library_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        ApiError::validation_failed(
+                            "search_scope.kind=library requires library_id.",
+                            Some(json!({ "field": "search_scope.library_id" })),
+                        )
+                    })?;
+                self.prepare_single_library_search_scope(
+                    library_id,
+                    filters,
+                    top_k,
+                    cursor,
+                    debug,
+                    target_content_types,
+                    query_input_type,
+                )
+                .await
+            }
+            "all_libraries" => {
+                if query_input_type != "text" {
+                    return Err(ApiError::not_supported(
+                        format!(
+                            "Current {} search implementation only supports single-library search_scope.",
+                            match query_input_type {
+                                "image" => "110-image-search",
+                                "video" => "120-video-search",
+                                "document" => "130-document-search",
+                                _ => "search",
+                            }
+                        ),
+                        Some(json!({
+                            "field": "search_scope.kind",
+                            "supported": ["library"],
+                            "received": "all_libraries",
+                            "query_input_type": query_input_type,
+                        })),
+                    ));
+                }
+
+                self.prepare_all_libraries_text_search_scope(
+                    filters,
+                    top_k,
+                    cursor,
+                    debug,
+                    target_content_types,
+                    query_input_type,
+                )
+                .await
+            }
+            "library_set" => Err(ApiError::not_supported(
+                "Current search implementation does not yet support explicit multi-library subsets.",
+                Some(json!({
+                    "field": "search_scope.kind",
+                    "received": "library_set",
+                    "supported": ["library", "all_libraries"],
+                })),
+            )),
+            "" => Err(ApiError::validation_failed(
+                "search_scope.kind must not be empty.",
+                Some(json!({ "field": "search_scope.kind" })),
+            )),
+            other => Err(ApiError::validation_failed(
+                "search_scope.kind must be one of the supported search scope kinds.",
+                Some(json!({
+                    "field": "search_scope.kind",
+                    "received": other,
+                    "supported": ["library", "all_libraries", "library_set"],
+                })),
+            )),
+        }
+    }
+
+    async fn prepare_all_libraries_text_search_scope(
+        &mut self,
+        filters: Option<&Value>,
+        top_k: Option<usize>,
+        cursor: Option<&str>,
+        debug: Option<bool>,
+        target_content_types: Option<&Vec<String>>,
+        query_input_type: &str,
+    ) -> Result<SearchPlan, ApiError> {
+        let library_ids = self.libraries.keys().cloned().collect::<Vec<_>>();
+        if library_ids.is_empty() {
+            return Err(ApiError::not_found("Library was not found."));
+        }
+
+        let mut aggregate_plan: Option<SearchPlan> = None;
+        let mut first_not_enabled = None;
+        let mut first_not_ready = None;
+        let mut first_runtime_unavailable = None;
+        let mut first_not_supported = None;
+
+        for library_id in library_ids {
+            match self
+                .prepare_single_library_search_scope(
+                    &library_id,
+                    filters,
+                    top_k,
+                    cursor,
+                    debug,
+                    target_content_types,
+                    query_input_type,
+                )
+                .await
+            {
+                Ok(library_plan) => {
+                    if let Some(plan) = &mut aggregate_plan {
+                        merge_search_plan(plan, library_plan);
+                    } else {
+                        aggregate_plan = Some(SearchPlan {
+                            search_scope_kind: "all_libraries".to_string(),
+                            library_id: String::new(),
+                            ..library_plan
+                        });
+                    }
+                }
+                Err(error) => match error.payload.code.as_str() {
+                    "not_enabled" => {
+                        if first_not_enabled.is_none() {
+                            first_not_enabled = Some(error);
+                        }
+                    }
+                    "not_ready" => {
+                        if first_not_ready.is_none() {
+                            first_not_ready = Some(error);
+                        }
+                    }
+                    "runtime_unavailable" => {
+                        if first_runtime_unavailable.is_none() {
+                            first_runtime_unavailable = Some(error);
+                        }
+                    }
+                    "not_supported" => {
+                        if first_not_supported.is_none() {
+                            first_not_supported = Some(error);
+                        }
+                    }
+                    _ => return Err(error),
+                },
+            }
+        }
+
+        if let Some(plan) = aggregate_plan {
+            return Ok(plan);
+        }
+
+        if let Some(error) = first_not_enabled {
+            return Err(error);
+        }
+        if let Some(error) = first_not_ready {
+            return Err(error);
+        }
+        if let Some(error) = first_runtime_unavailable {
+            return Err(error);
+        }
+        if let Some(error) = first_not_supported {
+            return Err(error);
+        }
+
+        Err(ApiError::not_ready(
+            "No library in the current search scope is ready for text search.",
+            Some(json!({ "search_scope": "all_libraries" })),
+        ))
+    }
+
+    async fn prepare_single_library_search_scope(
         &mut self,
         library_id: &str,
         filters: Option<&Value>,
@@ -478,7 +711,7 @@ impl AppState {
             ));
         }
 
-        let active_visual_unit_ids = library
+        let active_visual_unit_refs = library
             .visual_units
             .iter()
             .filter(|(_, visual_unit)| {
@@ -486,7 +719,7 @@ impl AppState {
                     content_type_matches_visual_unit(content_type, &visual_unit.kind)
                 })
             })
-            .map(|(visual_unit_id, _)| visual_unit_id.clone())
+            .map(|(visual_unit_id, _)| scoped_visual_unit_ref(&resolved_library_id, visual_unit_id))
             .collect::<BTreeSet<_>>();
         let resolved_content_models = resolved_content_models
             .into_iter()
@@ -504,7 +737,9 @@ impl AppState {
                 .entry(vector_space_id.clone())
                 .and_modify(|group| group.content_types.push(content_type.clone()))
                 .or_insert_with(|| VectorSpaceExecutionGroup {
+                    library_id: resolved_library_id.clone(),
                     vector_space_id: vector_space_id.clone(),
+                    active_visual_unit_count: library.visual_units.len(),
                     content_types: vec![content_type.clone()],
                     resolved_model: resolved_execution_selection_from_content_model(
                         resolved,
@@ -520,7 +755,8 @@ impl AppState {
         let time_range_filter = resolve_time_range_filter(filters)?;
 
         Ok(SearchPlan {
-            library_id: resolved_library_id,
+            search_scope_kind: "library".to_string(),
+            library_id: resolved_library_id.clone(),
             top_k: top_k.unwrap_or(10).max(1),
             cursor_offset,
             kind_filter: read_string_filter(filters, "visual_unit.kind")
@@ -530,9 +766,16 @@ impl AppState {
             time_range_filter,
             target_content_types: supported_content_types,
             unsupported_content_types,
-            active_visual_unit_ids,
+            active_visual_unit_refs,
             execution_groups: execution_groups_by_id.into_values().collect(),
-            resolved_content_models,
+            debug_content_types: resolved_content_models
+                .into_iter()
+                .map(|(content_type, resolved_model)| SearchContentTypeDebugEntry {
+                    library_id: resolved_library_id.clone(),
+                    content_type,
+                    resolved_model,
+                })
+                .collect(),
             debug: debug.unwrap_or(false),
         })
     }
@@ -899,5 +1142,59 @@ fn resolved_execution_selection_from_content_model(
             .clone()
             .unwrap_or_else(|| format!("unresolved:{}", resolved.content_type)),
         execution_input_types,
+    }
+}
+
+fn scoped_visual_unit_ref(library_id: &str, visual_unit_id: &str) -> String {
+    format!("{library_id}:{visual_unit_id}")
+}
+
+fn effective_search_scope_request(
+    search_scope: Option<&SearchScopeRequest>,
+    legacy_library_id: Option<&str>,
+) -> Result<SearchScopeRequest, ApiError> {
+    if let Some(search_scope) = search_scope {
+        return Ok(search_scope.clone());
+    }
+
+    let library_id = legacy_library_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::validation_failed(
+                "search_scope must be provided, or a legacy library_id must be present during the transition.",
+                Some(json!({ "field": "search_scope" })),
+            )
+        })?;
+
+    Ok(SearchScopeRequest {
+        kind: "library".to_string(),
+        library_id: Some(library_id.to_string()),
+        library_ids: None,
+    })
+}
+
+fn merge_search_plan(target: &mut SearchPlan, incoming: SearchPlan) {
+    target
+        .active_visual_unit_refs
+        .extend(incoming.active_visual_unit_refs);
+    target.execution_groups.extend(incoming.execution_groups);
+    target.debug_content_types.extend(incoming.debug_content_types);
+
+    for content_type in incoming.target_content_types {
+        if !target.target_content_types.contains(&content_type) {
+            target.target_content_types.push(content_type);
+        }
+    }
+
+    for unsupported in incoming.unsupported_content_types {
+        if !target.unsupported_content_types.iter().any(|existing| {
+            existing.content_type == unsupported.content_type
+                && existing.model == unsupported.model
+                && existing.vector_type == unsupported.vector_type
+                && existing.reason == unsupported.reason
+        }) {
+            target.unsupported_content_types.push(unsupported);
+        }
     }
 }

@@ -198,6 +198,32 @@ fn restart_load_continues_id_sequences_and_clears_jobs() {
 }
 
 #[test]
+fn durable_state_roundtrip_restores_archived_library_lifecycle() {
+    let store_path = unique_test_file_path("durable-archived-library.sqlite");
+
+    let mut state = AppState::with_durable_store_path(Some(store_path.clone()));
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: Some("archived-library".to_string()),
+            display_name: Some("Archived Library".to_string()),
+            name: String::new(),
+        })
+        .unwrap();
+    let archived = state.archive_library(&library.id).unwrap();
+
+    assert_eq!(archived.lifecycle_state, "archived");
+    assert!(archived.archived_at_ms.is_some());
+
+    let loaded = load_state_with_qdrant_namespaces(&store_path, &[], &[]);
+    let loaded_library = loaded.libraries.get(&library.id).unwrap();
+
+    assert_eq!(loaded_library.lifecycle_state, "archived");
+    assert!(loaded_library.archived_at_ms.is_some());
+
+    let _ = fs::remove_file(&store_path);
+}
+
+#[test]
 fn restart_load_missing_collection_marks_index_not_ready() {
     let store_path = unique_test_file_path("restart-missing-collection.sqlite");
     let image_path = unique_test_file_path("restart-missing-collection.png");
@@ -240,7 +266,8 @@ fn restart_load_missing_collection_marks_index_not_ready() {
         .contains(&available_vector_space_id()));
 
     let error = run_async(loaded.prepare_text_search(&TextSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         text: "chart".to_string(),
         filters: None,
         top_k: Some(5),
@@ -615,6 +642,90 @@ fn source_root_refresh_activates_files_and_rule_update_moves_sources_out_of_scop
 }
 
 #[test]
+fn source_inventory_includes_representative_preview_when_visual_units_exist() {
+    set_test_app_env();
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "source-inventory-preview".to_string(),
+        })
+        .unwrap();
+
+    let root_dir = unique_test_dir_path("source-inventory-preview");
+    fs::create_dir_all(&root_dir).unwrap();
+    fs::write(root_dir.join("chart.png"), b"png").unwrap();
+    write_test_pdf(&root_dir.join("report.pdf"), 2);
+
+    let source_root = state
+        .create_source_root(
+            &library.id,
+            CreateSourceRootRequest {
+                root_path: root_dir.to_string_lossy().to_string(),
+                enabled: Some(true),
+                rules: Some(SourceRootRulesPayload::default()),
+            },
+        )
+        .unwrap();
+
+    let (_, queued) = state
+        .queue_source_action(
+            &library.id,
+            SourceActionScope::SourceRoot(source_root.source_root_id),
+            SourceActionKind::Refresh,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let queued = queued.unwrap();
+    let prepared = state.prepare_source_action_execution(&queued.plan).unwrap();
+    let outcome = SourceActionJobOutcome::completed(&prepared);
+    state
+        .finalize_source_action_job(&queued.job_id, prepared, outcome)
+        .unwrap();
+
+    let sources = state
+        .list_sources(
+            &library.id,
+            SourcesQuery {
+                source_root_id: None,
+                source_type: None,
+                status: None,
+            },
+        )
+        .unwrap();
+
+    let image_source = sources
+        .sources
+        .iter()
+        .find(|source| source.source_type == "image")
+        .unwrap();
+    let image_visual = image_source.representative_visual_unit.as_ref().unwrap();
+    let image_preview = image_source.representative_preview.as_ref().unwrap();
+    assert_eq!(image_visual.kind, "image");
+    assert!(image_preview
+        .url
+        .contains(&format!("/libraries/{}/visual-units/", library.id)));
+    assert!(image_preview.url.ends_with("/preview"));
+
+    let document_source = sources
+        .sources
+        .iter()
+        .find(|source| source.source_type == "pdf")
+        .unwrap();
+    let document_visual = document_source.representative_visual_unit.as_ref().unwrap();
+    let document_preview = document_source.representative_preview.as_ref().unwrap();
+    assert_eq!(document_visual.kind, "document_page");
+    assert_eq!(document_visual.locator["page"], 1);
+    assert!(document_preview
+        .url
+        .contains(&format!("/libraries/{}/visual-units/", library.id)));
+
+    let _ = fs::remove_dir_all(root_dir);
+}
+
+#[test]
 fn source_root_refresh_marks_deleted_files_invalidated() {
     let mut state = test_state();
     let library = state
@@ -693,7 +804,8 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
     );
 
     let search_plan = run_async(state.prepare_text_search(&TextSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         text: "chart".to_string(),
         filters: None,
         top_k: Some(5),
@@ -702,7 +814,7 @@ fn source_root_refresh_marks_deleted_files_invalidated() {
         target_content_types: None,
     }))
     .unwrap();
-    assert!(search_plan.active_visual_unit_ids.is_empty());
+    assert!(search_plan.active_visual_unit_refs.is_empty());
 
     let _ = fs::remove_dir_all(root_dir);
 }
@@ -770,6 +882,485 @@ fn finalize_import_job_failed_with_activations_keeps_structured_state_and_active
     assert_eq!(job.snapshot.status, "failed");
     assert_eq!(job.snapshot.phase, "failed");
     assert_eq!(job.snapshot.progress.completed, 1);
+
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
+fn request_job_cancellation_marks_queued_import_job_as_canceled() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "cancel-queued-import".to_string(),
+        })
+        .unwrap();
+
+    let image_path = unique_test_file_path("cancel-queued-import.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    let queued = state.queue_import(&prepared).unwrap();
+    let job_id = queued.job_handle.clone().unwrap();
+
+    let canceled = state.request_job_cancellation(&job_id).unwrap();
+    assert_eq!(canceled.status, "canceled");
+    assert_eq!(canceled.phase, "canceled");
+    assert!(!canceled.cancelable);
+    assert!(state.job_cancellation_requested(&job_id));
+
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
+fn request_job_cancellation_rejects_terminal_jobs() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "cancel-terminal-import".to_string(),
+        })
+        .unwrap();
+
+    let image_path = unique_test_file_path("cancel-terminal-import.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    let queued = state.queue_import(&prepared).unwrap();
+    let job_id = queued.job_handle.clone().unwrap();
+    state
+        .finalize_import_job(
+            &job_id,
+            prepared,
+            ImportJobOutcome::completed("done".to_string(), 1, BTreeSet::new()),
+        )
+        .unwrap();
+
+    let error = state.request_job_cancellation(&job_id).unwrap_err();
+    assert_eq!(error.payload.code, "conflict");
+
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
+fn request_job_retry_requeues_canceled_manual_source_action() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "retry-canceled-source-action".to_string(),
+        })
+        .unwrap();
+
+    let root_dir = unique_test_dir_path("retry-canceled-source-action");
+    fs::create_dir_all(&root_dir).unwrap();
+    fs::write(root_dir.join("chart.png"), b"png").unwrap();
+
+    let source_root = state
+        .create_source_root(
+            &library.id,
+            CreateSourceRootRequest {
+                root_path: root_dir.to_string_lossy().to_string(),
+                enabled: Some(true),
+                rules: Some(SourceRootRulesPayload::default()),
+            },
+        )
+        .unwrap();
+
+    let (response, _) = state
+        .queue_source_action(
+            &library.id,
+            SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+            SourceActionKind::Refresh,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let job_id = response.job_handle.unwrap();
+    state.request_job_cancellation(&job_id).unwrap();
+
+    let (retried, dispatch) = state.request_job_retry(&job_id).unwrap();
+    assert_ne!(retried.job_id, job_id);
+    assert_eq!(retried.status, "queued");
+    assert!(retried.cancelable);
+    assert!(retried.retryable);
+    assert_eq!(retried.current_attempt.attempt, 2);
+    assert_eq!(
+        retried.retried_from_job_id.as_deref(),
+        Some(job_id.as_str())
+    );
+    assert_eq!(
+        state
+            .libraries
+            .get(&library.id)
+            .unwrap()
+            .latest_job_id
+            .as_deref(),
+        Some(retried.job_id.as_str())
+    );
+    assert_eq!(state.jobs.get(&job_id).unwrap().snapshot.status, "canceled");
+
+    match dispatch {
+        RetryJobDispatch::Import(_) => {
+            panic!("expected source-action retry dispatch");
+        }
+        RetryJobDispatch::SourceAction(queued_action) => {
+            assert_eq!(queued_action.job_id, retried.job_id);
+            assert_eq!(queued_action.plan.action, SourceActionKind::Refresh);
+            assert_eq!(
+                queued_action.plan.target_root_ids,
+                vec![source_root.source_root_id.clone()]
+            );
+        }
+        RetryJobDispatch::Maintenance(_) => {
+            panic!("expected source-action retry dispatch");
+        }
+    }
+
+    let _ = fs::remove_dir_all(root_dir);
+}
+
+#[test]
+fn request_job_retry_requeues_canceled_import_job() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "retry-import".to_string(),
+        })
+        .unwrap();
+
+    let image_path = unique_test_file_path("retry-import.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    let queued = state.queue_import(&prepared).unwrap();
+    let job_id = queued.job_handle.clone().unwrap();
+    state.request_job_cancellation(&job_id).unwrap();
+
+    let (retried, dispatch) = state.request_job_retry(&job_id).unwrap();
+    assert_ne!(retried.job_id, job_id);
+    assert_eq!(retried.status, "queued");
+    assert!(retried.retryable);
+    assert_eq!(retried.current_attempt.attempt, 2);
+    assert_eq!(
+        retried.retried_from_job_id.as_deref(),
+        Some(job_id.as_str())
+    );
+
+    match dispatch {
+        RetryJobDispatch::Import(prepared) => {
+            assert_eq!(
+                prepared.request.paths,
+                vec![image_path.to_string_lossy().to_string()]
+            );
+        }
+        RetryJobDispatch::SourceAction(_) | RetryJobDispatch::Maintenance(_) => {
+            panic!("expected import retry dispatch");
+        }
+    }
+
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
+fn request_job_resume_reopens_canceled_import_job() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "resume-import".to_string(),
+        })
+        .unwrap();
+
+    let image_path = unique_test_file_path("resume-import.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    let queued = state.queue_import(&prepared).unwrap();
+    let job_id = queued.job_handle.clone().unwrap();
+    state.request_job_cancellation(&job_id).unwrap();
+
+    let (resumed, dispatch) = state.request_job_resume(&job_id).unwrap();
+    assert_eq!(resumed.job_id, job_id);
+    assert_eq!(resumed.status, "queued");
+    assert!(resumed.cancelable);
+    assert!(resumed.retryable);
+    assert_eq!(resumed.current_attempt.attempt, 2);
+    assert_eq!(
+        state
+            .libraries
+            .get(&library.id)
+            .unwrap()
+            .latest_job_id
+            .as_deref(),
+        Some(job_id.as_str())
+    );
+
+    match dispatch {
+        ResumeJobDispatch::Import(prepared) => {
+            assert_eq!(
+                prepared.request.paths,
+                vec![image_path.to_string_lossy().to_string()]
+            );
+        }
+        ResumeJobDispatch::SourceAction(_) | ResumeJobDispatch::Maintenance(_) => {
+            panic!("expected import resume dispatch");
+        }
+    }
+
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
+fn request_job_resume_reopens_canceled_manual_source_action() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "resume-canceled-source-action".to_string(),
+        })
+        .unwrap();
+
+    let root_dir = unique_test_dir_path("resume-canceled-source-action");
+    fs::create_dir_all(&root_dir).unwrap();
+    fs::write(root_dir.join("chart.png"), b"png").unwrap();
+
+    let source_root = state
+        .create_source_root(
+            &library.id,
+            CreateSourceRootRequest {
+                root_path: root_dir.to_string_lossy().to_string(),
+                enabled: Some(true),
+                rules: Some(SourceRootRulesPayload::default()),
+            },
+        )
+        .unwrap();
+
+    let (response, _) = state
+        .queue_source_action(
+            &library.id,
+            SourceActionScope::SourceRoot(source_root.source_root_id.clone()),
+            SourceActionKind::Refresh,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let job_id = response.job_handle.unwrap();
+    state.request_job_cancellation(&job_id).unwrap();
+
+    let (resumed, dispatch) = state.request_job_resume(&job_id).unwrap();
+    assert_eq!(resumed.job_id, job_id);
+    assert_eq!(resumed.status, "queued");
+    assert!(resumed.cancelable);
+    assert_eq!(resumed.current_attempt.attempt, 2);
+    assert_eq!(
+        state
+            .libraries
+            .get(&library.id)
+            .unwrap()
+            .source_roots
+            .get(&source_root.source_root_id)
+            .unwrap()
+            .watch_state,
+        "queued_refresh"
+    );
+
+    match dispatch {
+        ResumeJobDispatch::Import(_) | ResumeJobDispatch::Maintenance(_) => {
+            panic!("expected source-action resume dispatch");
+        }
+        ResumeJobDispatch::SourceAction(plan) => {
+            assert_eq!(plan.action, SourceActionKind::Refresh);
+            assert_eq!(
+                plan.target_root_ids,
+                vec![source_root.source_root_id.clone()]
+            );
+        }
+    }
+
+    let _ = fs::remove_dir_all(root_dir);
+}
+
+#[test]
+fn request_job_resume_reopens_failed_maintenance_job() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "resume-maintenance".to_string(),
+        })
+        .unwrap();
+
+    state
+        .libraries
+        .get_mut(&library.id)
+        .unwrap()
+        .retired_vector_spaces
+        .insert(
+            "vs_retired_resume".to_string(),
+            RetiredVectorSpaceRecord { retired_at_ms: 1 },
+        );
+
+    let (_, queued_action) = state
+        .queue_maintenance_action(
+            &library.id,
+            MaintenanceActionKind::CleanupRetiredVectorSpaces,
+        )
+        .unwrap();
+    let queued_action = queued_action.expect("maintenance should queue");
+    state
+        .finalize_maintenance_action_job(
+            &queued_action.job_id,
+            &queued_action.plan,
+            &[],
+            &[String::from("vs_retired_resume: cleanup failed")],
+        )
+        .unwrap();
+
+    let (resumed, dispatch) = state.request_job_resume(&queued_action.job_id).unwrap();
+    assert_eq!(resumed.job_id, queued_action.job_id);
+    assert_eq!(resumed.status, "queued");
+    assert!(resumed.cancelable);
+    assert_eq!(resumed.current_attempt.attempt, 2);
+
+    match dispatch {
+        ResumeJobDispatch::Import(_) | ResumeJobDispatch::SourceAction(_) => {
+            panic!("expected maintenance resume dispatch");
+        }
+        ResumeJobDispatch::Maintenance(plan) => {
+            assert_eq!(
+                plan.action,
+                MaintenanceActionKind::CleanupRetiredVectorSpaces
+            );
+            assert_eq!(
+                plan.target_vector_space_ids,
+                vec![String::from("vs_retired_resume")]
+            );
+        }
+    }
+}
+
+#[test]
+fn finalize_import_job_reuses_existing_manual_source_path_without_duplicates() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "manual-import-reuse".to_string(),
+        })
+        .unwrap();
+
+    let image_path = unique_test_file_path("manual-import-reuse.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let first_prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    let first_job = state.queue_import(&first_prepared).unwrap();
+    let first_job_id = first_job.job_handle.unwrap();
+    state
+        .finalize_import_job(
+            &first_job_id,
+            first_prepared,
+            ImportJobOutcome::completed("done".to_string(), 1, BTreeSet::new()),
+        )
+        .unwrap();
+
+    let library_snapshot = state.libraries.get(&library.id).unwrap();
+    let original_source = library_snapshot.sources.values().next().unwrap().clone();
+    let original_visual_unit_id = original_source.visual_unit_ids[0].clone();
+    let original_point_id = library_snapshot
+        .visual_units
+        .get(&original_visual_unit_id)
+        .unwrap()
+        .point_id;
+
+    let second_prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    assert_eq!(second_prepared.sources[0].id, original_source.id);
+    assert!(second_prepared
+        .vector_space_batches
+        .iter()
+        .any(|batch| batch.stale_point_ids.contains(&original_point_id)));
+
+    let second_visual_unit_id = second_prepared.visual_units[0].id.clone();
+    let second_job = state.queue_import(&second_prepared).unwrap();
+    let second_job_id = second_job.job_handle.unwrap();
+    state
+        .finalize_import_job(
+            &second_job_id,
+            second_prepared,
+            ImportJobOutcome::completed("done again".to_string(), 1, BTreeSet::new()),
+        )
+        .unwrap();
+
+    let library_snapshot = state.libraries.get(&library.id).unwrap();
+    assert_eq!(library_snapshot.sources.len(), 1);
+    assert_eq!(library_snapshot.source_order.len(), 1);
+    assert_eq!(library_snapshot.visual_units.len(), 1);
+    assert_eq!(library_snapshot.visual_unit_order.len(), 1);
+    assert_eq!(
+        library_snapshot
+            .sources
+            .get(&original_source.id)
+            .unwrap()
+            .visual_unit_ids,
+        vec![second_visual_unit_id.clone()]
+    );
+    assert!(!library_snapshot
+        .visual_units
+        .contains_key(&original_visual_unit_id));
+    assert!(library_snapshot
+        .visual_units
+        .contains_key(&second_visual_unit_id));
 
     let _ = fs::remove_file(image_path);
 }
@@ -1192,7 +1783,8 @@ fn build_search_response_returns_qdrant_results_after_import() {
             .unwrap();
 
     let plan = run_async(state.prepare_text_search(&TextSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         text: "report".to_string(),
         filters: None,
         top_k: Some(10),
@@ -1274,6 +1866,7 @@ fn build_search_response_returns_qdrant_results_after_import() {
 fn build_search_response_supports_cursor_pagination() {
     set_test_app_env();
     let plan = SearchPlan {
+        search_scope_kind: "library".to_string(),
         library_id: "lib_000001".to_string(),
         top_k: 1,
         cursor_offset: 0,
@@ -1283,9 +1876,9 @@ fn build_search_response_supports_cursor_pagination() {
         time_range_filter: None,
         target_content_types: vec!["image".to_string(), "document".to_string()],
         unsupported_content_types: Vec::new(),
-        active_visual_unit_ids: BTreeSet::from(["vu_000001".to_string(), "vu_000002".to_string()]),
+        active_visual_unit_refs: scoped_visual_unit_refs("lib_000001", &["vu_000001", "vu_000002"]),
         execution_groups: available_execution_groups(&["image", "document"]),
-        resolved_content_models: default_resolved_content_models(),
+        debug_content_types: default_search_debug_content_types("lib_000001"),
         debug: true,
     };
     let candidates = vec![
@@ -1355,6 +1948,7 @@ fn build_search_response_merges_multiple_vector_spaces_by_score() {
         document.vector_space_id = Some(secondary_vector_space_id.clone());
     }
     let plan = SearchPlan {
+        search_scope_kind: "library".to_string(),
         library_id: "lib_000001".to_string(),
         top_k: 10,
         cursor_offset: 0,
@@ -1364,15 +1958,19 @@ fn build_search_response_merges_multiple_vector_spaces_by_score() {
         time_range_filter: None,
         target_content_types: vec!["image".to_string(), "document".to_string()],
         unsupported_content_types: Vec::new(),
-        active_visual_unit_ids: BTreeSet::from(["vu_000001".to_string(), "vu_000002".to_string()]),
+        active_visual_unit_refs: scoped_visual_unit_refs("lib_000001", &["vu_000001", "vu_000002"]),
         execution_groups: vec![
             VectorSpaceExecutionGroup {
+                library_id: "lib_000001".to_string(),
                 vector_space_id: available_vector_space_id(),
+                active_visual_unit_count: 2,
                 content_types: vec!["image".to_string()],
                 resolved_model: available_provider_selection(),
             },
             VectorSpaceExecutionGroup {
+                library_id: "lib_000001".to_string(),
                 vector_space_id: secondary_vector_space_id.clone(),
+                active_visual_unit_count: 2,
                 content_types: vec!["document".to_string()],
                 resolved_model: ResolvedExecutionModelSelection {
                     vector_type: "single_vector".to_string(),
@@ -1382,7 +1980,14 @@ fn build_search_response_merges_multiple_vector_spaces_by_score() {
                 },
             },
         ],
-        resolved_content_models,
+        debug_content_types: resolved_content_models
+            .into_iter()
+            .map(|(content_type, resolved_model)| SearchContentTypeDebugEntry {
+                library_id: "lib_000001".to_string(),
+                content_type,
+                resolved_model,
+            })
+            .collect(),
         debug: true,
     };
 
@@ -1390,6 +1995,7 @@ fn build_search_response_merges_multiple_vector_spaces_by_score() {
         plan,
         vec![
             crate::indexing::ExecutedSearchGroup {
+                library_id: "lib_000001".to_string(),
                 query_embedding: QueryEmbeddingResult {
                     vectors: vec![vec![0.1, 0.2, 0.3]],
                     pooled_vector: vec![0.1, 0.2, 0.3],
@@ -1407,6 +2013,7 @@ fn build_search_response_merges_multiple_vector_spaces_by_score() {
                 }],
             },
             crate::indexing::ExecutedSearchGroup {
+                library_id: "lib_000001".to_string(),
                 query_embedding: QueryEmbeddingResult {
                     vectors: vec![vec![0.3, 0.2, 0.1]],
                     pooled_vector: vec![0.3, 0.2, 0.1],
@@ -1444,6 +2051,7 @@ fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_fil
     set_test_app_env();
     let response = build_search_response(
         SearchPlan {
+            search_scope_kind: "library".to_string(),
             library_id: "lib_000001".to_string(),
             top_k: 10,
             cursor_offset: 0,
@@ -1456,13 +2064,12 @@ fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_fil
             }),
             target_content_types: vec!["video".to_string()],
             unsupported_content_types: Vec::new(),
-            active_visual_unit_ids: BTreeSet::from([
-                "vu_000001".to_string(),
-                "vu_000002".to_string(),
-                "vu_000003".to_string(),
-            ]),
+            active_visual_unit_refs: scoped_visual_unit_refs(
+                "lib_000001",
+                &["vu_000001", "vu_000002", "vu_000003"]
+            ),
             execution_groups: available_execution_groups(&["video"]),
-            resolved_content_models: default_resolved_content_models(),
+            debug_content_types: default_search_debug_content_types("lib_000001"),
             debug: false,
         },
         executed_search_groups(
@@ -1596,7 +2203,8 @@ fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
         .insert(available_vector_space_id());
 
     let invalid_cursor = run_async(state.prepare_text_search(&TextSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         text: "report".to_string(),
         filters: None,
         top_k: Some(5),
@@ -1612,7 +2220,8 @@ fn prepare_text_search_rejects_invalid_cursor_and_time_range_filter() {
     );
 
     let invalid_time_range = run_async(state.prepare_text_search(&TextSearchRequest {
-        library_id: library.id,
+        search_scope: None,
+        library_id: Some(library.id),
         text: "report".to_string(),
         filters: Some(json!({
             "time_range": {
@@ -1667,7 +2276,8 @@ fn prepare_image_search_requires_existing_temp_asset() {
         .unwrap();
 
     let (plan, temp_asset) = run_async(state.prepare_image_search(&ImageSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         image_input: QueryImageInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some(asset.temp_asset_id.clone()),
@@ -1693,7 +2303,8 @@ fn prepare_image_search_requires_existing_temp_asset() {
     }
 
     let missing = run_async(state.prepare_image_search(&ImageSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         image_input: QueryImageInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some("temp_asset_999999".to_string()),
@@ -1748,7 +2359,8 @@ fn prepare_image_search_accepts_library_image_objects() {
         .insert(visual_unit.id.clone(), visual_unit.clone());
 
     let (plan, input) = run_async(state.prepare_image_search(&ImageSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         image_input: QueryImageInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -1812,7 +2424,8 @@ fn prepare_image_search_accepts_library_document_page_objects() {
         .insert(visual_unit.id.clone(), visual_unit.clone());
 
     let (plan, input) = run_async(state.prepare_image_search(&ImageSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         image_input: QueryImageInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -1878,7 +2491,8 @@ fn prepare_image_search_rejects_unsupported_library_object_query_images() {
         );
 
     let error = run_async(state.prepare_image_search(&ImageSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         image_input: QueryImageInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -2090,7 +2704,8 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
         .unwrap();
 
     let (plan, temp_input) = run_async(state.prepare_video_search(&VideoSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         video_input: QueryVideoInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some(asset.temp_asset_id.clone()),
@@ -2121,7 +2736,8 @@ fn prepare_video_search_accepts_temp_assets_and_library_sources() {
         .insert(source.id.clone(), source.clone());
 
     let (_, library_input) = run_async(state.prepare_video_search(&VideoSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         video_input: QueryVideoInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -2178,7 +2794,8 @@ fn prepare_video_search_rejects_invalid_ranges() {
         .unwrap();
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         video_input: QueryVideoInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some(asset.temp_asset_id),
@@ -2237,7 +2854,8 @@ fn prepare_video_search_rejects_expired_temp_assets() {
         .expires_at_ms = 0;
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         video_input: QueryVideoInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some(asset.temp_asset_id),
@@ -2301,7 +2919,8 @@ fn prepare_video_search_rejects_non_video_library_sources() {
         );
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         video_input: QueryVideoInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -2362,7 +2981,8 @@ fn prepare_video_search_accepts_library_video_segments() {
         );
 
     let (_, input) = run_async(state.prepare_video_search(&VideoSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         video_input: QueryVideoInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -2420,7 +3040,8 @@ fn prepare_video_search_rejects_locator_override_for_library_video_segments() {
         );
 
     let error = run_async(state.prepare_video_search(&VideoSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         video_input: QueryVideoInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -2472,7 +3093,8 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
         .unwrap();
 
     let (plan, temp_input) = run_async(state.prepare_document_search(&DocumentSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         document_input: QueryDocumentInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some(asset.temp_asset_id.clone()),
@@ -2502,7 +3124,8 @@ fn prepare_document_search_accepts_temp_assets_and_library_sources() {
         .insert(source.id.clone(), source.clone());
 
     let (_, library_input) = run_async(state.prepare_document_search(&DocumentSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         document_input: QueryDocumentInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -2559,7 +3182,8 @@ fn prepare_document_search_rejects_invalid_ranges() {
         .unwrap();
 
     let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         document_input: QueryDocumentInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some(asset.temp_asset_id),
@@ -2617,7 +3241,8 @@ fn prepare_document_search_rejects_expired_temp_assets() {
         .expires_at_ms = 0;
 
     let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         document_input: QueryDocumentInputRequest {
             kind: "temp_asset".to_string(),
             temp_asset_id: Some(asset.temp_asset_id),
@@ -2680,7 +3305,8 @@ fn prepare_document_search_rejects_non_pdf_library_sources() {
         );
 
     let error = run_async(state.prepare_document_search(&DocumentSearchRequest {
-        library_id: library.id.clone(),
+        search_scope: None,
+        library_id: Some(library.id.clone()),
         document_input: QueryDocumentInputRequest {
             kind: "library_object".to_string(),
             temp_asset_id: None,
@@ -2858,7 +3484,9 @@ fn available_provider_selection() -> ResolvedExecutionModelSelection {
 
 fn available_execution_groups(content_types: &[&str]) -> Vec<VectorSpaceExecutionGroup> {
     vec![VectorSpaceExecutionGroup {
+        library_id: "lib_000001".to_string(),
         vector_space_id: available_vector_space_id(),
+        active_visual_unit_count: 3,
         content_types: content_types
             .iter()
             .map(|item| (*item).to_string())
@@ -2872,6 +3500,7 @@ fn executed_search_groups(
     candidates: Vec<QdrantScoredPoint>,
 ) -> Vec<crate::indexing::ExecutedSearchGroup> {
     vec![crate::indexing::ExecutedSearchGroup {
+        library_id: "lib_000001".to_string(),
         query_embedding: QueryEmbeddingResult {
             vectors: vec![vec![0.1, 0.2, 0.3]],
             pooled_vector: vec![0.1, 0.2, 0.3],
@@ -2947,6 +3576,23 @@ fn default_resolved_content_models() -> BTreeMap<String, ResolvedContentModelSel
             },
         ),
     ])
+}
+
+fn default_search_debug_content_types(library_id: &str) -> Vec<SearchContentTypeDebugEntry> {
+    default_resolved_content_models()
+        .into_iter()
+        .map(|(content_type, resolved_model)| SearchContentTypeDebugEntry {
+            library_id: library_id.to_string(),
+            content_type,
+            resolved_model,
+        })
+        .collect()
+}
+
+fn scoped_visual_unit_refs(library_id: &str, ids: &[&str]) -> BTreeSet<String> {
+    ids.iter()
+        .map(|visual_unit_id| format!("{library_id}:{visual_unit_id}"))
+        .collect()
 }
 
 fn simulated_active_namespace_probe(

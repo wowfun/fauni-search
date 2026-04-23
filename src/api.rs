@@ -23,6 +23,19 @@ pub(crate) struct CreateLibraryApiRequest {
     pub(crate) extra: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateLibraryRequest {
+    pub(crate) display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateLibraryApiRequest {
+    #[serde(default)]
+    pub(crate) display_name: Option<String>,
+    #[serde(default, flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct LibrariesListData {
     pub(crate) libraries: Vec<LibrarySnapshot>,
@@ -32,6 +45,9 @@ pub(crate) struct LibrariesListData {
 pub(crate) struct LibrarySnapshot {
     pub(crate) id: String,
     pub(crate) display_name: String,
+    pub(crate) lifecycle_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) archived_at_ms: Option<u128>,
     pub(crate) counts: LibraryCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) latest_job_id: Option<String>,
@@ -382,6 +398,10 @@ pub(crate) struct SourceInventoryItem {
     pub(crate) source_root_path: Option<String>,
     pub(crate) source_root_label: String,
     pub(crate) visual_unit_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) representative_visual_unit: Option<VisualUnitSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) representative_preview: Option<PreviewReference>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -412,6 +432,36 @@ pub(crate) struct SourceActionData {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct MaintenanceActionRequest {
+    #[serde(default)]
+    pub(crate) action: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct MaintenanceActionAcceptedItem {
+    pub(crate) target_kind: String,
+    pub(crate) target_id: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct MaintenanceActionRejectedItem {
+    pub(crate) reason_code: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct MaintenanceActionData {
+    pub(crate) action: String,
+    pub(crate) accepted: Vec<MaintenanceActionAcceptedItem>,
+    pub(crate) rejected: Vec<MaintenanceActionRejectedItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) job_handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) job: Option<JobSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ImportPathsRequest {
     pub(crate) paths: Vec<String>,
 }
@@ -458,6 +508,9 @@ pub(crate) struct JobSnapshot {
     pub(crate) phase: String,
     pub(crate) progress: JobProgress,
     pub(crate) cancelable: bool,
+    pub(crate) retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) retried_from_job_id: Option<String>,
     pub(crate) current_attempt: JobAttemptSnapshot,
 }
 
@@ -511,9 +564,21 @@ pub(crate) struct JobsQuery {
     pub(crate) library_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct SearchScopeRequest {
+    pub(crate) kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) library_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) library_ids: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct TextSearchRequest {
-    pub(crate) library_id: String,
+    #[serde(default)]
+    pub(crate) search_scope: Option<SearchScopeRequest>,
+    #[serde(default)]
+    pub(crate) library_id: Option<String>,
     pub(crate) text: String,
     pub(crate) filters: Option<Value>,
     pub(crate) top_k: Option<usize>,
@@ -524,7 +589,10 @@ pub(crate) struct TextSearchRequest {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ImageSearchRequest {
-    pub(crate) library_id: String,
+    #[serde(default)]
+    pub(crate) search_scope: Option<SearchScopeRequest>,
+    #[serde(default)]
+    pub(crate) library_id: Option<String>,
     pub(crate) image_input: QueryImageInputRequest,
     pub(crate) filters: Option<Value>,
     pub(crate) top_k: Option<usize>,
@@ -535,7 +603,10 @@ pub(crate) struct ImageSearchRequest {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct VideoSearchRequest {
-    pub(crate) library_id: String,
+    #[serde(default)]
+    pub(crate) search_scope: Option<SearchScopeRequest>,
+    #[serde(default)]
+    pub(crate) library_id: Option<String>,
     pub(crate) video_input: QueryVideoInputRequest,
     pub(crate) filters: Option<Value>,
     pub(crate) top_k: Option<usize>,
@@ -546,7 +617,10 @@ pub(crate) struct VideoSearchRequest {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DocumentSearchRequest {
-    pub(crate) library_id: String,
+    #[serde(default)]
+    pub(crate) search_scope: Option<SearchScopeRequest>,
+    #[serde(default)]
+    pub(crate) library_id: Option<String>,
     pub(crate) document_input: QueryDocumentInputRequest,
     pub(crate) filters: Option<Value>,
     pub(crate) top_k: Option<usize>,
@@ -600,6 +674,7 @@ pub(crate) struct UnsupportedContentTypeSnapshot {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SearchResultItem {
+    pub(crate) library_id: String,
     pub(crate) visual_unit_id: String,
     pub(crate) source_id: String,
     pub(crate) preview: PreviewReference,

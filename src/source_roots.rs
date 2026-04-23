@@ -109,6 +109,7 @@ pub(crate) fn queued_watch_state_for_action(action: SourceActionKind) -> &'stati
     match action {
         SourceActionKind::Refresh => "queued_refresh",
         SourceActionKind::Rescan => "queued_rescan",
+        SourceActionKind::Rebuild => "queued_rebuild",
     }
 }
 
@@ -116,13 +117,19 @@ pub(crate) fn running_watch_state_for_action(action: SourceActionKind) -> &'stat
     match action {
         SourceActionKind::Refresh => "refreshing",
         SourceActionKind::Rescan => "rescanning",
+        SourceActionKind::Rebuild => "rebuilding",
     }
 }
 
 pub(crate) fn source_root_action_in_flight(root: &SourceRootRecord) -> bool {
     matches!(
         root.watch_state.as_str(),
-        "queued_refresh" | "queued_rescan" | "refreshing" | "rescanning"
+        "queued_refresh"
+            | "queued_rescan"
+            | "queued_rebuild"
+            | "refreshing"
+            | "rescanning"
+            | "rebuilding"
     )
 }
 
@@ -327,7 +334,7 @@ pub(crate) fn planned_source_action_paths(
     candidate_by_relative_path: &BTreeMap<String, ObservedSourceFile>,
     existing_by_relative_path: &BTreeMap<String, SourceRecord>,
 ) -> BTreeSet<String> {
-    if plan.action.is_rescan() {
+    if plan.action.requires_full_scan() {
         return candidate_by_relative_path
             .keys()
             .chain(existing_by_relative_path.keys())

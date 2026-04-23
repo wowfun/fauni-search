@@ -2,13 +2,14 @@ use crate::{
     api::*,
     indexing::{build_search_response, ExecutedSearchGroup},
     model::{
-        IncomingQueryImageUpload, ResolvedImageQueryInput, SourceActionKind, SourceActionScope,
+        IncomingQueryImageUpload, MaintenanceActionKind, ResolvedImageQueryInput,
+        ResumeJobDispatch, RetryJobDispatch, SourceActionKind, SourceActionScope,
         SourceActionTrigger, StagedSettingsModelTestFile,
     },
     provider::{provider_context_payload, QUERY_KIND_IMAGE, QUERY_KIND_TEXT},
-    qdrant::query_qdrant,
+    qdrant::{cleanup_retired_vector_space_namespace, query_qdrant},
     query_assets::*,
-    runtime::{run_import_job, run_source_action_job},
+    runtime::{run_import_job, run_maintenance_action_job, run_source_action_job},
     sidecar::{embed_query_document, embed_query_image, embed_query_text, embed_query_video},
     state::SharedState,
     APP_BODY_LIMIT_BYTES,
@@ -59,7 +60,14 @@ pub fn build_app(state: SharedState) -> Router {
         )
         .route("/settings/model-tests", post(test_model_selection))
         .route("/libraries", get(list_libraries).post(create_library))
-        .route("/libraries/:library_id", get(get_library))
+        .route(
+            "/libraries/:library_id",
+            get(get_library)
+                .patch(update_library)
+                .delete(delete_library),
+        )
+        .route("/libraries/:library_id/archive", post(archive_library))
+        .route("/libraries/:library_id/restore", post(restore_library))
         .route(
             "/libraries/:library_id/content-types",
             get(get_library_content_types).patch(update_library_content_types),
@@ -93,12 +101,20 @@ pub fn build_app(state: SharedState) -> Router {
             post(rescan_library_sources),
         )
         .route(
+            "/libraries/:library_id/rebuild",
+            post(rebuild_library_sources),
+        )
+        .route(
             "/libraries/:library_id/source-roots/:source_root_id/refresh",
             post(refresh_source_root),
         )
         .route(
             "/libraries/:library_id/source-roots/:source_root_id/rescan",
             post(rescan_source_root),
+        )
+        .route(
+            "/libraries/:library_id/maintenance",
+            post(run_library_maintenance_action),
         )
         .route(
             "/libraries/:library_id/video-sources",
@@ -142,6 +158,9 @@ pub fn build_app(state: SharedState) -> Router {
         )
         .route("/jobs", get(list_jobs))
         .route("/jobs/:job_id", get(get_job))
+        .route("/jobs/:job_id/cancel", post(cancel_job))
+        .route("/jobs/:job_id/resume", post(resume_job))
+        .route("/jobs/:job_id/retry", post(retry_job))
         .route("/search/text", post(search_text))
         .route("/search/image", post(search_image))
         .route("/search/video", post(search_video))
@@ -166,6 +185,9 @@ async fn root() -> Json<RootPayload> {
             "POST /settings/model-tests",
             "GET /libraries",
             "POST /libraries",
+            "GET /libraries/{library_id}",
+            "PATCH /libraries/{library_id}",
+            "DELETE /libraries/{library_id}",
             "GET /libraries/{library_id}/content-types",
             "PATCH /libraries/{library_id}/content-types",
             "GET /libraries/{library_id}/resolved-content-models",
@@ -179,8 +201,10 @@ async fn root() -> Json<RootPayload> {
             "POST /libraries/{library_id}/imports",
             "POST /libraries/{library_id}/refresh",
             "POST /libraries/{library_id}/rescan",
+            "POST /libraries/{library_id}/rebuild",
             "POST /libraries/{library_id}/source-roots/{source_root_id}/refresh",
             "POST /libraries/{library_id}/source-roots/{source_root_id}/rescan",
+            "POST /libraries/{library_id}/maintenance",
             "GET /libraries/{library_id}/video-sources",
             "POST /libraries/{library_id}/query-assets/images",
             "POST /libraries/{library_id}/query-assets/videos",
@@ -192,6 +216,9 @@ async fn root() -> Json<RootPayload> {
             "GET /libraries/{library_id}/query-assets/documents/{temp_asset_id}/preview",
             "GET /jobs",
             "GET /jobs/{job_id}",
+            "POST /jobs/{job_id}/cancel",
+            "POST /jobs/{job_id}/resume",
+            "POST /jobs/{job_id}/retry",
             "POST /search/text",
             "POST /search/image",
             "POST /search/video",
@@ -325,6 +352,65 @@ async fn get_library(
     let state = state.read().await;
     let snapshot = state.get_library(&library_id)?;
     Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn update_library(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    Json(request): Json<UpdateLibraryApiRequest>,
+) -> Result<Json<SuccessEnvelope<LibrarySnapshot>>, ApiError> {
+    let request = normalize_update_library_request(request)?;
+    let mut state = state.write().await;
+    let snapshot = state.update_library(&library_id, request)?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn archive_library(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<LibrarySnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state.archive_library(&library_id)?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn restore_library(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<LibrarySnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state.restore_library(&library_id)?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn delete_library(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<LibrarySnapshot>>, ApiError> {
+    let cleanup_plan = {
+        let mut state = state.write().await;
+        state.delete_library(&library_id)?
+    };
+
+    for temp_asset_path in cleanup_plan.temp_asset_paths {
+        remove_temp_query_asset_file(&temp_asset_path);
+    }
+
+    for vector_space_id in cleanup_plan.vector_space_ids {
+        if let Err(error) =
+            cleanup_retired_vector_space_namespace(&library_id, &vector_space_id).await
+        {
+            tracing::warn!(
+                library_id = %library_id,
+                vector_space_id = %vector_space_id,
+                "Failed to cleanup deleted library namespace: {error}"
+            );
+        }
+    }
+
+    Ok(Json(SuccessEnvelope {
+        data: cleanup_plan.snapshot,
+    }))
 }
 
 async fn parse_model_test_form(multipart: &mut Multipart) -> Result<ParsedModelTestForm, ApiError> {
@@ -574,6 +660,53 @@ fn normalize_create_library_request(
     })
 }
 
+fn normalize_update_library_request(
+    request: UpdateLibraryApiRequest,
+) -> Result<UpdateLibraryRequest, ApiError> {
+    if request.extra.contains_key("library_id") {
+        return Err(ApiError::validation_failed(
+            "Library identity is stable; PATCH /libraries/{library_id} only accepts display_name changes.",
+            Some(json!({ "field": "library_id" })),
+        ));
+    }
+
+    if let Some(field) = request.extra.keys().next() {
+        return Err(ApiError::validation_failed(
+            "Update library request contains an unsupported field.",
+            Some(json!({ "field": field })),
+        ));
+    }
+
+    let Some(display_name) = request.display_name else {
+        return Err(ApiError::validation_failed(
+            "Update library request requires display_name.",
+            Some(json!({ "field": "display_name" })),
+        ));
+    };
+
+    Ok(UpdateLibraryRequest { display_name })
+}
+
+fn normalize_maintenance_action_request(
+    request: MaintenanceActionRequest,
+) -> Result<MaintenanceActionKind, ApiError> {
+    let action = request.action.trim();
+    if action.is_empty() {
+        return Err(ApiError::validation_failed(
+            "Maintenance action request requires action.",
+            Some(json!({ "field": "action" })),
+        ));
+    }
+
+    match action {
+        "cleanup_retired_vector_spaces" => Ok(MaintenanceActionKind::CleanupRetiredVectorSpaces),
+        _ => Err(ApiError::validation_failed(
+            "Maintenance action is not supported.",
+            Some(json!({ "field": "action", "action": action })),
+        )),
+    }
+}
+
 async fn get_library_content_types(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -724,6 +857,31 @@ async fn rescan_library_sources(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+async fn rebuild_library_sources(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<SourceActionData>>, ApiError> {
+    let (response, queued_action) = {
+        let mut state = state.write().await;
+        state.queue_source_action(
+            &library_id,
+            SourceActionScope::Library,
+            SourceActionKind::Rebuild,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+        )?
+    };
+
+    if let Some(queued_action) = queued_action {
+        let background_state = state.clone();
+        tokio::spawn(async move {
+            run_source_action_job(background_state, queued_action.job_id, queued_action.plan).await;
+        });
+    }
+
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
 async fn refresh_source_root(
     State(state): State<SharedState>,
     Path((library_id, source_root_id)): Path<(String, String)>,
@@ -768,6 +926,28 @@ async fn rescan_source_root(
         let background_state = state.clone();
         tokio::spawn(async move {
             run_source_action_job(background_state, queued_action.job_id, queued_action.plan).await;
+        });
+    }
+
+    Ok(Json(SuccessEnvelope { data: response }))
+}
+
+async fn run_library_maintenance_action(
+    State(state): State<SharedState>,
+    Path(library_id): Path<String>,
+    Json(request): Json<MaintenanceActionRequest>,
+) -> Result<Json<SuccessEnvelope<MaintenanceActionData>>, ApiError> {
+    let action = normalize_maintenance_action_request(request)?;
+    let (response, queued_action) = {
+        let mut state = state.write().await;
+        state.queue_maintenance_action(&library_id, action)?
+    };
+
+    if let Some(queued_action) = queued_action {
+        let background_state = state.clone();
+        tokio::spawn(async move {
+            run_maintenance_action_job(background_state, queued_action.job_id, queued_action.plan)
+                .await;
         });
     }
 
@@ -1016,6 +1196,91 @@ async fn get_job(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+async fn cancel_job(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<JobSnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state.request_job_cancellation(&job_id)?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn retry_job(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<JobSnapshot>>, ApiError> {
+    let (snapshot, dispatch) = {
+        let mut state = state.write().await;
+        state.request_job_retry(&job_id)?
+    };
+
+    match dispatch {
+        RetryJobDispatch::Import(prepared) => {
+            let background_state = state.clone();
+            let retry_job_id = snapshot.job_id.clone();
+            tokio::spawn(async move {
+                run_import_job(background_state, retry_job_id, prepared).await;
+            });
+        }
+        RetryJobDispatch::SourceAction(queued_action) => {
+            let background_state = state.clone();
+            tokio::spawn(async move {
+                run_source_action_job(background_state, queued_action.job_id, queued_action.plan)
+                    .await;
+            });
+        }
+        RetryJobDispatch::Maintenance(queued_action) => {
+            let background_state = state.clone();
+            tokio::spawn(async move {
+                run_maintenance_action_job(
+                    background_state,
+                    queued_action.job_id,
+                    queued_action.plan,
+                )
+                .await;
+            });
+        }
+    }
+
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+async fn resume_job(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<JobSnapshot>>, ApiError> {
+    let (snapshot, dispatch) = {
+        let mut state = state.write().await;
+        state.request_job_resume(&job_id)?
+    };
+
+    match dispatch {
+        ResumeJobDispatch::Import(prepared) => {
+            let background_state = state.clone();
+            let resumed_job_id = snapshot.job_id.clone();
+            tokio::spawn(async move {
+                run_import_job(background_state, resumed_job_id, prepared).await;
+            });
+        }
+        ResumeJobDispatch::SourceAction(plan) => {
+            let background_state = state.clone();
+            let resumed_job_id = snapshot.job_id.clone();
+            tokio::spawn(async move {
+                run_source_action_job(background_state, resumed_job_id, plan).await;
+            });
+        }
+        ResumeJobDispatch::Maintenance(plan) => {
+            let background_state = state.clone();
+            let resumed_job_id = snapshot.job_id.clone();
+            tokio::spawn(async move {
+                run_maintenance_action_job(background_state, resumed_job_id, plan).await;
+            });
+        }
+    }
+
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
 async fn search_text(
     State(state): State<SharedState>,
     Json(request): Json<TextSearchRequest>,
@@ -1032,14 +1297,15 @@ async fn search_text(
         )
         .await?;
         let candidates = query_qdrant(
-            &plan.library_id,
+            &group.library_id,
             &group.vector_space_id,
-            plan.active_visual_unit_ids.len(),
+            group.active_visual_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
+            library_id: group.library_id.clone(),
             query_embedding,
             candidates,
         });
@@ -1057,6 +1323,23 @@ async fn search_image(
         state.prune_temp_query_assets();
         state.prepare_image_search(&request).await?
     };
+    let received_scope_kind = request
+        .search_scope
+        .as_ref()
+        .map(|scope| scope.kind.clone())
+        .unwrap_or_else(|| "library".to_string());
+    let plan_library_id = (!plan.library_id.trim().is_empty())
+        .then_some(plan.library_id.as_str())
+        .ok_or_else(|| {
+        ApiError::not_supported(
+            "Current 110-image-search implementation only supports single-library search_scope.",
+            Some(json!({
+                "field": "search_scope.kind",
+                "supported": ["library"],
+                "received": received_scope_kind,
+            })),
+        )
+    })?;
 
     let (query_path, query_locator) = match &query_input {
         ResolvedImageQueryInput::TempAsset(asset) => (asset.path.as_str(), None),
@@ -1074,14 +1357,15 @@ async fn search_image(
         )
         .await?;
         let candidates = query_qdrant(
-            &plan.library_id,
+            plan_library_id,
             &group.vector_space_id,
-            plan.active_visual_unit_ids.len(),
+            group.active_visual_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
+            library_id: group.library_id.clone(),
             query_embedding,
             candidates,
         });
@@ -1099,6 +1383,23 @@ async fn search_video(
         state.prune_temp_query_assets();
         state.prepare_video_search(&request).await?
     };
+    let received_scope_kind = request
+        .search_scope
+        .as_ref()
+        .map(|scope| scope.kind.clone())
+        .unwrap_or_else(|| "library".to_string());
+    let plan_library_id = (!plan.library_id.trim().is_empty())
+        .then_some(plan.library_id.as_str())
+        .ok_or_else(|| {
+        ApiError::not_supported(
+            "Current 120-video-search implementation only supports single-library search_scope.",
+            Some(json!({
+                "field": "search_scope.kind",
+                "supported": ["library"],
+                "received": received_scope_kind,
+            })),
+        )
+    })?;
 
     let mut executed_groups = Vec::new();
     for group in &plan.execution_groups {
@@ -1109,14 +1410,15 @@ async fn search_video(
         )
         .await?;
         let candidates = query_qdrant(
-            &plan.library_id,
+            plan_library_id,
             &group.vector_space_id,
-            plan.active_visual_unit_ids.len(),
+            group.active_visual_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
+            library_id: group.library_id.clone(),
             query_embedding,
             candidates,
         });
@@ -1134,6 +1436,23 @@ async fn search_document(
         state.prune_temp_query_assets();
         state.prepare_document_search(&request).await?
     };
+    let received_scope_kind = request
+        .search_scope
+        .as_ref()
+        .map(|scope| scope.kind.clone())
+        .unwrap_or_else(|| "library".to_string());
+    let plan_library_id = (!plan.library_id.trim().is_empty())
+        .then_some(plan.library_id.as_str())
+        .ok_or_else(|| {
+        ApiError::not_supported(
+            "Current 130-document-search implementation only supports single-library search_scope.",
+            Some(json!({
+                "field": "search_scope.kind",
+                "supported": ["library"],
+                "received": received_scope_kind,
+            })),
+        )
+    })?;
 
     let mut executed_groups = Vec::new();
     for group in &plan.execution_groups {
@@ -1144,14 +1463,15 @@ async fn search_document(
         )
         .await?;
         let candidates = query_qdrant(
-            &plan.library_id,
+            plan_library_id,
             &group.vector_space_id,
-            plan.active_visual_unit_ids.len(),
+            group.active_visual_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
+            library_id: group.library_id.clone(),
             query_embedding,
             candidates,
         });

@@ -118,6 +118,7 @@
 - 激活索引代表某个库在某个已解析 `vector_space` 上的当前生效索引，是对外承担可检索事实的唯一空间级入口
 - 新内容版本只有在验证通过后才能以原子方式替换该 `vector_space` 的当前激活索引
 - 当前切片中的 import、`refresh` 与 `rescan` 都沿用同一激活语义：验证通过前只允许写 staging，不允许边写边直接替换当前 active
+- 对同一路径的手动 import，当前切片应把它视为对既有 manual-import source 的一次更新，而不是重复生成第二份结构化 source；若当前 active namespace 已存在旧点，staging 中必须先删除这些 stale points，再写入新的视觉单元载荷
 - 对来源变更驱动的增量 `refresh` / `rescan`，当前切片允许基于当前 active 的 staging 副本执行“删除旧点 + 写入新点”的增量替换；未变化对象不要求重新编码
 - 对同一次运行内的多个 `vector_space`，激活与失败语义按空间独立成立：某个 `vector_space` 的失败不得隐式回滚已成功激活的其他 `vector_space`
 - 当单次 import、`refresh` 或 `rescan` 同时推进多个 `vector_space` 时，若其中部分空间失败，运行级任务可以进入失败终态，但已成功激活的 `vector_space` 与已落盘的结构化对象边界不得因此被回滚

@@ -56,6 +56,33 @@ pub(crate) async fn index_visual_units(
         stage_initialized = true;
     }
 
+    if stage_initialized && !prepared.stale_point_ids.is_empty() {
+        {
+            let mut state = state.write().await;
+            state.update_job_snapshot(
+                job_id,
+                "running",
+                "stage_write",
+                0,
+                format!(
+                    "Deleting {} stale point(s) from staged vector-space storage.",
+                    prepared.stale_point_ids.len()
+                ),
+            );
+        }
+
+        if let Err(message) =
+            delete_qdrant_points(&stage_collection_name, &prepared.stale_point_ids).await
+        {
+            best_effort_delete_qdrant_collection(&stage_collection_name).await;
+            return Err(IndexingError {
+                phase: "stage_write",
+                message,
+                completed: 0,
+            });
+        }
+    }
+
     for (batch_index, visual_unit_batch) in prepared.visual_units.chunks(batch_items).enumerate() {
         {
             let mut state = state.write().await;
@@ -334,10 +361,15 @@ pub(crate) fn build_search_response(
             group
                 .candidates
                 .iter()
-                .filter_map(|point| point.payload.clone().map(|payload| (point.score, payload)))
+                .filter_map(|point| {
+                    point
+                        .payload
+                        .clone()
+                        .map(|payload| (point.score, group.library_id.clone(), payload))
+                })
         })
         .into_iter()
-        .filter(|(_, payload)| search_payload_matches_filters(&plan, payload))
+        .filter(|(_, library_id, payload)| search_payload_matches_filters(&plan, library_id, payload))
         .collect::<Vec<_>>();
     filtered_candidates.sort_by(|left, right| right.0.total_cmp(&left.0));
     let filtered_result_count = filtered_candidates.len();
@@ -347,14 +379,15 @@ pub(crate) fn build_search_response(
         .skip(page_start)
         .take(plan.top_k)
         .enumerate()
-        .map(|(page_index, (score, payload))| {
+        .map(|(page_index, (score, library_id, payload))| {
             let preview = visual_unit_preview_reference(
-                &plan.library_id,
+                library_id,
                 &payload.visual_unit_id,
                 &payload.kind,
                 &payload.locator,
             )?;
             Ok(SearchResultItem {
+                library_id: library_id.clone(),
                 visual_unit_id: payload.visual_unit_id.clone(),
                 source_id: payload.source_id.clone(),
                 preview,
@@ -372,19 +405,20 @@ pub(crate) fn build_search_response(
     let next_cursor =
         (next_offset < filtered_result_count).then(|| encode_search_cursor(next_offset));
     let content_types_debug = plan
-        .target_content_types
+        .debug_content_types
         .iter()
-        .map(|content_type| {
-            let selection = plan.resolved_content_models.get(content_type);
+        .map(|entry| {
             let raw_scores = executed_groups
                 .iter()
+                .filter(|group| group.library_id == entry.library_id)
                 .flat_map(|group| {
                     group.candidates.iter().filter_map(|point| {
                         let payload = point.payload.as_ref()?;
-                        if !content_type_matches_visual_unit(content_type, &payload.kind) {
+                        if !content_type_matches_visual_unit(&entry.content_type, &payload.kind) {
                             return None;
                         }
                         Some(json!({
+                            "library_id": entry.library_id,
                             "visual_unit_id": payload.visual_unit_id,
                             "score": point.score,
                         }))
@@ -392,8 +426,9 @@ pub(crate) fn build_search_response(
                 })
                 .collect::<Vec<_>>();
             json!({
-                "content_type": content_type,
-                "resolved_model": selection.cloned(),
+                "library_id": entry.library_id,
+                "content_type": entry.content_type,
+                "resolved_model": entry.resolved_model.clone(),
                 "raw_scores": raw_scores,
             })
         })
@@ -405,6 +440,7 @@ pub(crate) fn build_search_response(
             .entry(group.vector_space_id.clone())
             .or_insert_with(|| {
                 json!({
+                    "library_id": group.library_id,
                     "vector_space_id": group.vector_space_id,
                     "provider_id": selection.provider_id,
                     "provider_kind": selection.provider_kind,
@@ -442,6 +478,7 @@ pub(crate) fn build_search_response(
 }
 
 pub(crate) struct ExecutedSearchGroup {
+    pub(crate) library_id: String,
     pub(crate) query_embedding: QueryEmbeddingResult,
     pub(crate) candidates: Vec<QdrantScoredPoint>,
 }
@@ -450,9 +487,13 @@ fn encode_search_cursor(offset: usize) -> String {
     format!("search:v1:{offset}")
 }
 
-fn search_payload_matches_filters(plan: &SearchPlan, payload: &QdrantPointPayload) -> bool {
-    plan.active_visual_unit_ids
-        .contains(&payload.visual_unit_id)
+fn search_payload_matches_filters(
+    plan: &SearchPlan,
+    library_id: &str,
+    payload: &QdrantPointPayload,
+) -> bool {
+    plan.active_visual_unit_refs
+        .contains(&format!("{library_id}:{}", payload.visual_unit_id))
         && plan
             .kind_filter
             .as_ref()

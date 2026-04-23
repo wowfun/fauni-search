@@ -3,16 +3,152 @@ use crate::*;
 use serde_json::Value;
 use std::{fs, path::Path as FsPath};
 
+pub(crate) struct DeletedLibraryCleanupPlan {
+    pub(crate) snapshot: LibrarySnapshot,
+    pub(crate) vector_space_ids: Vec<String>,
+    pub(crate) temp_asset_paths: Vec<String>,
+}
+
 impl AppState {
+    fn resolve_source_action_targets(
+        &self,
+        library_id: &str,
+        scope: &SourceActionScope,
+        action: SourceActionKind,
+    ) -> Result<
+        (
+            Vec<SourceActionAcceptedItem>,
+            Vec<SourceActionRejectedItem>,
+            Vec<String>,
+        ),
+        ApiError,
+    > {
+        let library = self
+            .libraries
+            .get(library_id)
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+        let mut accepted = Vec::new();
+        let mut rejected = Vec::new();
+        let mut accepted_root_ids = Vec::new();
+
+        match scope {
+            SourceActionScope::Library => {
+                for source_root_id in &library.source_root_order {
+                    let root = library
+                        .source_roots
+                        .get(source_root_id)
+                        .expect("source_root_order should reference a valid source root");
+                    if !root.enabled {
+                        rejected.push(SourceActionRejectedItem {
+                            source_root_id: Some(root.id.clone()),
+                            root_path: Some(root.root_path.clone()),
+                            reason_code: "not_enabled".to_string(),
+                            message: "Source root is disabled.".to_string(),
+                        });
+                        continue;
+                    }
+                    if source_root_action_in_flight(root) {
+                        rejected.push(SourceActionRejectedItem {
+                            source_root_id: Some(root.id.clone()),
+                            root_path: Some(root.root_path.clone()),
+                            reason_code: "job_in_progress".to_string(),
+                            message:
+                                "Source root already has an in-flight source-management action."
+                                    .to_string(),
+                        });
+                        continue;
+                    }
+                    accepted_root_ids.push(root.id.clone());
+                    accepted.push(SourceActionAcceptedItem {
+                        source_root_id: root.id.clone(),
+                        root_path: root.root_path.clone(),
+                        action: action.as_str().to_string(),
+                    });
+                }
+            }
+            SourceActionScope::SourceRoot(source_root_id) => {
+                let root = library
+                    .source_roots
+                    .get(source_root_id)
+                    .ok_or_else(|| ApiError::not_found("Source root was not found."))?;
+                if !root.enabled {
+                    return Ok((
+                        accepted,
+                        vec![SourceActionRejectedItem {
+                            source_root_id: Some(root.id.clone()),
+                            root_path: Some(root.root_path.clone()),
+                            reason_code: "not_enabled".to_string(),
+                            message: "Source root is disabled.".to_string(),
+                        }],
+                        accepted_root_ids,
+                    ));
+                }
+                if source_root_action_in_flight(root) {
+                    return Ok((
+                        accepted,
+                        vec![SourceActionRejectedItem {
+                            source_root_id: Some(root.id.clone()),
+                            root_path: Some(root.root_path.clone()),
+                            reason_code: "job_in_progress".to_string(),
+                            message:
+                                "Source root already has an in-flight source-management action."
+                                    .to_string(),
+                        }],
+                        accepted_root_ids,
+                    ));
+                }
+                accepted_root_ids.push(root.id.clone());
+                accepted.push(SourceActionAcceptedItem {
+                    source_root_id: root.id.clone(),
+                    root_path: root.root_path.clone(),
+                    action: action.as_str().to_string(),
+                });
+            }
+        }
+
+        Ok((accepted, rejected, accepted_root_ids))
+    }
+
+    pub(crate) fn plan_source_action_replay(
+        &self,
+        library_id: &str,
+        scope: SourceActionScope,
+        action: SourceActionKind,
+    ) -> Result<SourceActionPlan, ApiError> {
+        let (_, rejected, accepted_root_ids) =
+            self.resolve_source_action_targets(library_id, &scope, action)?;
+        if accepted_root_ids.is_empty() {
+            let message = rejected
+                .first()
+                .map(|item| item.message.clone())
+                .unwrap_or_else(|| {
+                    "Source-action replay did not target any source roots.".to_string()
+                });
+            return Err(ApiError::conflict(
+                &message,
+                Some(json!({ "library_id": library_id, "action": action.as_str() })),
+            ));
+        }
+
+        Ok(SourceActionPlan {
+            library_id: library_id.to_string(),
+            action,
+            target_root_ids: accepted_root_ids,
+            changed_paths_by_root: BTreeMap::new(),
+        })
+    }
+
     pub(crate) fn list_libraries(&self) -> LibrariesListData {
-        let libraries = self
+        let (mut active, archived): (Vec<_>, Vec<_>) = self
             .library_order
             .iter()
             .filter_map(|id| self.libraries.get(id))
             .map(|record| self.library_snapshot(record))
-            .collect();
+            .partition(|snapshot| snapshot.lifecycle_state != "archived");
+        active.extend(archived);
 
-        LibrariesListData { libraries }
+        LibrariesListData { libraries: active }
     }
 
     pub(crate) fn get_library(&self, library_id: &str) -> Result<LibrarySnapshot, ApiError> {
@@ -22,6 +158,140 @@ impl AppState {
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
 
         Ok(self.library_snapshot(library))
+    }
+
+    pub(crate) fn update_library(
+        &mut self,
+        library_id: &str,
+        request: UpdateLibraryRequest,
+    ) -> Result<LibrarySnapshot, ApiError> {
+        self.commit_durable_api(|state| {
+            let display_name = request.display_name.trim().to_string();
+            if display_name.is_empty() {
+                return Err(ApiError::validation_failed(
+                    "Library display_name must not be empty.",
+                    Some(json!({ "field": "display_name" })),
+                ));
+            }
+
+            {
+                let library = state
+                    .libraries
+                    .get_mut(library_id)
+                    .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+                library.display_name = display_name;
+            }
+            let library = state
+                .libraries
+                .get(library_id)
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+            Ok(state.library_snapshot(library))
+        })
+    }
+
+    pub(crate) fn archive_library(
+        &mut self,
+        library_id: &str,
+    ) -> Result<LibrarySnapshot, ApiError> {
+        self.commit_durable_api(|state| {
+            {
+                let library = state
+                    .libraries
+                    .get_mut(library_id)
+                    .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+                if library.lifecycle_state != "archived" {
+                    library.lifecycle_state = "archived".to_string();
+                    library.archived_at_ms = Some(current_unix_ms());
+                }
+            }
+            let library = state
+                .libraries
+                .get(library_id)
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+            Ok(state.library_snapshot(library))
+        })
+    }
+
+    pub(crate) fn restore_library(
+        &mut self,
+        library_id: &str,
+    ) -> Result<LibrarySnapshot, ApiError> {
+        self.commit_durable_api(|state| {
+            {
+                let library = state
+                    .libraries
+                    .get_mut(library_id)
+                    .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+                if library.lifecycle_state != "active" {
+                    library.lifecycle_state = "active".to_string();
+                    library.archived_at_ms = None;
+                }
+            }
+            let library = state
+                .libraries
+                .get(library_id)
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+            Ok(state.library_snapshot(library))
+        })
+    }
+
+    pub(crate) fn delete_library(
+        &mut self,
+        library_id: &str,
+    ) -> Result<DeletedLibraryCleanupPlan, ApiError> {
+        self.commit_durable_api(|state| {
+            let library = state
+                .libraries
+                .remove(library_id)
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+
+            state
+                .library_order
+                .retain(|candidate| candidate != library_id);
+
+            let job_ids = state
+                .jobs
+                .iter()
+                .filter_map(|(job_id, job)| {
+                    (job.snapshot.library_id == library_id).then_some(job_id.clone())
+                })
+                .collect::<BTreeSet<_>>();
+            for job_id in &job_ids {
+                state.jobs.remove(job_id);
+            }
+            state
+                .job_order
+                .retain(|candidate| !job_ids.contains(candidate));
+
+            let temp_asset_ids = state
+                .temp_query_assets
+                .iter()
+                .filter_map(|(temp_asset_id, asset)| {
+                    (asset.library_id == library_id).then_some(temp_asset_id.clone())
+                })
+                .collect::<BTreeSet<_>>();
+            let mut temp_asset_paths = Vec::with_capacity(temp_asset_ids.len());
+            for temp_asset_id in &temp_asset_ids {
+                if let Some(asset) = state.temp_query_assets.remove(temp_asset_id) {
+                    temp_asset_paths.push(asset.path);
+                }
+            }
+
+            let vector_space_ids = library
+                .active_vector_spaces
+                .iter()
+                .chain(library.retired_vector_spaces.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            Ok(DeletedLibraryCleanupPlan {
+                snapshot: deleted_library_snapshot(&library),
+                vector_space_ids,
+                temp_asset_paths,
+            })
+        })
     }
 
     pub(crate) fn list_source_roots(
@@ -246,8 +516,8 @@ impl AppState {
                         .map(|expected| &source.status == expected)
                         .unwrap_or(true)
             })
-            .map(|source| Self::source_inventory_item(library, source))
-            .collect();
+            .map(|source| Self::source_inventory_item(library_id, library, source))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(SourcesListData { sources })
     }
@@ -260,97 +530,48 @@ impl AppState {
         trigger: SourceActionTrigger,
         changed_paths_by_root: BTreeMap<String, BTreeSet<String>>,
     ) -> Result<(SourceActionData, Option<QueuedSourceAction>), ApiError> {
-        let library = self
-            .libraries
-            .get(library_id)
-            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        self.queue_source_action_with_context(
+            library_id,
+            scope,
+            action,
+            trigger,
+            changed_paths_by_root,
+            JobQueueContext::default(),
+        )
+    }
 
-        let mut accepted = Vec::new();
-        let mut rejected = Vec::new();
-        let mut accepted_root_ids = Vec::new();
+    pub(crate) fn queue_retried_source_action(
+        &mut self,
+        library_id: &str,
+        scope: SourceActionScope,
+        action: SourceActionKind,
+        retried_from_job_id: String,
+        attempt: u32,
+    ) -> Result<(SourceActionData, Option<QueuedSourceAction>), ApiError> {
+        self.queue_source_action_with_context(
+            library_id,
+            scope,
+            action,
+            SourceActionTrigger::Manual,
+            BTreeMap::new(),
+            JobQueueContext {
+                attempt,
+                retried_from_job_id: Some(retried_from_job_id),
+            },
+        )
+    }
 
-        match &scope {
-            SourceActionScope::Library => {
-                for source_root_id in &library.source_root_order {
-                    let root = library
-                        .source_roots
-                        .get(source_root_id)
-                        .expect("source_root_order should reference a valid source root");
-                    if !root.enabled {
-                        rejected.push(SourceActionRejectedItem {
-                            source_root_id: Some(root.id.clone()),
-                            root_path: Some(root.root_path.clone()),
-                            reason_code: "not_enabled".to_string(),
-                            message: "Source root is disabled.".to_string(),
-                        });
-                        continue;
-                    }
-                    if source_root_action_in_flight(root) {
-                        rejected.push(SourceActionRejectedItem {
-                            source_root_id: Some(root.id.clone()),
-                            root_path: Some(root.root_path.clone()),
-                            reason_code: "job_in_progress".to_string(),
-                            message:
-                                "Source root already has an in-flight source-management action."
-                                    .to_string(),
-                        });
-                        continue;
-                    }
-                    accepted_root_ids.push(root.id.clone());
-                    accepted.push(SourceActionAcceptedItem {
-                        source_root_id: root.id.clone(),
-                        root_path: root.root_path.clone(),
-                        action: action.as_str().to_string(),
-                    });
-                }
-            }
-            SourceActionScope::SourceRoot(source_root_id) => {
-                let root = library
-                    .source_roots
-                    .get(source_root_id)
-                    .ok_or_else(|| ApiError::not_found("Source root was not found."))?;
-                if !root.enabled {
-                    return Ok((
-                        SourceActionData {
-                            accepted,
-                            rejected: vec![SourceActionRejectedItem {
-                                source_root_id: Some(root.id.clone()),
-                                root_path: Some(root.root_path.clone()),
-                                reason_code: "not_enabled".to_string(),
-                                message: "Source root is disabled.".to_string(),
-                            }],
-                            job_handle: None,
-                            job: None,
-                        },
-                        None,
-                    ));
-                }
-                if source_root_action_in_flight(root) {
-                    return Ok((
-                        SourceActionData {
-                            accepted,
-                            rejected: vec![SourceActionRejectedItem {
-                                source_root_id: Some(root.id.clone()),
-                                root_path: Some(root.root_path.clone()),
-                                reason_code: "job_in_progress".to_string(),
-                                message:
-                                    "Source root already has an in-flight source-management action."
-                                        .to_string(),
-                            }],
-                            job_handle: None,
-                            job: None,
-                        },
-                        None,
-                    ));
-                }
-                accepted_root_ids.push(root.id.clone());
-                accepted.push(SourceActionAcceptedItem {
-                    source_root_id: root.id.clone(),
-                    root_path: root.root_path.clone(),
-                    action: action.as_str().to_string(),
-                });
-            }
-        }
+    fn queue_source_action_with_context(
+        &mut self,
+        library_id: &str,
+        scope: SourceActionScope,
+        action: SourceActionKind,
+        trigger: SourceActionTrigger,
+        changed_paths_by_root: BTreeMap<String, BTreeSet<String>>,
+        queue_context: JobQueueContext,
+    ) -> Result<(SourceActionData, Option<QueuedSourceAction>), ApiError> {
+        let (accepted, rejected, accepted_root_ids) =
+            self.resolve_source_action_targets(library_id, &scope, action)?;
 
         if accepted_root_ids.is_empty() {
             return Ok((
@@ -376,16 +597,28 @@ impl AppState {
                 total: accepted_root_ids.len(),
                 unit: "source_root".to_string(),
             },
-            cancelable: false,
+            cancelable: true,
+            retryable: trigger == SourceActionTrigger::Manual,
+            retried_from_job_id: queue_context.retried_from_job_id.clone(),
             current_attempt: JobAttemptSnapshot {
-                attempt: 1,
+                attempt: queue_context.attempt,
                 status: "queued".to_string(),
-                summary: format!(
-                    "Queued {} across {} source root(s) via {} trigger.",
-                    action.as_str(),
-                    accepted_root_ids.len(),
-                    trigger.as_str(),
-                ),
+                summary: match queue_context.retried_from_job_id.as_deref() {
+                    Some(retried_from_job_id) => format!(
+                        "Retry attempt {} for {} after {}; queued across {} source root(s) via {} trigger.",
+                        queue_context.attempt,
+                        action.as_str(),
+                        retried_from_job_id,
+                        accepted_root_ids.len(),
+                        trigger.as_str(),
+                    ),
+                    None => format!(
+                        "Queued {} across {} source root(s) via {} trigger.",
+                        action.as_str(),
+                        accepted_root_ids.len(),
+                        trigger.as_str(),
+                    ),
+                },
             },
         };
 
@@ -411,6 +644,15 @@ impl AppState {
             job_id.clone(),
             JobRecord {
                 snapshot: snapshot.clone(),
+                cancellation_requested: false,
+                replay: if trigger == SourceActionTrigger::Manual {
+                    Some(JobReplayAction::SourceAction {
+                        scope: scope.clone(),
+                        action,
+                    })
+                } else {
+                    None
+                },
             },
         );
         self.job_order.push(job_id.clone());
@@ -578,6 +820,8 @@ impl AppState {
             let record = LibraryRecord {
                 id: library_id.clone(),
                 display_name,
+                lifecycle_state: "active".to_string(),
+                archived_at_ms: None,
                 content_type_overrides: BTreeMap::new(),
                 source_roots: BTreeMap::new(),
                 source_root_order: Vec::new(),
@@ -602,22 +846,66 @@ impl AppState {
         library_id: &str,
         request: ImportPathsRequest,
     ) -> Result<PreparedImport, ApiError> {
-        let active_vector_spaces = self
-            .libraries
-            .get(library_id)
-            .map(|library| library.active_vector_spaces.clone())
-            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        let (active_vector_spaces, existing_manual_sources_by_path, existing_manual_visual_units) =
+            self.libraries
+                .get(library_id)
+                .map(|library| {
+                    let existing_manual_sources = library
+                        .sources
+                        .values()
+                        .filter(|source| source.source_root_id.is_none())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let existing_manual_sources_by_path = existing_manual_sources
+                        .iter()
+                        .map(|source| (source.source_path.clone(), source.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    let existing_manual_visual_units = existing_manual_sources
+                        .iter()
+                        .map(|source| {
+                            let visual_units = source
+                                .visual_unit_ids
+                                .iter()
+                                .filter_map(|visual_unit_id| {
+                                    library.visual_units.get(visual_unit_id)
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            (source.id.clone(), visual_units)
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    (
+                        library.active_vector_spaces.clone(),
+                        existing_manual_sources_by_path,
+                        existing_manual_visual_units,
+                    )
+                })
+                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
         let vector_space_bindings =
             self.configured_vector_space_bindings_for_library(library_id)?;
 
+        let request_paths = request.paths.clone();
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
         let mut new_sources = Vec::new();
         let mut new_visual_units = Vec::new();
+        let mut stale_visual_units = Vec::new();
 
         for original in request.paths {
             match self.inspect_import_path(&original) {
-                Ok(classification) => {
+                Ok(mut classification) => {
+                    if let Some(existing_source) =
+                        existing_manual_sources_by_path.get(&classification.normalized_path)
+                    {
+                        classification.source_id = existing_source.id.clone();
+                        stale_visual_units.extend(
+                            existing_manual_visual_units
+                                .get(&existing_source.id)
+                                .into_iter()
+                                .flatten()
+                                .cloned(),
+                        );
+                    }
                     let visual_units = self.new_visual_units_from_classification(&classification);
                     let source = self.source_record_from_classification(
                         &classification,
@@ -654,6 +942,17 @@ impl AppState {
         let vector_space_batches = vector_space_bindings
             .into_iter()
             .filter_map(|binding| {
+                let mut stale_point_ids = stale_visual_units
+                    .iter()
+                    .filter(|visual_unit| {
+                        binding.content_types.iter().any(|content_type| {
+                            import_content_type_matches_visual_unit(content_type, &visual_unit.kind)
+                        })
+                    })
+                    .map(|visual_unit| visual_unit.point_id)
+                    .collect::<Vec<_>>();
+                stale_point_ids.sort_unstable();
+                stale_point_ids.dedup();
                 let visual_units = new_visual_units
                     .iter()
                     .filter(|visual_unit| {
@@ -664,12 +963,15 @@ impl AppState {
                     .cloned()
                     .collect::<Vec<_>>();
                 if visual_units.is_empty() {
-                    return None;
+                    if stale_point_ids.is_empty() {
+                        return None;
+                    }
                 }
                 Some(PreparedImportVectorSpaceBatch {
                     vector_space_id: binding.vector_space_id.clone(),
                     content_types: binding.content_types,
                     had_existing_index: active_vector_spaces.contains(&binding.vector_space_id),
+                    stale_point_ids,
                     visual_units,
                 })
             })
@@ -677,6 +979,9 @@ impl AppState {
 
         Ok(PreparedImport {
             library_id: library_id.to_string(),
+            request: ImportPathsRequest {
+                paths: request_paths,
+            },
             accepted,
             rejected,
             sources: new_sources,
@@ -699,9 +1004,10 @@ impl AppState {
     }
 
     pub(crate) fn source_inventory_item(
+        library_id: &str,
         library: &LibraryRecord,
         source: &SourceRecord,
-    ) -> SourceInventoryItem {
+    ) -> Result<SourceInventoryItem, ApiError> {
         let source_root_path = source
             .source_root_id
             .as_ref()
@@ -717,8 +1023,23 @@ impl AppState {
             (Some(source_root_id), None) => format!("deleted:{source_root_id}"),
             (None, _) => "manual import".to_string(),
         };
+        let representative_record = source
+            .visual_unit_ids
+            .first()
+            .and_then(|visual_unit_id| library.visual_units.get(visual_unit_id));
+        let representative_visual_unit = representative_record.map(VisualUnitRecord::summary);
+        let representative_preview = representative_record
+            .map(|visual_unit| {
+                visual_unit_preview_reference(
+                    library_id,
+                    &visual_unit.id,
+                    &visual_unit.kind,
+                    &visual_unit.locator,
+                )
+            })
+            .transpose()?;
 
-        SourceInventoryItem {
+        Ok(SourceInventoryItem {
             source_id: source.id.clone(),
             source_path: source.source_path.clone(),
             source_type: source.source_type.clone(),
@@ -730,7 +1051,9 @@ impl AppState {
             source_root_path,
             source_root_label,
             visual_unit_count: source.visual_unit_ids.len(),
-        }
+            representative_visual_unit,
+            representative_preview,
+        })
     }
 
     pub(crate) fn inspect_import_path(
@@ -830,29 +1153,24 @@ impl AppState {
     }
 
     pub(crate) fn library_snapshot(&self, library: &LibraryRecord) -> LibrarySnapshot {
-        let pending_jobs = self
-            .jobs
-            .values()
-            .filter(|job| {
-                job.snapshot.library_id == library.id
-                    && !matches!(
-                        job.snapshot.status.as_str(),
-                        "completed" | "failed" | "canceled"
-                    )
-            })
-            .count();
-
         LibrarySnapshot {
             id: library.id.clone(),
             display_name: library.display_name.clone(),
+            lifecycle_state: library.lifecycle_state.clone(),
+            archived_at_ms: library.archived_at_ms,
             counts: LibraryCounts {
-                accepted_items: library
-                    .sources
+                accepted_items: accepted_item_count(library),
+                pending_jobs: self
+                    .jobs
                     .values()
-                    .filter(|source| source.status == "active")
-                    .map(|source| source.visual_unit_ids.len())
-                    .sum(),
-                pending_jobs,
+                    .filter(|job| {
+                        job.snapshot.library_id == library.id
+                            && !matches!(
+                                job.snapshot.status.as_str(),
+                                "completed" | "failed" | "canceled"
+                            )
+                    })
+                    .count(),
             },
             latest_job_id: library.latest_job_id.clone(),
         }
@@ -995,6 +1313,29 @@ impl AppState {
             locator,
             neighbor_context,
         }
+    }
+}
+
+fn accepted_item_count(library: &LibraryRecord) -> usize {
+    library
+        .sources
+        .values()
+        .filter(|source| source.status == "active")
+        .map(|source| source.visual_unit_ids.len())
+        .sum()
+}
+
+fn deleted_library_snapshot(library: &LibraryRecord) -> LibrarySnapshot {
+    LibrarySnapshot {
+        id: library.id.clone(),
+        display_name: library.display_name.clone(),
+        lifecycle_state: library.lifecycle_state.clone(),
+        archived_at_ms: library.archived_at_ms,
+        counts: LibraryCounts {
+            accepted_items: accepted_item_count(library),
+            pending_jobs: 0,
+        },
+        latest_job_id: library.latest_job_id.clone(),
     }
 }
 
