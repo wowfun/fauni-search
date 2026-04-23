@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SearchResultItem } from "../../../src/types";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,14 +48,41 @@ async function pasteImageIntoQueryTarget(page, imagePath) {
   );
 }
 
+async function ensureCreateLibraryPopoverOpen(page) {
+  await openInventoryWorkspace(page);
+  const libraryNameInput = page.getByTestId("library-name-input");
+  if (!(await libraryNameInput.isVisible())) {
+    await page.getByTestId("open-create-library-button").click();
+  }
+  await expect(libraryNameInput).toBeVisible();
+  return libraryNameInput;
+}
+
 async function createLibrary(page, suffix) {
   const libraryName = `playwright-${suffix}-${Date.now()}`;
   await page.goto("/");
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
-  await page.getByTestId("library-name-input").fill(libraryName);
+  const libraryNameInput = await ensureCreateLibraryPopoverOpen(page);
+  await libraryNameInput.fill(libraryName);
   await page.getByTestId("create-library-button").click();
   await expect(page.getByTestId("current-library-name")).toHaveText(libraryName);
+  await openSearchWorkspace(page);
   return libraryName;
+}
+
+async function ensureManageLibraryPopoverOpen(page) {
+  await openInventoryWorkspace(page);
+  const libraryNameInput = page.getByTestId("manage-library-name-input");
+  if (!(await libraryNameInput.isVisible())) {
+    await page.getByTestId("open-manage-library-button").click();
+  }
+  await expect(libraryNameInput).toBeVisible();
+  return libraryNameInput;
+}
+
+async function currentLibraryId(page) {
+  await expect(page.getByTestId("library-select")).toBeVisible();
+  return await page.getByTestId("library-select").inputValue();
 }
 
 export function registerLibraryScenarios() {
@@ -64,13 +92,125 @@ export function registerLibraryScenarios() {
 
     await page.goto("/");
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
-    await page.getByTestId("library-name-input").fill(displayName);
+    await (await ensureCreateLibraryPopoverOpen(page)).fill(displayName);
     await page.getByTestId("library-id-input").fill(libraryId);
     await page.getByTestId("create-library-button").click();
 
     await expect(page.getByTestId("current-library-name")).toHaveText(displayName);
-    await expect(page.getByTestId("current-library-id")).toHaveText(libraryId);
     await expect(page.getByTestId("library-select")).toContainText(`${displayName} (${libraryId})`);
+  });
+
+  test("library management can rename archive restore and delete the current library", async ({
+    page,
+  }) => {
+    const originalName = await createLibrary(page, "library-manage");
+    const libraryId = await currentLibraryId(page);
+    const renamed = `${originalName} archive`;
+
+    const manageNameInput = await ensureManageLibraryPopoverOpen(page);
+    await manageNameInput.fill(renamed);
+    await page.getByTestId("rename-library-button").click();
+
+    await expect(page.getByTestId("current-library-name")).toHaveText(renamed);
+    await expect(page.getByTestId("library-select")).toContainText(renamed);
+    await expect(page.getByTestId("current-library-lifecycle")).toHaveText("活跃");
+
+    await ensureManageLibraryPopoverOpen(page);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("toggle-library-archive-button").click();
+
+    await expect(page.getByTestId("current-library-lifecycle")).toHaveText("已归档");
+    await expect(page.getByTestId("library-select")).toContainText(`${renamed} (${libraryId}) · 已归档`);
+
+    await ensureManageLibraryPopoverOpen(page);
+    await page.getByTestId("toggle-library-archive-button").click();
+
+    await expect(page.getByTestId("current-library-lifecycle")).toHaveText("活跃");
+    await expect(page.getByTestId("library-select")).not.toContainText(
+      `${renamed} (${libraryId}) · 已归档`
+    );
+
+    await ensureManageLibraryPopoverOpen(page);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("delete-library-button").click();
+
+    await expect(page.getByTestId("library-select")).not.toHaveValue(libraryId);
+    await expect(page.getByTestId("library-select")).not.toContainText(`${renamed} (${libraryId})`);
+  });
+
+  test("inventory workspace keeps current library administration in the same management surface", async ({
+    page,
+  }) => {
+    const originalName = await createLibrary(page, "inventory-library-manage");
+    const libraryId = await currentLibraryId(page);
+    const renamed = `${originalName} inventory`;
+
+    await openInventoryWorkspace(page);
+    await expect(page.getByTestId("inventory-library-management")).toBeVisible();
+    await expect(page.getByTestId("inventory-library-name")).toHaveText(originalName);
+    await expect(page.getByTestId("inventory-library-lifecycle")).toHaveText("活跃");
+
+    await page.getByTestId("inventory-manage-library-name-input").fill(renamed);
+    await page.getByTestId("inventory-rename-library-button").click();
+
+    await expect(page.getByTestId("inventory-library-name")).toHaveText(renamed);
+    await expect(page.getByTestId("current-library-name")).toHaveText(renamed);
+
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("inventory-toggle-library-archive-button").click();
+    await expect(page.getByTestId("inventory-library-lifecycle")).toHaveText("已归档");
+    await expect(page.getByTestId("inventory-summary")).toBeVisible();
+
+    await page.getByTestId("inventory-toggle-library-archive-button").click();
+    await expect(page.getByTestId("inventory-library-lifecycle")).toHaveText("活跃");
+
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("inventory-delete-library-button").click();
+    await expect(page.getByTestId("library-select")).not.toHaveValue(libraryId);
+    await expect(page.getByTestId("library-select")).not.toContainText(`${renamed} (${libraryId})`);
+  });
+
+  test("inventory workspace links current library readiness to settings overrides", async ({
+    page,
+  }) => {
+    await createLibrary(page, "inventory-library-overrides-link");
+
+    await openInventoryWorkspace(page);
+    await expect(page.getByTestId("inventory-library-config-strip")).toBeVisible();
+    await expect(page.getByTestId("inventory-library-config-list")).toContainText("文本");
+    await expect(page.getByTestId("inventory-library-config-list")).toContainText("图片");
+
+    await page.getByTestId("inventory-open-library-overrides-button").click();
+    await expect(page.getByTestId("settings-workspace")).toBeVisible();
+    await expect(page.getByTestId("settings-stage-title")).toHaveText("当前库覆盖");
+    await expect(page.getByTestId("library-content-types-panel")).toBeVisible();
+  });
+
+  test("manage library popover stays stable inside inventory across workspace polling", async ({
+    page,
+  }) => {
+    const originalName = await createLibrary(page, "library-manage-popover");
+    await openInventoryWorkspace(page);
+    const cluster = page.getByTestId("library-context-cluster");
+    const clusterBoxBefore = await cluster.boundingBox();
+    const manageNameInput = await ensureManageLibraryPopoverOpen(page);
+    const manageCard = page.getByTestId("manage-library-card");
+    const draftName = `${originalName} draft`;
+
+    await expect(manageCard).toBeVisible();
+    const clusterBoxAfterOpen = await cluster.boundingBox();
+    expect(clusterBoxBefore).not.toBeNull();
+    expect(clusterBoxAfterOpen).not.toBeNull();
+    expect(clusterBoxAfterOpen!.height).toBeLessThan(clusterBoxBefore!.height + 20);
+
+    await manageNameInput.fill(draftName);
+    await page.getByTestId("current-library-name").click();
+    await expect(manageNameInput).not.toBeFocused();
+
+    await page.waitForTimeout(3500);
+
+    await expect(manageCard).toBeVisible();
+    await expect(manageNameInput).toHaveValue(draftName);
   });
 }
 
@@ -84,20 +224,293 @@ async function openSearchWorkspace(page) {
   await expect(page.getByTestId("search-panel")).toBeVisible();
 }
 
+async function openSourcePreparationPanel(page) {
+  await openSearchWorkspace(page);
+  const sourceRootPathInput = page.getByTestId("source-root-path-input");
+  if (!(await sourceRootPathInput.isVisible())) {
+    await page.locator("summary").filter({ hasText: "导入与来源准备" }).click();
+  }
+  await expect(sourceRootPathInput).toBeVisible();
+}
+
 async function openSettingsWorkspace(page) {
   await page.getByTestId("workspace-tab-settings").click();
   await expect(page.getByTestId("settings-workspace")).toBeVisible();
 }
 
+async function openSettingsSection(page, section) {
+  await openSettingsWorkspace(page);
+  await page.getByTestId(`settings-nav-${section}`).click();
+}
+
+async function openUtilityDrawerSection(page, section) {
+  if (section === "status") {
+    await page.getByTestId("utility-drawer-open-status").click();
+  } else if (!(await page.getByTestId("utility-drawer").isVisible())) {
+    await page.getByTestId("workspace-tab-tools").click();
+  }
+
+  await expect(page.getByTestId("utility-drawer")).toBeVisible();
+  if (
+    section !== "status" &&
+    (await page.getByTestId("utility-drawer").getAttribute("data-drawer-section")) !== section
+  ) {
+    await page.getByTestId(`utility-drawer-tab-${section}`).click();
+  }
+  await expect(page.getByTestId("utility-drawer")).toHaveAttribute("data-drawer-section", section);
+}
+
 async function waitForFirstJobCompleted(page) {
-  const firstJob = page.getByTestId("job-card").first();
-  await expect(firstJob).toBeVisible({ timeout: 30_000 });
+  const libraryId = await currentLibraryId(page);
   await expect
-    .poll(async () => firstJob.getAttribute("data-job-status"), {
-      timeout: 10 * 60 * 1000,
-      intervals: [1_000, 2_000, 5_000],
-    })
+    .poll(
+      async () => {
+        const response = await page.request.get("/api/jobs");
+        if (!response.ok()) {
+          return null;
+        }
+        const payload = await response.json();
+        const latest = (payload?.data?.jobs ?? []).find((job) => job?.library_id === libraryId) ?? null;
+        return latest?.status ?? null;
+      },
+      {
+        timeout: 10 * 60 * 1000,
+        intervals: [1_000, 2_000, 5_000],
+      }
+    )
     .toBe("completed");
+}
+
+async function prepareSearchableLibrary(page) {
+  await importFixtureIntoCurrentLibrary(page);
+}
+
+async function importFixtureIntoCurrentLibrary(page, importPath = fixtureImagePath) {
+  const libraryId = await currentLibraryId(page);
+  const response = await page.request.post(`/api/libraries/${libraryId}/imports`, {
+    data: {
+      paths: [importPath],
+    },
+  });
+  expect(response.ok()).toBeTruthy();
+  await waitForFirstJobCompleted(page);
+  await expect(page.getByTestId("search-submit-button")).toBeEnabled();
+}
+
+async function mockSingleTextSearchResult(
+  page,
+  queryText = "Revenue 46 percent",
+  sourcePath = "/tmp/search-fixtures/formal/report-1.pdf"
+) {
+  const libraryId = await currentLibraryId(page);
+  const result = {
+    ...createMockSearchResult(0, sourcePath),
+    library_id: libraryId,
+  };
+
+  await page.route("**/api/search/text", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          results: [result],
+          next_cursor: null,
+          debug: {
+            backend: "qdrant",
+          },
+        },
+      }),
+    });
+  });
+
+  await page.route(`**/api/libraries/${libraryId}/visual-units/${result.visual_unit_id}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          visual_unit: {
+            visual_unit_id: result.visual_unit_id,
+            source_id: result.source_id,
+            source_path: result.source_path,
+            source_type: result.source_type,
+            kind: result.kind,
+            locator: result.locator,
+          },
+          preview: result.preview,
+          neighbor_context: null,
+          library_id: libraryId,
+        },
+      }),
+    });
+  });
+
+  await page.getByTestId("search-text-input").fill(queryText);
+  await page.getByTestId("search-submit-button").click();
+  return result;
+}
+
+async function mockDocumentSearchResults(
+  page,
+  sourcePath = "/tmp/search-fixtures/formal/query-document.pdf"
+) {
+  const libraryId = await currentLibraryId(page);
+  const results = [createMockSearchResult(0, sourcePath), createMockSearchResult(1, sourcePath)].map(
+    (result) => ({
+      ...result,
+      library_id: libraryId,
+    })
+  );
+
+  await page.route("**/api/search/document", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          results,
+          next_cursor: null,
+          debug: {
+            backend: "qdrant",
+          },
+        },
+      }),
+    });
+  });
+
+  await page.route(`**/api/libraries/${libraryId}/visual-units/*`, async (route) => {
+    const visualUnitId = route.request().url().split("/").pop();
+    const result = results.find((entry) => entry.visual_unit_id === visualUnitId) ?? results[0];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          visual_unit: {
+            visual_unit_id: result.visual_unit_id,
+            source_id: result.source_id,
+            source_path: result.source_path,
+            source_type: result.source_type,
+            kind: result.kind,
+            locator: result.locator,
+          },
+          preview: result.preview,
+          neighbor_context: {
+            previous: null,
+            next: null,
+          },
+          library_id: libraryId,
+        },
+      }),
+    });
+  });
+
+  return results;
+}
+
+async function mockImageSearchResults(
+  page,
+  results?: Array<Omit<SearchResultItem, "library_id">>
+) {
+  const libraryId = await currentLibraryId(page);
+  const resolvedResults = (results ?? [
+    {
+      visual_unit_id: "vu_image_mock_0",
+      source_id: "src_image_mock_0",
+      preview: {
+        url: "http://127.0.0.1:54210/mock-preview/image-0.png",
+      },
+      source_path: "/tmp/search-fixtures/formal/query-image.png",
+      source_type: "image",
+      kind: "image",
+      locator: null,
+      cursor: "search:v1:image:1",
+      score: 100,
+    },
+  ]).map((result) => ({
+    ...result,
+    library_id: libraryId,
+  }));
+
+  await page.route("**/api/search/image", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          results: resolvedResults,
+          next_cursor: null,
+          debug: {
+            backend: "qdrant",
+          },
+        },
+      }),
+    });
+  });
+
+  await page.route(`**/api/libraries/${libraryId}/visual-units/*`, async (route) => {
+    const visualUnitId = route.request().url().split("/").pop();
+    const result =
+      resolvedResults.find((entry) => entry.visual_unit_id === visualUnitId) ?? resolvedResults[0];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          visual_unit: {
+            visual_unit_id: result.visual_unit_id,
+            source_id: result.source_id,
+            source_path: result.source_path,
+            source_type: result.source_type,
+            kind: result.kind,
+            locator: result.locator,
+          },
+          preview: result.preview,
+          neighbor_context: result.kind === "document_page" ? { previous: null, next: null } : null,
+          library_id: libraryId,
+        },
+      }),
+    });
+  });
+
+  return resolvedResults;
+}
+
+async function expectSearchRequiresContent(page) {
+  await expect(page.getByTestId("search-submit-button")).toBeDisabled();
+  await expect(page.getByTestId("search-state-strip")).toContainText("尚未接入来源根");
+  await expect(page.getByTestId("search-next-step-dock")).toBeVisible();
+  await expect(page.getByTestId("search-next-step-dock")).toContainText("接入第一个来源根");
+  await expect(page.getByTestId("search-next-step-open-source-prep")).toBeVisible();
+}
+
+async function openSearchAdvancedFilters(page) {
+  const pathPrefixInput = page.getByTestId("search-filter-path-prefix");
+  if (!(await pathPrefixInput.isVisible())) {
+    const filterToggleButton = page.getByTestId("search-filter-toggle-button");
+    if (await filterToggleButton.isVisible()) {
+      await filterToggleButton.click({ timeout: 10_000 });
+    } else {
+      await page.locator("summary").filter({ hasText: "高级过滤" }).click({ timeout: 10_000 });
+    }
+  }
+  await expect(pathPrefixInput).toBeVisible();
 }
 
 function createTempPdfFixture() {
@@ -310,22 +723,28 @@ function librarySourceCard(page, sourceName) {
   return page.getByTestId("library-source-card").filter({ hasText: sourceName });
 }
 
-async function latestJobId(page) {
-  if (!(await page.getByTestId("job-card").count())) {
-    return null;
-  }
-  return page.getByTestId("job-card").first().getAttribute("data-job-id");
+async function latestJobId(page, libraryId) {
+  const response = await page.request.get("/api/jobs");
+  expect(response.ok()).toBeTruthy();
+  const payload = await response.json();
+  const jobs = payload?.data?.jobs ?? [];
+  return jobs.find((job) => job?.library_id === libraryId)?.job_id ?? null;
 }
 
-async function waitForNewLatestJobCompleted(page, previousJobId) {
+async function waitForNewLatestJobCompleted(page, libraryId, previousJobId) {
+  let nextJobId = null;
   await expect
     .poll(
       async () => {
-        if (!(await page.getByTestId("job-card").count())) {
+        const response = await page.request.get("/api/jobs");
+        if (!response.ok()) {
           return null;
         }
-        const jobId = await page.getByTestId("job-card").first().getAttribute("data-job-id");
-        return jobId && jobId !== previousJobId ? jobId : null;
+        const payload = await response.json();
+        const jobs = payload?.data?.jobs ?? [];
+        const jobId = jobs.find((job) => job?.library_id === libraryId)?.job_id ?? null;
+        nextJobId = jobId && jobId !== previousJobId ? jobId : null;
+        return nextJobId;
       },
       {
         timeout: 2 * 60 * 1000,
@@ -334,15 +753,25 @@ async function waitForNewLatestJobCompleted(page, previousJobId) {
     )
     .toBeTruthy();
 
-  const firstJob = page.getByTestId("job-card").first();
   await expect
-    .poll(async () => firstJob.getAttribute("data-job-status"), {
+    .poll(async () => {
+      if (!nextJobId) {
+        return null;
+      }
+      const response = await page.request.get("/api/jobs");
+      if (!response.ok()) {
+        return null;
+      }
+      const payload = await response.json();
+      const latest = (payload?.data?.jobs ?? []).find((job) => job?.library_id === libraryId) ?? null;
+      return latest?.job_id === nextJobId ? latest.status : null;
+    }, {
       timeout: 2 * 60 * 1000,
       intervals: [1_000, 2_000, 5_000],
     })
     .toBe("completed");
 
-  return firstJob.getAttribute("data-job-id");
+  return nextJobId;
 }
 
 async function setRangeValue(locator, value) {
@@ -353,50 +782,692 @@ async function setRangeValue(locator, value) {
 }
 
 export function registerSearchTextScenarios() {
-  test("demo import and search closes the current UI happy path", async ({ page }) => {
+  test("manual import and submitted search keep results and detail in the same workspace", async ({
+    page,
+  }) => {
     await createLibrary(page, "smoke");
-    await expect(page.getByTestId("run-demo-button")).toBeEnabled();
-
-    await page.getByTestId("run-demo-button").click();
-    await waitForFirstJobCompleted(page);
+    await expect(page.getByTestId("search-panel")).toContainText("Search anything you want");
+    await expect(page.getByTestId("search-panel")).not.toContainText("Search Stage");
+    await importFixtureIntoCurrentLibrary(page);
+    await mockSingleTextSearchResult(page, "Revenue 46 percent");
 
     const firstResult = page.getByTestId("result-card").first();
     await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
     await expect(firstResult.getByTestId("result-score")).toBeVisible();
+    await expect(firstResult.getByTestId("result-preview")).toBeVisible();
 
     await expect(page.getByTestId("detail-panel")).toBeVisible();
     await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
     await expect(page.getByTestId("visual-preview")).toBeVisible();
-    await expect(page.getByTestId("preview-link")).toBeVisible();
+    await expect(page.locator('[data-testid="preview-link"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="detail-use-as-query-document-button"]')).toHaveCount(0);
+    await expect(page.getByTestId("detail-technical-content")).not.toBeVisible();
+    await page.getByTestId("detail-technical-disclosure").locator("summary").click();
+    await expect(page.getByTestId("detail-technical-content")).toBeVisible();
   });
 
-  test("search before import shows not_ready instead of an empty result", async ({ page }) => {
+  test("search before source preparation keeps submit disabled and points to the first source root", async ({ page }) => {
     await createLibrary(page, "not-ready");
 
     await page.getByTestId("search-text-input").fill("operating activities");
-    await page.getByTestId("search-submit-button").click();
+    await expectSearchRequiresContent(page);
+  });
 
-    await expect(page.getByTestId("search-error-notice")).toBeVisible();
-    await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
-    await expect(page.getByTestId("search-error-message")).toContainText("active index");
+  test("search readiness distinguishes missing source roots from missing content", async ({ page }) => {
+    const fixtures = createTempSourceManagementFixtures();
+    try {
+      await createLibrary(page, "search-readiness");
+
+      await page.getByTestId("search-text-input").fill("quarterly planning");
+      await expectSearchRequiresContent(page);
+
+      await openSourcePreparationPanel(page);
+      await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
+      await page.getByTestId("source-root-submit-button").click();
+
+      await expect(page.getByTestId("search-state-strip")).toContainText("等待内容");
+      await expect(page.getByTestId("search-next-step-dock")).toContainText("准备第一批内容");
+      await expect(page.getByTestId("search-next-step-open-inventory")).toBeVisible();
+    } finally {
+      fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+    }
   });
 }
 
 export function registerWorkspaceRegressionScenarios() {
-  test("default workspace keeps search first and moves inventory out of the center flow", async ({ page }) => {
+  test("default workspace keeps search first and lets the empty stage own the desktop layout", async ({ page }) => {
     await createLibrary(page, "workspace-default");
 
     await expect(page.getByTestId("workspace-tab-search")).toBeVisible();
     await expect(page.getByTestId("workspace-tab-inventory")).toBeVisible();
     await expect(page.getByTestId("search-panel")).toBeVisible();
+    await expect(page.getByTestId("search-inline-outcome")).toHaveCount(0);
+    await expect(page.getByTestId("search-results-column")).toHaveCount(0);
+    await expect(page.getByTestId("detail-panel")).toHaveCount(0);
     await expect(page.getByTestId("inventory-panel")).toHaveCount(0);
     await expect(page.getByTestId("inventory-bridge-button")).toBeVisible();
   });
 
+  test("status drawer mirrors search readiness and opens source prep from the same next step", async ({
+    page,
+  }) => {
+    await createLibrary(page, "workspace-status-next-step");
+
+    await openUtilityDrawerSection(page, "status");
+    await expect(page.getByTestId("utility-drawer-stage-state")).toContainText("尚未接入来源根");
+    await expect(page.getByTestId("utility-drawer-status-next-step")).toContainText("接入第一个来源根");
+    await page.getByTestId("utility-drawer-status-open-source-prep").click();
+
+    await expect(page.getByTestId("search-panel")).toBeVisible();
+    await expect(page.getByTestId("source-root-form")).toBeVisible();
+  });
+
+  test("status and tools share a unified drawer while search results still keep result and detail columns", async ({
+    page,
+  }) => {
+    await createLibrary(page, "shell-status");
+    await importFixtureIntoCurrentLibrary(page);
+    await mockSingleTextSearchResult(page, "Revenue 46 percent");
+
+    await expect(page.getByTestId("search-results-column")).toBeVisible();
+    await expect(page.getByTestId("detail-panel")).toBeVisible();
+
+    await openUtilityDrawerSection(page, "status");
+    await expect(page.getByTestId("utility-drawer-section-status")).toBeVisible();
+    await expect(page.getByTestId("utility-drawer-runtime-app")).toBeVisible();
+    await expect(page.getByTestId("utility-drawer-runtime-qdrant")).toBeVisible();
+    await expect(page.getByTestId("utility-drawer-runtime-providers")).toContainText("连接");
+    await expect(page.getByTestId("status-capsule")).toHaveCount(0);
+    await expect(page.getByTestId("utilities-menu")).toHaveCount(0);
+    await page.getByTestId("utility-drawer-open-diagnostics").click();
+
+    await expect(page.getByTestId("settings-workspace")).toBeVisible();
+    await expect(page.getByTestId("runtime-health-panel")).toBeVisible();
+    await expect(page.getByTestId("context-rail")).toBeVisible();
+
+    await openSearchWorkspace(page);
+    await openUtilityDrawerSection(page, "source-prep");
+    await expect(page.getByTestId("utility-drawer-section-source-prep")).toBeVisible();
+    await page.getByTestId("utility-drawer-focus-search-prep").click();
+    await expect(page.getByTestId("search-panel")).toBeVisible();
+    await expect(page.getByTestId("source-root-form")).toBeVisible();
+
+    await openUtilityDrawerSection(page, "maintenance");
+    await page.getByTestId("utility-drawer-open-runtime-health").click();
+    await expect(page.getByTestId("runtime-health-panel")).toBeVisible();
+  });
+
+  test("utilities and diagnostics expose rebuild and cleanup maintenance actions", async ({
+    page,
+  }) => {
+    const rebuildRequests = [];
+    const maintenanceRequests = [];
+
+    await page.route("**/api/libraries/*/vector-space-diagnostics", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            vector_spaces: [
+              {
+                vector_space_id: "vs_active",
+                lifecycle_state: "active",
+                content_types: ["document"],
+                provider_id: "local_sidecar",
+                model_id: "athrael-soju/colqwen3.5-4.5B-v3",
+                model_version: "main",
+                vector_type: "multi_vector_late_interaction",
+              },
+              {
+                vector_space_id: "vs_retired",
+                lifecycle_state: "retired",
+                content_types: [],
+                retired_at_ms: Date.now() - 60_000,
+              },
+            ],
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/libraries/*/rebuild", async (route) => {
+      rebuildRequests.push(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            accepted: [
+              {
+                source_root_id: "root_000001",
+                root_path: "/tmp/demo-root",
+                action: "rebuild",
+              },
+            ],
+            rejected: [],
+            job_handle: "job_rebuild_001",
+            job: {
+              job_id: "job_rebuild_001",
+              library_id: "playwright-maintenance",
+              kind: "rebuild",
+              status: "completed",
+              phase: "activated",
+              progress: {
+                completed: 1,
+                total: 1,
+                unit: "source_root",
+              },
+              cancelable: false,
+              retryable: true,
+              current_attempt: {
+                attempt: 1,
+                status: "completed",
+                summary: "Rebuild completed.",
+              },
+            },
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/libraries/*/maintenance", async (route) => {
+      maintenanceRequests.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            action: "cleanup_retired_vector_spaces",
+            accepted: [
+              {
+                target_kind: "vector_space",
+                target_id: "vs_retired",
+                message: "已加入退役执行空间清理队列。",
+              },
+            ],
+            rejected: [],
+            job_handle: "job_cleanup_001",
+            job: {
+              job_id: "job_cleanup_001",
+              library_id: "playwright-maintenance",
+              kind: "cleanup",
+              status: "completed",
+              phase: "cleaned",
+              progress: {
+                completed: 1,
+                total: 1,
+                unit: "vector_space",
+              },
+              cancelable: false,
+              retryable: true,
+              current_attempt: {
+                attempt: 1,
+                status: "completed",
+                summary: "Cleanup completed.",
+              },
+            },
+          },
+        }),
+      });
+    });
+
+    await createLibrary(page, "maintenance-actions");
+
+    await openUtilityDrawerSection(page, "maintenance");
+    await expect(page.getByTestId("utility-drawer-rebuild-library")).toBeVisible();
+    await expect(page.getByTestId("utility-drawer-cleanup-retired-vector-spaces")).toBeEnabled();
+    await page.getByTestId("utility-drawer-rebuild-library").click();
+    await expect.poll(() => rebuildRequests.length).toBe(1);
+
+    await openSettingsSection(page, "diagnostics");
+    await expect(page.getByTestId("maintenance-actions-panel")).toContainText(
+      "1 个退役执行空间可立即清理"
+    );
+    await expect(page.getByTestId("diagnostics-cleanup-retired-vector-spaces")).toBeEnabled();
+    await page.getByTestId("diagnostics-cleanup-retired-vector-spaces").click();
+    await expect
+      .poll(() => maintenanceRequests.at(0)?.action ?? null)
+      .toBe("cleanup_retired_vector_spaces");
+  });
+
+  test("job panel exposes a cancel action for cancelable tasks", async ({ page }) => {
+    const libraryName = await createLibrary(page, "job-cancel");
+    const libraryId = await currentLibraryId(page);
+    const cancelRequests = [];
+    let cancelRequested = false;
+
+    const currentJobSnapshot = () => ({
+      job_id: "job_cancel_001",
+      library_id: libraryId,
+      kind: "import",
+      status: cancelRequested ? "canceled" : "running",
+      phase: cancelRequested ? "canceled" : "encode",
+      progress: {
+        completed: cancelRequested ? 1 : 0,
+        total: 1,
+        unit: "item",
+      },
+      cancelable: !cancelRequested,
+      retryable: false,
+      current_attempt: {
+        attempt: 1,
+        status: cancelRequested ? "canceled" : "running",
+        summary: cancelRequested
+          ? "Canceled before the next safe boundary completed."
+          : "Encoding 1 accepted path into vector-space embeddings.",
+      },
+    });
+
+    await page.route("**/api/libraries", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            libraries: [
+              {
+                id: libraryId,
+                display_name: libraryName,
+                lifecycle_state: "active",
+                counts: {
+                  accepted_items: 1,
+                  pending_jobs: 1,
+                },
+                latest_job_id: "job_cancel_001",
+              },
+            ],
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs?library_id=*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            jobs: [currentJobSnapshot()],
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs/job_cancel_001", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: currentJobSnapshot(),
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs/job_cancel_001/cancel", async (route) => {
+      cancelRequested = true;
+      cancelRequests.push(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            ...currentJobSnapshot(),
+            status: "running",
+            phase: "cancel_requested",
+            current_attempt: {
+              attempt: 1,
+              status: "running",
+              summary:
+                "Cancellation requested during encode. The job will stop at the next safe boundary.",
+            },
+          },
+        }),
+      });
+    });
+
+    await page.reload();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    await openUtilityDrawerSection(page, "jobs");
+    await expect(page.getByTestId("job-list")).toBeVisible();
+    await expect(page.getByTestId("job-cancel-button")).toBeVisible();
+    await page.getByTestId("job-cancel-button").click();
+
+    await expect.poll(() => cancelRequests.length).toBe(1);
+    await expect(page.getByTestId("job-card").first()).toHaveAttribute("data-job-status", "canceled");
+    await expect(page.getByTestId("job-cancel-button")).toHaveCount(0);
+  });
+
+  test("job panel exposes a retry action for retryable terminal tasks", async ({ page }) => {
+    const libraryName = await createLibrary(page, "job-retry");
+    const libraryId = await currentLibraryId(page);
+    const retryRequests = [];
+    let retryRequested = false;
+    let retriedJobPolls = 0;
+
+    const failedJobSnapshot = {
+      job_id: "job_retry_001",
+      library_id: libraryId,
+      kind: "refresh",
+      status: "failed",
+      phase: "failed",
+      progress: {
+        completed: 0,
+        total: 1,
+        unit: "source_root",
+      },
+      cancelable: false,
+      retryable: true,
+      retried_from_job_id: null,
+      current_attempt: {
+        attempt: 1,
+        status: "failed",
+        summary: "refresh failed: runtime temporarily unavailable",
+      },
+    };
+
+    const retriedJobSnapshot = () => ({
+      job_id: "job_retry_002",
+      library_id: libraryId,
+      kind: "refresh",
+      status: retriedJobPolls > 0 ? "completed" : "running",
+      phase: retriedJobPolls > 0 ? "activated" : "encode",
+      progress: {
+        completed: retriedJobPolls > 0 ? 1 : 0,
+        total: 1,
+        unit: "source_root",
+      },
+      cancelable: retriedJobPolls === 0,
+      retryable: true,
+      retried_from_job_id: "job_retry_001",
+      current_attempt: {
+        attempt: 2,
+        status: retriedJobPolls > 0 ? "completed" : "running",
+        summary:
+          retriedJobPolls > 0
+            ? "refresh completed."
+            : "Encoding 1 visual unit for refresh.",
+      },
+    });
+
+    await page.route("**/api/libraries", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            libraries: [
+              {
+                id: libraryId,
+                display_name: libraryName,
+                lifecycle_state: "active",
+                counts: {
+                  accepted_items: 1,
+                  pending_jobs: 1,
+                },
+                latest_job_id: retryRequested ? "job_retry_002" : "job_retry_001",
+              },
+            ],
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs?library_id=*", async (route) => {
+      const jobs = retryRequested
+        ? [{ ...retriedJobSnapshot(), status: "completed", phase: "activated", cancelable: false }, failedJobSnapshot]
+        : [failedJobSnapshot];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            jobs,
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs/job_retry_002", async (route) => {
+      const snapshot = retriedJobSnapshot();
+      retriedJobPolls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: snapshot,
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs/job_retry_001/retry", async (route) => {
+      retryRequested = true;
+      retryRequests.push(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            job_id: "job_retry_002",
+            library_id: libraryId,
+            kind: "refresh",
+            status: "queued",
+            phase: "intake",
+            progress: {
+              completed: 0,
+              total: 1,
+              unit: "source_root",
+            },
+            cancelable: true,
+            retryable: true,
+            retried_from_job_id: "job_retry_001",
+            current_attempt: {
+              attempt: 2,
+              status: "queued",
+              summary:
+                "Retry attempt 2 for refresh after job_retry_001; queued across 1 source root(s) via manual trigger.",
+            },
+          },
+        }),
+      });
+    });
+
+    await page.reload();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    await openUtilityDrawerSection(page, "jobs");
+    await expect(page.getByTestId("job-list")).toBeVisible();
+
+    const failedJobCard = page.locator('[data-job-id="job_retry_001"]');
+    await expect(failedJobCard.getByTestId("job-retry-button")).toBeVisible();
+    await failedJobCard.getByTestId("job-retry-button").click();
+
+    await expect.poll(() => retryRequests.length).toBe(1);
+    await expect(page.locator('[data-job-id="job_retry_002"]')).toHaveAttribute(
+      "data-job-status",
+      "completed"
+    );
+    await expect(page.locator('[data-job-id="job_retry_002"]')).toContainText("第 2 次尝试");
+    await expect(page.locator('[data-job-id="job_retry_002"]')).toContainText(
+      "重试自 job_retry_001"
+    );
+  });
+
+  test("job panel exposes a resume action for replayable terminal tasks", async ({ page }) => {
+    const libraryName = await createLibrary(page, "job-resume");
+    const libraryId = await currentLibraryId(page);
+    const resumeRequests = [];
+    let resumeRequested = false;
+    let resumedJobPolls = 0;
+
+    const failedJobSnapshot = {
+      job_id: "job_resume_001",
+      library_id: libraryId,
+      kind: "import",
+      status: "canceled",
+      phase: "canceled",
+      progress: {
+        completed: 0,
+        total: 1,
+        unit: "item",
+      },
+      cancelable: false,
+      retryable: true,
+      retried_from_job_id: null,
+      current_attempt: {
+        attempt: 1,
+        status: "canceled",
+        summary: "Import canceled before any vector-space activation.",
+      },
+    };
+
+    const resumedJobSnapshot = () => ({
+      job_id: "job_resume_001",
+      library_id: libraryId,
+      kind: "import",
+      status: resumedJobPolls > 0 ? "completed" : "running",
+      phase: resumedJobPolls > 0 ? "activated" : "encode",
+      progress: {
+        completed: resumedJobPolls > 0 ? 1 : 0,
+        total: 1,
+        unit: "item",
+      },
+      cancelable: resumedJobPolls === 0,
+      retryable: true,
+      retried_from_job_id: null,
+      current_attempt: {
+        attempt: 2,
+        status: resumedJobPolls > 0 ? "completed" : "running",
+        summary:
+          resumedJobPolls > 0
+            ? "Accepted 1 path(s); indexed 1 visual unit(s) across 1 vector space(s) and activated the resulting namespaces."
+            : "Encoding batch 1/1 (1 visual unit(s)) for staged vector-space indexing.",
+      },
+    });
+
+    await page.route("**/api/libraries", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            libraries: [
+              {
+                id: libraryId,
+                display_name: libraryName,
+                lifecycle_state: "active",
+                counts: {
+                  accepted_items: 1,
+                  pending_jobs: 1,
+                },
+                latest_job_id: "job_resume_001",
+              },
+            ],
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs?library_id=*", async (route) => {
+      const jobs = resumeRequested
+        ? [{ ...resumedJobSnapshot(), status: "completed", phase: "activated", cancelable: false }]
+        : [failedJobSnapshot];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            jobs,
+          },
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs/job_resume_001", async (route) => {
+      const snapshot = resumedJobSnapshot();
+      resumedJobPolls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: snapshot,
+        }),
+      });
+    });
+
+    await page.route("**/api/jobs/job_resume_001/resume", async (route) => {
+      resumeRequested = true;
+      resumeRequests.push(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            job_id: "job_resume_001",
+            library_id: libraryId,
+            kind: "import",
+            status: "queued",
+            phase: "intake",
+            progress: {
+              completed: 0,
+              total: 1,
+              unit: "item",
+            },
+            cancelable: true,
+            retryable: true,
+            retried_from_job_id: null,
+            current_attempt: {
+              attempt: 2,
+              status: "queued",
+              summary:
+                "Resume attempt 2 for import on existing job; accepted 1 path(s) and requeued them for vector-space indexing.",
+            },
+          },
+        }),
+      });
+    });
+
+    await page.reload();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    await openUtilityDrawerSection(page, "jobs");
+    await expect(page.getByTestId("job-list")).toBeVisible();
+
+    const failedJobCard = page.locator('[data-job-id="job_resume_001"]');
+    await expect(failedJobCard.getByTestId("job-resume-button")).toBeVisible();
+    await failedJobCard.getByTestId("job-resume-button").click();
+
+    await expect.poll(() => resumeRequests.length).toBe(1);
+    await expect(page.locator('[data-job-id="job_resume_001"]')).toHaveAttribute(
+      "data-job-status",
+      "completed"
+    );
+    await expect(page.locator('[data-job-id="job_resume_001"]')).toContainText("第 2 次尝试");
+  });
+
   test("switching between search and inventory preserves search drafts results and detail selection", async ({ page }) => {
     await createLibrary(page, "workspace-switch-preserve");
-    await page.getByTestId("run-demo-button").click();
-    await waitForFirstJobCompleted(page);
+    await importFixtureIntoCurrentLibrary(page);
+    await mockSingleTextSearchResult(
+      page,
+      "What is the percentage change in the net cash provided from operating activities?"
+    );
 
     const firstResult = page.getByTestId("result-card").first();
     await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
@@ -421,6 +1492,45 @@ export function registerWorkspaceRegressionScenarios() {
     ).toHaveClass(/active/);
   });
 
+  test("phone-sized search detail opens as a closable sheet", async ({ page }) => {
+    const fixtures = createTempDocumentSearchFixtures();
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await createLibrary(page, "search-mobile-sheet");
+      await page
+        .getByTestId("import-paths-input")
+        .fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
+      await page.getByTestId("import-submit-button").click();
+      await waitForFirstJobCompleted(page);
+      await expect(page.getByTestId("detail-panel")).toHaveCount(0);
+
+      await page.getByTestId("search-mode-document").click();
+      await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
+      await expect(page.getByTestId("query-document-preview")).toBeVisible();
+      await mockDocumentSearchResults(page, fixtures.pdfPath);
+      await page.getByTestId("search-submit-button").click();
+
+      const firstResult = page.getByTestId("result-card").first();
+      const secondResult = page.getByTestId("result-card").nth(1);
+      await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+      await expect(secondResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+      await expect(page.getByTestId("detail-sheet-close-button")).toBeVisible();
+      await expect(firstResult.locator(".result-actions")).toBeVisible();
+      await expect(secondResult.locator(".result-actions")).not.toBeVisible();
+      await expect(page.getByTestId("detail-panel")).toBeVisible();
+
+      await page.getByTestId("detail-sheet-close-button").click();
+      await expect(page.getByTestId("detail-panel")).not.toBeVisible();
+
+      await secondResult.locator(".result-select").click();
+      await expect(page.getByTestId("detail-panel")).toBeVisible();
+      await expect(secondResult.locator(".result-actions")).toBeVisible();
+      await expect(firstResult.locator(".result-actions")).not.toBeVisible();
+    } finally {
+      fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("workspace refresh preserves focused editable inputs and drafts", async ({ page }) => {
     const libraryName = `playwright-focus-${Date.now()}`;
     const secondLibraryName = `playwright-focus-next-${Date.now()}`;
@@ -428,7 +1538,7 @@ export function registerWorkspaceRegressionScenarios() {
     await page.goto("/");
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-    const libraryNameInput = page.getByTestId("library-name-input");
+    const libraryNameInput = await ensureCreateLibraryPopoverOpen(page);
     await libraryNameInput.click();
     await page.keyboard.type(libraryName);
     await expect(libraryNameInput).toBeFocused();
@@ -441,7 +1551,7 @@ export function registerWorkspaceRegressionScenarios() {
     await page.getByTestId("create-library-button").click();
     await expect(page.getByTestId("current-library-name")).toHaveText(libraryName);
 
-    const secondLibraryNameInput = page.getByTestId("library-name-input");
+    const secondLibraryNameInput = await ensureCreateLibraryPopoverOpen(page);
     await secondLibraryNameInput.click();
     await page.keyboard.type(secondLibraryName);
     await expect(page.getByTestId("library-name-input")).toBeFocused();
@@ -451,6 +1561,7 @@ export function registerWorkspaceRegressionScenarios() {
     await expect(page.getByTestId("library-name-input")).toBeFocused();
     await expect(page.getByTestId("library-name-input")).toHaveValue(secondLibraryName);
 
+    await openSearchWorkspace(page);
     await page.getByTestId("search-mode-document").click();
     const queryDocumentRangeStart = page.getByTestId("query-document-range-start");
     await queryDocumentRangeStart.click();
@@ -477,6 +1588,7 @@ export function registerWorkspaceRegressionScenarios() {
       await page.getByTestId("search-mode-document").click();
       await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
       await expect(page.getByTestId("query-document-preview")).toBeVisible();
+      await mockDocumentSearchResults(page, fixtures.pdfPath);
 
       await page.getByTestId("search-submit-button").click();
 
@@ -510,20 +1622,29 @@ export function registerSettingsScenarios() {
     await createLibrary(page, "provider-settings");
     await expect(page.getByTestId("provider-bridge-summary")).toContainText(localModelId);
 
-    await openSettingsWorkspace(page);
+    await openSettingsSection(page, "providers");
 
+    await expect(page.getByTestId("settings-stage-title")).toHaveText("连接");
+    await expect(page.getByTestId("settings-stage-summary")).toContainText("连接状态");
+    await expect(page.getByTestId("settings-stage-metrics")).toContainText("已启用连接");
     await expect(page.getByTestId("provider-configs-panel")).toContainText("Local Sidecar");
     await expect(page.getByTestId("provider-configs-panel")).toContainText("DashScope");
+    await expect(page.getByTestId("provider-runtime-summary-local_sidecar")).toContainText(
+      localModelId
+    );
+    await expect(page.getByTestId("provider-runtime-summary-local_sidecar")).toContainText(
+      "模型版本 main"
+    );
+    await expect(page.getByTestId("provider-runtime-summary-local_sidecar")).toContainText(
+      "模型修订 main"
+    );
     await expect(page.getByTestId("provider-configs-panel")).not.toContainText("qdrant");
     await expect(page.getByTestId("settings-workspace")).not.toContainText("Region");
     await expect(page.getByTestId("settings-workspace")).not.toContainText("Provider profiles");
-    await expect(page.getByTestId("settings-workspace")).not.toContainText("selection_kind");
-    await expect(page.getByTestId("settings-workspace")).not.toContainText("variant");
-    await expect(page.getByTestId("resolved-content-models-panel")).toContainText(localModelId);
-    await expect(page.getByTestId("resolved-content-models-panel")).toContainText(
-      "global content type"
-    );
-
+    await page.getByTestId("provider-config-id").selectOption("local_sidecar");
+    await expect(page.getByTestId("provider-editor-runtime-summary")).toContainText(localModelId);
+    await expect(page.getByTestId("provider-editor-runtime-summary")).toContainText("模型版本 main");
+    await expect(page.getByTestId("provider-editor-runtime-summary")).toContainText("模型修订 main");
     await page.getByTestId("provider-config-id").selectOption("dashscope");
     await page.getByTestId("provider-base-url").fill("https://dashscope.aliyuncs.com");
     await Promise.all([
@@ -538,7 +1659,18 @@ export function registerSettingsScenarios() {
     await expect(page.getByTestId("provider-base-url")).toHaveValue(
       "https://dashscope.aliyuncs.com"
     );
+
+    await page.getByTestId("settings-nav-library-overrides").click();
+    await expect(page.getByTestId("settings-stage-title")).toHaveText("当前库覆盖");
+    await expect(page.getByTestId("settings-stage-metrics")).toContainText("覆盖状态");
     await expect(page.getByTestId("resolved-content-models-panel")).toContainText(localModelId);
+    await expect(page.getByTestId("resolved-content-models-panel")).toContainText(
+      "全局内容类型"
+    );
+    await expect(page.getByTestId("resolved-content-models-panel")).not.toContainText("执行空间");
+    await expect(page.getByTestId("resolved-content-models-panel")).not.toContainText(
+      "vector_space_id"
+    );
 
     await openSearchWorkspace(page);
     await expect(page.getByTestId("provider-bridge-summary")).toContainText(localModelId);
@@ -642,22 +1774,19 @@ export function registerSettingsScenarios() {
     });
 
     await createLibrary(page, "provider-settings-model-test");
-    await openSettingsWorkspace(page);
+    await openSettingsSection(page, "model-tests");
 
     const globalPanel = page.getByTestId("global-model-test-panel");
     await expect(globalPanel).toContainText(localModelId);
-    await expect(globalPanel).toContainText("settings model test");
-    await expect(page.getByTestId("global-model-test-support-message")).toContainText("text, image");
-    await expect(page.getByTestId("global-model-capabilities")).toContainText("inputs text, image");
-    await expect(page.getByTestId("global-model-capabilities")).toContainText(
-      "vectors multi_vector_late_interaction"
-    );
+    await expect(page.getByTestId("global-model-test-support-message")).toContainText("文本、图片");
+    await expect(page.getByTestId("global-model-capabilities")).toContainText("输入 text, image");
+    await expect(page.getByTestId("global-model-capabilities")).toContainText("向量 multi_vector_late_interaction");
     await expect(page.locator('[data-testid="global-model-test-modality"] option')).toHaveCount(2);
     await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(0)).toHaveText(
-      "text"
+      "文本"
     );
     await expect(page.locator('[data-testid="global-model-test-modality"] option').nth(1)).toHaveText(
-      "image"
+      "图片"
     );
     await expect(page.getByTestId("global-model-test-modality")).toHaveValue("text");
 
@@ -680,10 +1809,13 @@ export function registerSettingsScenarios() {
     await expect(page.getByTestId("global-model-test-shape")).toContainText("[1, 3]");
     await expect(page.getByTestId("global-model-test-vectors")).toContainText("1");
 
+    await openSettingsSection(page, "library-overrides");
+    await page.getByTestId("library-override-mode-override").click();
     await page.getByTestId("library-content-type-provider-id").selectOption("dashscope");
     await page.getByTestId("library-content-type-model-id").selectOption(dashscopeModelId);
+    await openSettingsSection(page, "model-tests");
     await expect(page.getByTestId("library-model-test-support-message")).toContainText("not executable");
-    await expect(page.getByTestId("library-model-capabilities")).toContainText("inputs text, image");
+    await expect(page.getByTestId("library-model-capabilities")).toContainText("输入 text, image");
     await expect(page.getByTestId("library-model-test-submit-button")).toBeDisabled();
   });
 }
@@ -695,19 +1827,18 @@ export function registerRuntimeHealthScenarios() {
     const localModelId = "athrael-soju/colqwen3.5-4.5B-v3";
 
     await createLibrary(page, "runtime-health");
-    await page.getByTestId("run-demo-button").click();
-    await waitForFirstJobCompleted(page);
+    await importFixtureIntoCurrentLibrary(page);
 
-    await openSettingsWorkspace(page);
+    await openSettingsSection(page, "diagnostics");
 
     const runtimeHealthPanel = page.getByTestId("runtime-health-panel");
     await expect(runtimeHealthPanel).toContainText("Local Sidecar");
     await expect(runtimeHealthPanel).toContainText(localModelId);
-    await expect(runtimeHealthPanel).toContainText("Embedding capabilities");
-    await expect(runtimeHealthPanel).toContainText("inputs text, image");
-    await expect(runtimeHealthPanel).toContainText("Execution inputs");
+    await expect(runtimeHealthPanel).toContainText("嵌入能力");
+    await expect(runtimeHealthPanel).toContainText("输入 text, image");
+    await expect(runtimeHealthPanel).toContainText("执行输入");
     await expect(runtimeHealthPanel).toContainText("text, image, document, video");
-    await expect(runtimeHealthPanel).toContainText("runtime adapters");
+    await expect(runtimeHealthPanel).toContainText("运行时适配器");
     await expect(runtimeHealthPanel).toContainText("document_query_via_page_images");
     await expect(runtimeHealthPanel).toContainText("video_query_via_frame_images");
 
@@ -724,7 +1855,10 @@ export function registerSearchTextControlScenarios() {
   let searchCallCount = 0;
   const sourcePathPrefix = "/tmp/search-fixtures/set-a";
 
-  await page.route("**/api/search/text", async (route) => {
+  const searchRoutePattern = "**/api/search/text";
+  const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+
+  await page.route(searchRoutePattern, async (route) => {
     const payload = route.request().postDataJSON();
     searchRequests.push(payload);
     searchCallCount += 1;
@@ -765,7 +1899,7 @@ export function registerSearchTextControlScenarios() {
     });
   });
 
-  await page.route("**/api/libraries/*/visual-units/*", async (route) => {
+  await page.route(detailRoutePattern, async (route) => {
     const visualUnitId = route.request().url().split("/").pop();
     const index = Number(String(visualUnitId).replace("vu_mock_", "")) || 0;
     await route.fulfill({
@@ -793,54 +1927,650 @@ export function registerSearchTextControlScenarios() {
     });
   });
 
-  await createLibrary(page, "search-controls");
+  try {
+    await createLibrary(page, "search-controls");
+    await importFixtureIntoCurrentLibrary(page);
+    searchRequests.length = 0;
+    searchCallCount = 0;
 
-  await page.getByTestId("search-text-input").fill("Revenue 46 percent");
-  await page.getByTestId("search-filter-kind").selectOption("document_page");
-  await page.getByTestId("search-filter-source-type").selectOption("pdf");
-  await page.getByTestId("search-filter-path-prefix").fill(sourcePathPrefix);
-  await page.getByTestId("search-submit-button").click();
+    await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+    await openSearchAdvancedFilters(page);
+    await page.getByTestId("search-filter-kind").selectOption("document_page");
+    await page.getByTestId("search-filter-source-type").selectOption("pdf");
+    await page.getByTestId("search-filter-path-prefix").fill(sourcePathPrefix);
+    await page.getByTestId("search-submit-button").click();
 
-  await expect(page.getByTestId("result-card")).toHaveCount(5);
-  await expect(page.getByTestId("search-load-more-button")).toBeVisible();
-  await expect(page.getByTestId("search-results-summary")).toContainText("更多结果");
+    await expect(page.getByTestId("result-card")).toHaveCount(5);
+    await expect(page.getByTestId("search-load-more-button")).toBeVisible();
+    await expect(page.getByTestId("search-results-summary")).toContainText("命中 5 条结果");
 
-  await page.getByTestId("search-load-more-button").click();
-  await expect(page.getByTestId("result-card")).toHaveCount(7);
-  await expect(page.getByTestId("search-load-more-button")).toHaveCount(0);
+    await page.getByTestId("search-load-more-button").click();
+    await expect(page.getByTestId("result-card")).toHaveCount(7);
+    await expect(page.getByTestId("search-load-more-button")).toHaveCount(0);
 
-  expect(searchRequests).toHaveLength(2);
-  expect(searchRequests[0]).toMatchObject({
-    text: "Revenue 46 percent",
-    top_k: 5,
-    filters: {
-      "visual_unit.kind": "document_page",
-      source_type: "pdf",
-      path_prefix: sourcePathPrefix,
-    },
-  });
-  expect(searchRequests[1]).toMatchObject({
-    text: "Revenue 46 percent",
-    cursor: "search:v1:5",
-    filters: {
-      "visual_unit.kind": "document_page",
-      source_type: "pdf",
-      path_prefix: sourcePathPrefix,
-    },
-  });
+    expect(searchRequests).toHaveLength(2);
+    expect(searchRequests[0]).toMatchObject({
+      text: "Revenue 46 percent",
+      top_k: 5,
+      filters: {
+        "visual_unit.kind": "document_page",
+        source_type: "pdf",
+        path_prefix: sourcePathPrefix,
+      },
+    });
+    expect(searchRequests[1]).toMatchObject({
+      text: "Revenue 46 percent",
+      cursor: "search:v1:5",
+      filters: {
+        "visual_unit.kind": "document_page",
+        source_type: "pdf",
+        path_prefix: sourcePathPrefix,
+      },
+    });
+  } finally {
+    await page.unroute(searchRoutePattern);
+    await page.unroute(detailRoutePattern);
+  }
   });
 
   test("search workspace rejects invalid time range filters before sending the request", async ({ page }) => {
-  await createLibrary(page, "search-invalid-time-range");
+  let searchRequestCount = 0;
+  let lastSearchRequestBody = null;
+  const requestListener = (request) => {
+    if (!request.url().includes("/api/search/text") || request.method() !== "POST") {
+      return;
+    }
+    searchRequestCount += 1;
+    lastSearchRequestBody = request.postDataJSON();
+  };
 
-  await page.getByTestId("search-text-input").fill("Revenue 46 percent");
-  await page.getByTestId("search-filter-time-range-start").fill("1000");
-  await page.getByTestId("search-filter-time-range-end").fill("1000");
-  await page.getByTestId("search-submit-button").click();
+  try {
+    await createLibrary(page, "search-invalid-time-range");
+    await importFixtureIntoCurrentLibrary(page);
+    page.on("request", requestListener);
+    searchRequestCount = 0;
+    lastSearchRequestBody = null;
 
-  await expect(page.getByTestId("search-error-notice")).toBeVisible();
-  await expect(page.getByTestId("search-error-code")).toHaveText("validation_failed");
-  await expect(page.getByTestId("search-error-message")).toContainText("时间范围过滤器");
+    await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+    await openSearchAdvancedFilters(page);
+    await page.getByTestId("search-filter-time-range-start").fill("1000");
+    await page.getByTestId("search-filter-time-range-end").fill("1000");
+    await page.getByTestId("search-submit-button").click();
+
+    await expect.poll(() => searchRequestCount).toBe(0);
+    expect(lastSearchRequestBody).toBeNull();
+    await expect(page.getByTestId("search-error-notice")).toBeVisible();
+    await expect(page.getByTestId("search-error-code")).toHaveText("validation_failed");
+    await expect(page.getByTestId("search-error-message")).toContainText("时间范围过滤器");
+  } finally {
+    page.off("request", requestListener);
+  }
+  });
+
+  test("all-libraries text scope stays searchable even when the current library is still empty", async ({
+    page,
+  }) => {
+    const readyLibraryName = await createLibrary(page, "search-scope-ready");
+    const readyLibraryId = await currentLibraryId(page);
+    await createLibrary(page, "search-scope-empty");
+    const emptyLibraryId = await currentLibraryId(page);
+    const librariesResponse = await page.request.get("/api/libraries");
+    expect(librariesResponse.ok()).toBeTruthy();
+    const librariesPayload = await librariesResponse.json();
+    const scopedLibraries = (librariesPayload?.data?.libraries ?? [])
+      .map((library) => {
+        if (library.id === readyLibraryId) {
+          return {
+            ...library,
+            counts: {
+              ...(library.counts ?? {}),
+              accepted_items: 6,
+              pending_jobs: 0,
+            },
+          };
+        }
+        if (library.id === emptyLibraryId) {
+          return {
+            ...library,
+            counts: {
+              ...(library.counts ?? {}),
+              accepted_items: 0,
+              pending_jobs: 0,
+            },
+          };
+        }
+        return library;
+      })
+      .sort((left, right) => {
+        if (left.id === emptyLibraryId) {
+          return -1;
+        }
+        if (right.id === emptyLibraryId) {
+          return 1;
+        }
+        return 0;
+      });
+    const searchRequests = [];
+    const librariesRoutePattern = "**/api/libraries";
+    const searchRoutePattern = "**/api/search/text";
+    const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+
+    await page.route(librariesRoutePattern, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            libraries: scopedLibraries,
+          },
+        }),
+      });
+    });
+    await page.route(searchRoutePattern, async (route) => {
+      const payload = route.request().postDataJSON();
+      searchRequests.push(payload);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            results: [
+              {
+                ...createMockSearchResult(0, "/tmp/search-fixtures/set-b/ready-report.pdf"),
+                library_id: readyLibraryId,
+              },
+            ],
+            next_cursor: null,
+            debug: {
+              backend: "qdrant",
+            },
+          },
+        }),
+      });
+    });
+
+    await page.route(detailRoutePattern, async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      const parts = pathname.split("/");
+      const libraryId = parts[parts.indexOf("libraries") + 1] ?? readyLibraryId;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            visual_unit: {
+              visual_unit_id: "vu_mock_0",
+              source_id: "src_mock_0",
+              source_path: "/tmp/search-fixtures/set-b/ready-report.pdf",
+              source_type: "pdf",
+              kind: "document_page",
+              locator: {
+                page: 1,
+                page_label: "1",
+              },
+            },
+            preview: {
+              url: "http://127.0.0.1:54210/mock-preview/0.png",
+            },
+            neighbor_context: null,
+            library_id: libraryId,
+          },
+        }),
+      });
+    });
+
+    try {
+      await page.reload();
+      await expect(page.getByTestId("library-select")).toHaveValue(emptyLibraryId);
+      await expect(page.getByTestId("search-submit-button")).toBeDisabled();
+
+      await page.getByTestId("search-scope-all-libraries").click();
+
+      await expect(page.getByTestId("search-submit-button")).toBeEnabled();
+      await expect(page.getByTestId("search-state-strip")).toHaveCount(0);
+      await expect(page.getByTestId("search-scope-bar")).not.toContainText("管理当前库");
+
+      await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+      await page.getByTestId("search-submit-button").click();
+
+      await expect(page.getByTestId("result-card")).toHaveCount(1);
+      await expect(page.getByTestId("search-result-library-strip")).toContainText(readyLibraryName);
+      await expect(page.getByTestId("search-result-card-library-pill")).toHaveCount(0);
+      await expect(page.getByTestId("detail-library-context")).toContainText(readyLibraryName);
+      await expect(page.getByTestId("detail-panel")).toContainText(readyLibraryName);
+      await expect(page.getByTestId("search-results-column")).toContainText("来自 1 个库");
+
+      await page.getByTestId("detail-open-hit-library-inventory").click();
+      await expect(page.getByTestId("inventory-panel")).toBeVisible();
+      await expect(page.getByTestId("library-select")).toHaveValue(readyLibraryId);
+
+      expect(searchRequests).toHaveLength(1);
+      expect(searchRequests[0]).toMatchObject({
+        text: "Revenue 46 percent",
+        search_scope: {
+          kind: "all_libraries",
+        },
+      });
+      expect(searchRequests[0].search_scope.library_id).toBeUndefined();
+    } finally {
+      await page.unroute(librariesRoutePattern);
+      await page.unroute(searchRoutePattern);
+      await page.unroute(detailRoutePattern);
+    }
+  });
+
+  test("all-libraries result focus chips regroup the reading flow without leaving search", async ({
+    page,
+  }) => {
+    const firstReadyLibraryName = await createLibrary(page, "cross-library-focus-a");
+    const firstReadyLibraryId = await currentLibraryId(page);
+    const secondReadyLibraryName = await createLibrary(page, "cross-library-focus-b");
+    const secondReadyLibraryId = await currentLibraryId(page);
+    await createLibrary(page, "cross-library-focus-empty");
+    const emptyLibraryId = await currentLibraryId(page);
+    const librariesResponse = await page.request.get("/api/libraries");
+    expect(librariesResponse.ok()).toBeTruthy();
+    const librariesPayload = await librariesResponse.json();
+    const scopedLibraries = (librariesPayload?.data?.libraries ?? [])
+      .map((library) => {
+        if (library.id === firstReadyLibraryId) {
+          return {
+            ...library,
+            counts: {
+              ...(library.counts ?? {}),
+              accepted_items: 6,
+              pending_jobs: 0,
+            },
+          };
+        }
+        if (library.id === secondReadyLibraryId) {
+          return {
+            ...library,
+            counts: {
+              ...(library.counts ?? {}),
+              accepted_items: 4,
+              pending_jobs: 0,
+            },
+          };
+        }
+        if (library.id === emptyLibraryId) {
+          return {
+            ...library,
+            counts: {
+              ...(library.counts ?? {}),
+              accepted_items: 0,
+              pending_jobs: 0,
+            },
+          };
+        }
+        return library;
+      })
+      .sort((left, right) => {
+        if (left.id === emptyLibraryId) {
+          return -1;
+        }
+        if (right.id === emptyLibraryId) {
+          return 1;
+        }
+        return 0;
+      });
+    const librariesRoutePattern = "**/api/libraries";
+    const searchRoutePattern = "**/api/search/text";
+    const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+
+    await page.route(librariesRoutePattern, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            libraries: scopedLibraries,
+          },
+        }),
+      });
+    });
+    await page.route(searchRoutePattern, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            results: [
+              {
+                ...createMockSearchResult(0, `/tmp/search-fixtures/${secondReadyLibraryId}/hit-0.pdf`),
+                library_id: secondReadyLibraryId,
+              },
+              {
+                ...createMockSearchResult(1, `/tmp/search-fixtures/${firstReadyLibraryId}/hit-1.pdf`),
+                library_id: firstReadyLibraryId,
+              },
+              {
+                ...createMockSearchResult(2, `/tmp/search-fixtures/${firstReadyLibraryId}/hit-2.pdf`),
+                library_id: firstReadyLibraryId,
+              },
+            ],
+            next_cursor: null,
+            debug: {
+              backend: "qdrant",
+            },
+          },
+        }),
+      });
+    });
+    await page.route(detailRoutePattern, async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      const parts = pathname.split("/");
+      const libraryId = parts[parts.indexOf("libraries") + 1] ?? secondReadyLibraryId;
+      const visualUnitId = parts.at(-1) ?? "vu_mock_0";
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            visual_unit: {
+              visual_unit_id: visualUnitId,
+              source_id: `src_${libraryId}`,
+              source_path: `/tmp/search-fixtures/${libraryId}/focused-report.pdf`,
+              source_type: "pdf",
+              kind: "document_page",
+              locator: {
+                page: 1,
+                page_label: "1",
+              },
+            },
+            preview: {
+              url: `http://127.0.0.1:54210/mock-preview/${libraryId}.png`,
+            },
+            neighbor_context: null,
+            library_id: libraryId,
+          },
+        }),
+      });
+    });
+
+    try {
+      await page.reload();
+      await page.getByTestId("search-scope-all-libraries").click();
+      await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+      await page.getByTestId("search-submit-button").click();
+
+      await expect(page.getByTestId("search-result-library-focus-all")).toHaveClass(/active/);
+      await expect(page.getByTestId("result-card")).toHaveCount(3);
+      await expect(page.getByTestId("search-result-library-group")).toHaveCount(2);
+      await expect(page.getByTestId("search-result-library-group-heading").nth(0)).toHaveText(
+        secondReadyLibraryName
+      );
+      await expect(page.getByTestId("search-result-library-group-heading").nth(1)).toHaveText(
+        firstReadyLibraryName
+      );
+      await expect(page.getByTestId("search-result-library-group-summary").nth(0)).toContainText(
+        "留在 Search 里先聚焦这一组"
+      );
+      await expect(page.getByTestId("search-result-card-library-pill")).toHaveCount(0);
+      await expect(
+        page.getByTestId(`search-result-library-group-focus-${firstReadyLibraryId}`)
+      ).toBeVisible();
+      await expect(
+        page.getByTestId(`search-result-library-group-open-inventory-${secondReadyLibraryId}`)
+      ).toBeVisible();
+      await expect(page.getByTestId("detail-hit-library-name")).toHaveText(secondReadyLibraryName);
+
+      await page.getByTestId(`search-result-library-group-focus-${firstReadyLibraryId}`).click();
+
+      await expect(page.getByTestId("result-card")).toHaveCount(2);
+      await expect(page.getByTestId("search-result-library-group")).toHaveCount(0);
+      await expect(page.getByTestId("search-result-card-library-pill")).toHaveCount(0);
+      await expect(page.getByTestId("search-results-summary")).toContainText(firstReadyLibraryName);
+      await expect(page.getByTestId("detail-hit-library-name")).toHaveText(firstReadyLibraryName);
+      await expect(page.getByTestId(`search-result-library-focus-${firstReadyLibraryId}`)).toHaveClass(
+        /active/
+      );
+      await expect(page.getByTestId("search-result-library-focus-all")).not.toHaveClass(/active/);
+
+      await page.getByTestId("search-result-library-focus-all").click();
+
+      await expect(page.getByTestId("result-card")).toHaveCount(3);
+      await expect(page.getByTestId("search-result-library-group")).toHaveCount(2);
+      await expect(page.getByTestId("search-result-library-focus-all")).toHaveClass(/active/);
+      await expect(page.getByTestId("search-results-summary")).toContainText("来自 2 个库");
+    } finally {
+      await page.unroute(librariesRoutePattern);
+      await page.unroute(searchRoutePattern);
+      await page.unroute(detailRoutePattern);
+    }
+  });
+
+  test("cross-library result reuse switches back into the hit library before opening a library-bound query mode", async ({
+    page,
+  }) => {
+    const readyLibraryName = await createLibrary(page, "cross-library-reuse-ready");
+    const readyLibraryId = await currentLibraryId(page);
+    await createLibrary(page, "cross-library-reuse-empty");
+    const emptyLibraryId = await currentLibraryId(page);
+    const librariesResponse = await page.request.get("/api/libraries");
+    expect(librariesResponse.ok()).toBeTruthy();
+    const librariesPayload = await librariesResponse.json();
+    const scopedLibraries = (librariesPayload?.data?.libraries ?? [])
+      .map((library) => {
+        if (library.id === readyLibraryId) {
+          return {
+            ...library,
+            counts: {
+              ...(library.counts ?? {}),
+              accepted_items: 6,
+              pending_jobs: 0,
+            },
+          };
+        }
+        if (library.id === emptyLibraryId) {
+          return {
+            ...library,
+            counts: {
+              ...(library.counts ?? {}),
+              accepted_items: 0,
+              pending_jobs: 0,
+            },
+          };
+        }
+        return library;
+      })
+      .sort((left, right) => {
+        if (left.id === emptyLibraryId) {
+          return -1;
+        }
+        if (right.id === emptyLibraryId) {
+          return 1;
+        }
+        return 0;
+      });
+    const librariesRoutePattern = "**/api/libraries";
+    const searchRoutePattern = "**/api/search/text";
+    const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+
+    await page.route(librariesRoutePattern, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            libraries: scopedLibraries,
+          },
+        }),
+      });
+    });
+    await page.route(searchRoutePattern, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            results: [
+              {
+                ...createMockSearchResult(0, "/tmp/search-fixtures/set-b/ready-report.pdf"),
+                library_id: readyLibraryId,
+              },
+            ],
+            next_cursor: null,
+            debug: {
+              backend: "qdrant",
+            },
+          },
+        }),
+      });
+    });
+
+    await page.route(detailRoutePattern, async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      const parts = pathname.split("/");
+      const libraryId = parts[parts.indexOf("libraries") + 1] ?? readyLibraryId;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            visual_unit: {
+              visual_unit_id: "vu_mock_0",
+              source_id: "src_mock_0",
+              source_path: "/tmp/search-fixtures/set-b/ready-report.pdf",
+              source_type: "pdf",
+              kind: "document_page",
+              locator: {
+                page: 1,
+                page_label: "1",
+              },
+            },
+            preview: {
+              url: "http://127.0.0.1:54210/mock-preview/0.png",
+            },
+            neighbor_context: null,
+            library_id: libraryId,
+          },
+        }),
+      });
+    });
+
+    try {
+      await page.reload();
+      await expect(page.getByTestId("library-select")).toHaveValue(emptyLibraryId);
+
+      await page.getByTestId("search-scope-all-libraries").click();
+      await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+      await page.getByTestId("search-submit-button").click();
+
+      await expect(page.getByTestId("detail-library-context")).toContainText(readyLibraryName);
+      await expect(page.getByTestId("detail-hit-library-summary")).toContainText(
+        "复用结果时会自动切到命中库"
+      );
+
+      await page.getByTestId("result-card").first().getByTestId("use-as-query-document-button").click();
+
+      await expect(page.getByTestId("library-select")).toHaveValue(readyLibraryId);
+      await expect(page.getByTestId("search-scope-library")).toHaveClass(/active/);
+      await expect(page.getByTestId("search-scope-all-libraries")).not.toHaveClass(/active/);
+      await expect(page.getByTestId("search-mode-document")).toHaveClass(/active/);
+      await expect(page.getByTestId("query-document-preview")).toBeVisible();
+      await expect(page.getByTestId("query-document-range-card")).toContainText(
+        "当前使用库内 document_page；查询范围固定为该页面对应的单页范围。"
+      );
+    } finally {
+      await page.unroute(librariesRoutePattern);
+      await page.unroute(searchRoutePattern);
+      await page.unroute(detailRoutePattern);
+    }
+  });
+
+  test("search failure with content-type details points directly to current library overrides", async ({
+    page,
+  }) => {
+    const searchRoutePattern = "**/search/text";
+
+    await createLibrary(page, "search-config-failure");
+    await importFixtureIntoCurrentLibrary(page);
+
+    await page.route(searchRoutePattern, async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 503,
+        json: {
+          error: {
+            code: "content_types_unavailable",
+            message: "部分内容类型当前未完成配置。",
+            details: {
+              content_types: [
+                {
+                  content_type: "image",
+                  status: "runtime_unavailable",
+                  job: {
+                    job_id: "job_config_wait",
+                    phase: "resolve_models",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      });
+    });
+
+    try {
+      await page.getByTestId("search-text-input").fill("Revenue 46 percent");
+      await page.getByTestId("search-submit-button").click();
+
+      await expect(page.getByTestId("search-error-notice")).toBeVisible();
+      await expect(page.getByTestId("search-error-details")).toContainText("图片");
+      await expect(page.getByTestId("search-error-open-library-overrides")).toBeVisible();
+      await page.getByTestId("search-error-open-library-overrides").click();
+
+      await expect(page.getByTestId("settings-workspace")).toBeVisible();
+      await expect(page.getByTestId("settings-stage-title")).toHaveText("当前库覆盖");
+      await expect(page.getByTestId("library-content-types-panel")).toBeVisible();
+    } finally {
+      await page.unroute(searchRoutePattern);
+    }
+  });
+
+  test("empty search results stay in the stage and read as a miss instead of a prep failure", async ({
+    page,
+  }) => {
+    const searchRoutePattern = "**/search/text";
+
+    await createLibrary(page, "search-empty-miss");
+    await importFixtureIntoCurrentLibrary(page);
+
+    await page.route(searchRoutePattern, async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        json: {
+          data: {
+            results: [],
+            next_cursor: null,
+            unsupported_content_types: [],
+          },
+        },
+      });
+    });
+
+    try {
+      await page.getByTestId("search-text-input").fill("no matching snippet");
+      await page.getByTestId("search-submit-button").click();
+
+      await expect(page.getByTestId("search-empty-notice")).toBeVisible();
+      await expect(page.getByTestId("search-empty-notice")).toContainText(
+        "当前库可搜索，但本次没有返回结果"
+      );
+      await expect(page.getByTestId("search-results-column")).toHaveCount(0);
+    } finally {
+      await page.unroute(searchRoutePattern);
+    }
   });
 
   test("invalid import paths show explicit rejection feedback", async ({ page }) => {
@@ -860,13 +2590,12 @@ export function registerSearchTextControlScenarios() {
 export function registerSearchImageScenarios() {
   test("image mode uploads a query image and returns real results", async ({ page }) => {
   await createLibrary(page, "image-search");
-  await expect(page.getByTestId("run-demo-button")).toBeEnabled();
-  await page.getByTestId("run-demo-button").click();
-  await waitForFirstJobCompleted(page);
+  await importFixtureIntoCurrentLibrary(page);
 
   await page.getByTestId("search-mode-image").click();
   await page.getByTestId("query-image-input").setInputFiles(fixtureImagePath);
   await expect(page.getByTestId("query-image-preview")).toBeVisible();
+  await mockImageSearchResults(page);
 
   await page.getByTestId("search-submit-button").click();
 
@@ -879,14 +2608,13 @@ export function registerSearchImageScenarios() {
 
   test("image mode can paste a query image like a search box", async ({ page }) => {
   await createLibrary(page, "image-paste-search");
-  await expect(page.getByTestId("run-demo-button")).toBeEnabled();
-  await page.getByTestId("run-demo-button").click();
-  await waitForFirstJobCompleted(page);
+  await importFixtureIntoCurrentLibrary(page);
 
   await page.getByTestId("search-mode-image").click();
   await pasteImageIntoQueryTarget(page, fixtureImagePath);
   await expect(page.getByTestId("query-image-preview")).toBeVisible();
   await expect(page.getByTestId("query-image-card")).toContainText("待上传");
+  await mockImageSearchResults(page);
 
   await page.getByTestId("search-submit-button").click();
 
@@ -899,9 +2627,12 @@ export function registerSearchImageScenarios() {
 
   test("image mode can reuse a library image object as the query image", async ({ page }) => {
   await createLibrary(page, "image-library-object");
-  await expect(page.getByTestId("run-demo-button")).toBeEnabled();
-  await page.getByTestId("run-demo-button").click();
-  await waitForFirstJobCompleted(page);
+  await importFixtureIntoCurrentLibrary(page);
+  await page.getByTestId("search-mode-image").click();
+  await page.getByTestId("query-image-input").setInputFiles(fixtureImagePath);
+  await expect(page.getByTestId("query-image-preview")).toBeVisible();
+  await mockImageSearchResults(page);
+  await page.getByTestId("search-submit-button").click();
 
   const imageResult = page.locator('[data-testid="result-card"][data-kind="image"]').first();
   await expect(imageResult).toBeVisible({ timeout: 2 * 60 * 1000 });
@@ -930,6 +2661,24 @@ export function registerSearchImageScenarios() {
     await page.getByTestId("search-mode-image").click();
     await page.getByTestId("query-image-input").setInputFiles(fixtureImagePath);
     await expect(page.getByTestId("query-image-preview")).toBeVisible();
+    await mockImageSearchResults(page, [
+      {
+        visual_unit_id: "vu_image_document_page_mock_0",
+        source_id: "src_image_document_page_mock_0",
+        preview: {
+          url: "http://127.0.0.1:54210/mock-preview/document-page-image-0.png",
+        },
+        source_path: pdfPath,
+        source_type: "pdf",
+        kind: "document_page",
+        locator: {
+          page: 1,
+          page_label: "1",
+        },
+        cursor: "search:v1:image-document-page:1",
+        score: 100,
+      },
+    ]);
     await page.getByTestId("search-submit-button").click();
 
     const documentPageResult = page.locator('[data-testid="result-card"][data-kind="document_page"]').first();
@@ -950,22 +2699,18 @@ export function registerSearchImageScenarios() {
   }
   });
 
-  test("image mode before import shows not_ready instead of an empty result", async ({ page }) => {
+  test("image mode before import keeps submit disabled and points to import prep", async ({ page }) => {
   await createLibrary(page, "image-not-ready");
 
   await page.getByTestId("search-mode-image").click();
   await page.getByTestId("query-image-input").setInputFiles(fixtureImagePath);
   await expect(page.getByTestId("query-image-preview")).toBeVisible();
-
-  await page.getByTestId("search-submit-button").click();
-
-  await expect(page.getByTestId("search-error-notice")).toBeVisible();
-  await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
-  await expect(page.getByTestId("search-error-message")).toContainText("active index");
+  await expectSearchRequiresContent(page);
   });
 
   test("image mode rejects non-image query uploads with explicit feedback", async ({ page }) => {
   await createLibrary(page, "image-invalid-upload");
+  await prepareSearchableLibrary(page);
 
   await page.getByTestId("search-mode-image").click();
   await page.getByTestId("query-image-input").setInputFiles(invalidQueryUploadPath);
@@ -1081,7 +2826,7 @@ export function registerSearchVideoScenarios() {
   }
   });
 
-  test("video mode before import shows not_ready instead of an empty result", async ({ page }) => {
+  test("video mode before import keeps submit disabled and points to import prep", async ({ page }) => {
   const fixtures = createTempVideoSearchFixtures();
   try {
     await createLibrary(page, "video-not-ready");
@@ -1089,12 +2834,7 @@ export function registerSearchVideoScenarios() {
     await page.getByTestId("search-mode-video").click();
     await page.getByTestId("query-video-input").setInputFiles(fixtures.videoPath);
     await expect(page.getByTestId("query-video-preview")).toBeVisible();
-
-    await page.getByTestId("search-submit-button").click();
-
-    await expect(page.getByTestId("search-error-notice")).toBeVisible();
-    await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
-    await expect(page.getByTestId("search-error-message")).toContainText("active index");
+    await expectSearchRequiresContent(page);
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
@@ -1102,6 +2842,7 @@ export function registerSearchVideoScenarios() {
 
   test("video mode rejects non-video query uploads with explicit feedback", async ({ page }) => {
   await createLibrary(page, "video-invalid-upload");
+  await prepareSearchableLibrary(page);
 
   await page.getByTestId("search-mode-video").click();
   await page.getByTestId("query-video-input").setInputFiles(invalidQueryUploadPath);
@@ -1208,7 +2949,7 @@ export function registerSearchDocumentScenarios() {
   }
   });
 
-  test("document mode before import shows not_ready instead of an empty result", async ({ page }) => {
+  test("document mode before import keeps submit disabled and points to import prep", async ({ page }) => {
   const fixtures = createTempDocumentSearchFixtures();
   try {
     await createLibrary(page, "document-not-ready");
@@ -1216,12 +2957,7 @@ export function registerSearchDocumentScenarios() {
     await page.getByTestId("search-mode-document").click();
     await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);
     await expect(page.getByTestId("query-document-preview")).toBeVisible();
-
-    await page.getByTestId("search-submit-button").click();
-
-    await expect(page.getByTestId("search-error-notice")).toBeVisible();
-    await expect(page.getByTestId("search-error-code")).toHaveText("not_ready");
-    await expect(page.getByTestId("search-error-message")).toContainText("active index");
+    await expectSearchRequiresContent(page);
   } finally {
     fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
   }
@@ -1229,6 +2965,7 @@ export function registerSearchDocumentScenarios() {
 
   test("document mode rejects non-pdf query uploads with explicit feedback", async ({ page }) => {
   await createLibrary(page, "document-invalid-upload");
+  await prepareSearchableLibrary(page);
 
   await page.getByTestId("search-mode-document").click();
   await page.getByTestId("query-document-input").setInputFiles(invalidQueryUploadPath);
@@ -1243,11 +2980,76 @@ export function registerSearchDocumentScenarios() {
 }
 
 export function registerSourceManagementScenarios() {
+  test("inventory workspace explains search readiness from source-root health", async ({ page }) => {
+    const fixtures = createTempSourceManagementFixtures();
+    try {
+      await createLibrary(page, "inventory-health");
+      const libraryId = await currentLibraryId(page);
+
+      await openInventoryWorkspace(page);
+      await expect(page.getByTestId("inventory-library-readiness")).toContainText(
+        "尚未接入来源根"
+      );
+      await expect(page.getByTestId("inventory-library-root-strip")).toContainText("还没有来源根");
+
+      await openSourcePreparationPanel(page);
+      await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
+      await page.getByTestId("source-root-submit-button").click();
+
+      await openInventoryWorkspace(page);
+      await expect(page.getByTestId("inventory-library-readiness")).toContainText("等待内容");
+      const rootHealthCard = page
+        .getByTestId("inventory-library-root-card")
+        .filter({ hasText: fixtures.tempDir });
+      await expect(rootHealthCard).toContainText("监视中");
+
+      const previousJobId = await latestJobId(page, libraryId);
+      await openSourcePreparationPanel(page);
+      await sourceRootCard(page, fixtures.tempDir).locator("[data-source-root-refresh-id]").click();
+      await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+
+      await openInventoryWorkspace(page);
+      await expect(page.getByTestId("inventory-library-readiness")).toContainText("可搜索");
+      await expect(page.getByTestId("inventory-library-metrics")).toContainText("启用来源根");
+      await expect(rootHealthCard).toContainText("监视中");
+    } finally {
+      fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("source preparation stays open after the first refresh makes the library searchable", async ({
+    page,
+  }) => {
+    const fixtures = createTempSourceManagementFixtures();
+    try {
+      await createLibrary(page, "source-prep-persistence");
+      const libraryId = await currentLibraryId(page);
+
+      await openSourcePreparationPanel(page);
+      await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
+      await page.getByTestId("source-root-submit-button").click();
+
+      const rootCard = sourceRootCard(page, fixtures.tempDir);
+      await expect(rootCard).toBeVisible();
+
+      const previousJobId = await latestJobId(page, libraryId);
+      await rootCard.locator("[data-source-root-refresh-id]").click();
+      await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+
+      await expect(page.getByTestId("source-root-form")).toBeVisible();
+      await expect(rootCard).toContainText("最近动作：refresh");
+    } finally {
+      fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("source management can create edit toggle refresh rescan and filter inventory", async ({ page }) => {
   const fixtures = createTempSourceManagementFixtures();
   try {
     await createLibrary(page, "source-management");
+    const libraryId = await currentLibraryId(page);
 
+    await openSourcePreparationPanel(page);
     await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
     await page.getByTestId("source-root-submit-button").click();
 
@@ -1257,25 +3059,37 @@ export function registerSourceManagementScenarios() {
     await expect(page.getByTestId("library-refresh-button")).toBeEnabled();
     await expect(page.getByTestId("library-rescan-button")).toBeEnabled();
 
-    let previousJobId = await latestJobId(page);
+    let previousJobId = await latestJobId(page, libraryId);
     await rootCard.locator("[data-source-root-refresh-id]").click();
-    await waitForNewLatestJobCompleted(page, previousJobId);
-    await expect(rootCard).toContainText("Last action: refresh");
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+    await expect(rootCard).toContainText("最近动作：refresh");
 
     await openInventoryWorkspace(page);
     await expect(page.getByTestId("inventory-summary")).toBeVisible();
+    await expect(page.getByTestId("inventory-action-focus-source-prep")).toBeVisible();
+    await expect(page.getByTestId("inventory-action-refresh-library")).toBeVisible();
+    await expect(page.getByTestId("inventory-filter-pills")).toContainText("当前显示全部来源");
 
     const imageCard = librarySourceCard(page, "chart.png");
     const pdfCard = librarySourceCard(page, "report.pdf");
     await expect(page.getByTestId("library-source-card")).toHaveCount(2);
-    await expect(imageCard).toContainText("visual units 1");
-    await expect(pdfCard).toContainText("visual units 2");
+    await expect(imageCard).toContainText("1 个对象");
+    await expect(pdfCard).toContainText("2 个对象");
+    await imageCard.locator("button").click();
+    await expect(page.getByTestId("inventory-detail-preview")).toBeVisible();
+    await expect(page.getByTestId("inventory-preview-link")).toBeVisible();
+    await page.getByTestId("inventory-use-as-query-image-button").click();
+    await expect(page.getByTestId("search-panel")).toBeVisible();
+    await expect(page.getByTestId("query-image-preview")).toBeVisible();
+    await openInventoryWorkspace(page);
 
-    previousJobId = await latestJobId(page);
+    await openSourcePreparationPanel(page);
+    previousJobId = await latestJobId(page, libraryId);
     await rootCard.locator("[data-source-root-rescan-id]").click();
-    await waitForNewLatestJobCompleted(page, previousJobId);
-    await expect(rootCard).toContainText("Last action: rescan");
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+    await expect(rootCard).toContainText("最近动作：rescan");
 
+    await openInventoryWorkspace(page);
     await page.getByTestId("source-filter-type").selectOption("pdf");
     await expect(page.getByTestId("library-source-card")).toHaveCount(1);
     await expect(pdfCard).toBeVisible();
@@ -1287,47 +3101,53 @@ export function registerSourceManagementScenarios() {
     await page.getByTestId("source-filter-type").selectOption("");
     await expect(page.getByTestId("library-source-card")).toHaveCount(2);
 
+    await openSourcePreparationPanel(page);
     await rootCard.locator("[data-source-root-edit-id]").click();
     await page.getByTestId("source-root-exclude-globs-input").fill("chart.png");
     await page.getByTestId("source-root-submit-button").click();
-    await expect(rootCard).toContainText("exclude 1");
+    await expect(rootCard).toContainText("排除规则 1");
 
-    previousJobId = await latestJobId(page);
+    previousJobId = await latestJobId(page, libraryId);
     await page.getByTestId("library-refresh-button").click();
-    await waitForNewLatestJobCompleted(page, previousJobId);
-    await expect(rootCard).toContainText("Last action: refresh");
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+    await expect(rootCard).toContainText("最近动作：refresh");
 
+    await openInventoryWorkspace(page);
     await page.getByTestId("source-filter-status").selectOption("active");
     await expect(page.getByTestId("library-source-card")).toHaveCount(1);
-    await expect(pdfCard).toContainText("active");
+    await expect(pdfCard).toContainText("正常");
 
     await page.getByTestId("source-filter-status").selectOption("out_of_scope");
     await expect(page.getByTestId("library-source-card")).toHaveCount(1);
     await expect(imageCard).toContainText("rule_excluded");
 
     await page.getByTestId("source-filter-status").selectOption("");
+    await openSourcePreparationPanel(page);
     await rootCard.locator("[data-source-root-toggle-id]").click();
     await expect(rootCard).toContainText("disabled");
     await expect(rootCard.locator("[data-source-root-refresh-id]")).toBeDisabled();
 
+    await openInventoryWorkspace(page);
     await page.getByTestId("source-filter-status").selectOption("out_of_scope");
     await expect(page.getByTestId("library-source-card")).toHaveCount(2);
     await expect(imageCard).toContainText("source_root_disabled");
     await expect(pdfCard).toContainText("source_root_disabled");
 
     await page.getByTestId("source-filter-status").selectOption("");
+    await openSourcePreparationPanel(page);
     await rootCard.locator("[data-source-root-toggle-id]").click();
     await expect(rootCard).toContainText("watching");
     await expect(rootCard.locator("[data-source-root-refresh-id]")).toBeEnabled();
 
-    previousJobId = await latestJobId(page);
+    previousJobId = await latestJobId(page, libraryId);
     await page.getByTestId("library-rescan-button").click();
-    await waitForNewLatestJobCompleted(page, previousJobId);
-    await expect(rootCard).toContainText("Last action: rescan");
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+    await expect(rootCard).toContainText("最近动作：rescan");
 
+    await openInventoryWorkspace(page);
     await page.getByTestId("source-filter-status").selectOption("active");
     await expect(page.getByTestId("library-source-card")).toHaveCount(1);
-    await expect(pdfCard).toContainText("active");
+    await expect(pdfCard).toContainText("正常");
 
     await page.getByTestId("source-filter-status").selectOption("out_of_scope");
     await expect(page.getByTestId("library-source-card")).toHaveCount(1);
@@ -1341,39 +3161,40 @@ export function registerSourceManagementScenarios() {
   const fixtures = createTempSourceManagementFixtures();
   try {
     await createLibrary(page, "source-management-watcher");
+    const libraryId = await currentLibraryId(page);
 
+    await openSourcePreparationPanel(page);
     await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
     await page.getByTestId("source-root-submit-button").click();
 
     const rootCard = sourceRootCard(page, fixtures.tempDir);
     await expect(rootCard).toBeVisible();
 
-    let previousJobId = await latestJobId(page);
+    let previousJobId = await latestJobId(page, libraryId);
     await rootCard.locator("[data-source-root-refresh-id]").click();
-    await waitForNewLatestJobCompleted(page, previousJobId);
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
 
     await openInventoryWorkspace(page);
 
     const pdfCard = librarySourceCard(page, "report.pdf");
     const addedImageCard = librarySourceCard(page, "new-chart.png");
     await expect(page.getByTestId("library-source-card")).toHaveCount(2);
-    await expect(pdfCard).toContainText("visual units 2");
+    await expect(pdfCard).toContainText("2 个对象");
 
-    previousJobId = await latestJobId(page);
+    previousJobId = await latestJobId(page, libraryId);
     fs.copyFileSync(fixtureImagePath, fixtures.addedImagePath);
-    await waitForNewLatestJobCompleted(page, previousJobId);
-    await expect(rootCard).toContainText("Last action: refresh");
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
     await expect(page.getByTestId("library-source-card")).toHaveCount(3);
-    await expect(addedImageCard).toContainText("visual units 1");
+    await expect(addedImageCard).toContainText("1 个对象");
 
-    previousJobId = await latestJobId(page);
+    previousJobId = await latestJobId(page, libraryId);
     writeSourceManagementPdf(fixtures.pdfPath, 1);
-    await waitForNewLatestJobCompleted(page, previousJobId);
-    await expect(pdfCard).toContainText("visual units 1");
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+    await expect(pdfCard).toContainText("1 个对象");
 
-    previousJobId = await latestJobId(page);
+    previousJobId = await latestJobId(page, libraryId);
     fs.rmSync(fixtures.addedImagePath, { force: true });
-    await waitForNewLatestJobCompleted(page, previousJobId);
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
 
     await page.getByTestId("source-filter-status").selectOption("invalidated");
     await expect(page.getByTestId("library-source-card")).toHaveCount(1);
@@ -1388,8 +3209,9 @@ export function registerInventoryWorkspaceScenarios() {
   test("inventory workspace stays usable on narrow screens", async ({ page }) => {
   const fixtures = createTempSourceManagementFixtures();
   try {
-    await page.setViewportSize({ width: 820, height: 1280 });
+    await page.setViewportSize({ width: 390, height: 844 });
     await createLibrary(page, "inventory-narrow");
+    const libraryId = await currentLibraryId(page);
 
     await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
     await page.getByTestId("source-root-submit-button").click();
@@ -1397,13 +3219,21 @@ export function registerInventoryWorkspaceScenarios() {
     const rootCard = sourceRootCard(page, fixtures.tempDir);
     await expect(rootCard).toBeVisible();
 
-    const previousJobId = await latestJobId(page);
+    const previousJobId = await latestJobId(page, libraryId);
     await rootCard.locator("[data-source-root-refresh-id]").click();
-    await waitForNewLatestJobCompleted(page, previousJobId);
+    await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
 
     await openInventoryWorkspace(page);
     await expect(page.getByTestId("inventory-summary")).toBeVisible();
-    await expect(page.getByTestId("library-source-card").first()).toBeVisible();
+    const firstSourceCard = page.getByTestId("library-source-card").first();
+    await expect(firstSourceCard).toBeVisible();
+    await firstSourceCard.locator("button").click();
+    await expect(page.getByTestId("inventory-detail-sheet-close-button")).toBeVisible();
+    await expect(page.getByTestId("inventory-detail-preview")).toBeVisible();
+    await page.getByTestId("inventory-detail-sheet-close-button").click();
+    await expect(page.getByTestId("inventory-detail-panel")).not.toBeVisible();
+    await firstSourceCard.locator("button").click();
+    await expect(page.getByTestId("inventory-detail-panel")).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
     ).toBe(true);

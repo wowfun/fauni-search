@@ -17,6 +17,7 @@ import type {
   LibraryObjectQueryImage,
   LibraryObjectQueryVideo,
   LibrarySnapshot,
+  MaintenanceActionData,
   ModelCatalogData,
   ModelCatalogEntry,
   ModelTestData,
@@ -31,12 +32,18 @@ import type {
   ResolvedModelSelectionPayload,
   RuntimeHealthData,
   SearchRequestSnapshot,
+  SearchResultItem,
+  SearchMode,
+  SearchScopeKind,
   SearchOutcomeState,
+  SourceActionData,
   SourceInventoryItem,
   SourceRootRulesPayload,
   SourceRootSnapshot,
   SourceRootsListData,
+  SettingsSection,
   SourcesListData,
+  UtilityDrawerSection,
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
@@ -61,11 +68,6 @@ interface EndpointConfig {
   uiRoot: string;
 }
 
-interface DemoFixture {
-  path: string;
-  query: string;
-}
-
 interface FocusedEditableState {
   id: string;
   value: string | null;
@@ -86,11 +88,6 @@ const endpoints: EndpointConfig = {
   sidecarHealth: `http://${requireEnv("SIDECAR_HOST")}:${requireEnv("SIDECAR_PORT")}/health`,
   qdrantCollections: `${requireEnv("QDRANT_URL").replace(/\/$/, "")}/collections`,
   uiRoot: `http://${requireEnv("UI_HOST")}:${requireEnv("UI_PORT")}/`,
-};
-
-const demoFixture: DemoFixture = {
-  path: "tests/fixtures/tatdqa-page-images/images/tatdqa-page-0001.png",
-  query: "What is the percentage change in the net cash provided from operating activities?",
 };
 
 const JOB_POLL_INTERVAL_MS = 1000;
@@ -120,6 +117,7 @@ const state: AppState = {
   vectorSpaceDiagnostics: null,
   runtimeHealth: null,
   activeWorkspace: "search",
+  selectedSettingsSection: "content-types",
   inventoryFilters: {
     sourceRootId: "",
     sourceType: "",
@@ -139,9 +137,22 @@ const state: AppState = {
     out_of_scope: 0,
   },
   librarySources: [],
+  selectedInventorySourceId: "",
   libraryDisplayNameDraft: "",
+  libraryManagementDisplayNameDraft: "",
+  libraryManagementDraftLibraryId: "",
   libraryIdDraft: "",
   selectedLibraryId: "",
+  searchScope: "library",
+  createLibraryPopoverOpen: false,
+  manageLibraryPopoverOpen: false,
+  utilityDrawerOpen: false,
+  utilityDrawerSection: "status",
+  searchFiltersPanelOpen: false,
+  searchPreparationDisclosureOpen: false,
+  searchJobsDisclosureOpen: false,
+  searchDetailSheetOpen: false,
+  inventoryDetailSheetOpen: false,
   editingSourceRootId: "",
   sourceRootPathDraft: "",
   sourceRootEnabledDraft: true,
@@ -171,7 +182,10 @@ const state: AppState = {
   queryDocumentEndPageDraft: "",
   importReceipt: null,
   selectedVisualUnit: null,
+  selectedVisualUnitLibraryId: "",
   searchOutcome: null,
+  searchInFlight: false,
+  searchResultLibraryFocusId: "",
   lastSearchRequest: null,
   editingProviderId: "",
   providerEnabledDraft: true,
@@ -201,7 +215,7 @@ const state: AppState = {
 };
 
 const EDITABLE_TARGET_SELECTOR = 'input, textarea, [contenteditable="true"], [contenteditable=""], select';
-let lastRenderedDetailSignature: string | null = null;
+let lastRenderedDetailPanelKey: string | null = null;
 
 const root = document.querySelector<HTMLElement>("#app");
 
@@ -244,6 +258,7 @@ function selectedVisualUnitDetailSignature(): string | null {
 
   const visualUnit = state.selectedVisualUnit.visual_unit;
   return JSON.stringify({
+    library_id: state.selectedVisualUnitLibraryId || state.selectedLibraryId || null,
     visual_unit_id: visualUnit.visual_unit_id,
     source_id: visualUnit.source_id,
     source_path: visualUnit.source_path,
@@ -253,6 +268,26 @@ function selectedVisualUnitDetailSignature(): string | null {
     preview_url: state.selectedVisualUnit.preview?.url ?? null,
     neighbor_context: state.selectedVisualUnit.neighbor_context ?? null,
   });
+}
+
+function currentDetailPanelRenderKey(): string | null {
+  const detailSignature = selectedVisualUnitDetailSignature();
+  if (!detailSignature) {
+    return null;
+  }
+
+  return JSON.stringify({
+    detailSignature,
+    searchDetailSheetOpen: state.searchDetailSheetOpen,
+  });
+}
+
+function searchDetailSheetIsOpen() {
+  return Boolean(state.selectedVisualUnit && state.searchDetailSheetOpen);
+}
+
+function inventoryDetailSheetIsOpen() {
+  return Boolean(selectedInventorySource() && state.inventoryDetailSheetOpen);
 }
 
 function captureFocusedEditableState(): FocusedEditableState | null {
@@ -344,6 +379,39 @@ function selectedLibrary(): LibrarySnapshot | null {
   return state.libraries.find((library) => library.id === state.selectedLibraryId) ?? null;
 }
 
+function libraryById(libraryId: string | null | undefined): LibrarySnapshot | null {
+  if (!libraryId) {
+    return null;
+  }
+  return state.libraries.find((library) => library.id === libraryId) ?? null;
+}
+
+function selectedVisualUnitOriginLibraryId(): string {
+  return state.selectedVisualUnitLibraryId || state.selectedLibraryId || "";
+}
+
+function allLibrariesTextScopeActive() {
+  return state.searchScope === "all_libraries" && state.searchMode === "text";
+}
+
+function searchScopeLabel(): string {
+  if (state.searchScope === "all_libraries") {
+    return `所有库 · ${state.libraries.length} 个库`;
+  }
+  const library = selectedLibrary();
+  return library ? `当前库 · ${libraryDisplayName(library)}` : "当前库";
+}
+
+function searchScopeRequestPayload() {
+  if (state.searchScope === "all_libraries") {
+    return { kind: "all_libraries" };
+  }
+  return {
+    kind: "library",
+    library_id: state.selectedLibraryId,
+  };
+}
+
 function libraryDisplayName(
   library: Pick<LibrarySnapshot, "display_name" | "id"> | null | undefined
 ): string {
@@ -351,6 +419,801 @@ function libraryDisplayName(
     return "";
   }
   return library.display_name?.trim() || library.id;
+}
+
+function libraryIsArchived(
+  library: Pick<LibrarySnapshot, "lifecycle_state"> | null | undefined
+): boolean {
+  return library?.lifecycle_state === "archived";
+}
+
+function libraryLifecycleLabel(
+  library: Pick<LibrarySnapshot, "lifecycle_state"> | null | undefined
+): string {
+  return libraryIsArchived(library) ? "已归档" : "活跃";
+}
+
+function libraryLifecyclePillClass(
+  library: Pick<LibrarySnapshot, "lifecycle_state"> | null | undefined
+): string {
+  return libraryIsArchived(library) ? "muted" : "ready";
+}
+
+function contentTypeDisplayName(contentType: string) {
+  switch (contentType) {
+    case "text":
+      return "文本";
+    case "image":
+      return "图片";
+    case "video":
+      return "视频";
+    case "document":
+      return "文档";
+    default:
+      return contentType;
+  }
+}
+
+function sourceTypeDisplayName(sourceType: string) {
+  switch (sourceType) {
+    case "image":
+      return "图片";
+    case "pdf":
+      return "PDF";
+    case "video":
+      return "视频";
+    default:
+      return sourceType;
+  }
+}
+
+function visualUnitKindDisplayName(kind: string) {
+  switch (kind) {
+    case "image":
+      return "图片";
+    case "document_page":
+      return "文档页";
+    case "video_segment":
+      return "视频片段";
+    default:
+      return kind.replaceAll("_", " ");
+  }
+}
+
+function sourceStatusDisplayName(status: string) {
+  switch (status) {
+    case "active":
+      return "正常";
+    case "invalidated":
+      return "已失效";
+    case "out_of_scope":
+      return "超出范围";
+    default:
+      return status.replaceAll("_", " ");
+  }
+}
+
+function modelTestModalityDisplayName(modality: ModelTestModality | string | "") {
+  switch (modality) {
+    case "text":
+      return "文本";
+    case "image":
+      return "图片";
+    default:
+      return modality || "未选择";
+  }
+}
+
+function workspaceDisplayName(workspace: WorkspaceKind) {
+  switch (workspace) {
+    case "inventory":
+      return "库管理";
+    case "settings":
+      return "设置";
+    default:
+      return "搜索";
+  }
+}
+
+function searchModeDisplayName(mode: SearchMode) {
+  switch (mode) {
+    case "image":
+      return "图片";
+    case "video":
+      return "视频";
+    case "document":
+      return "文档";
+    default:
+      return "文本";
+  }
+}
+
+function renderUiIcon(
+  kind:
+    | "search"
+    | "library"
+    | "tools"
+    | "settings"
+    | "content-types"
+    | "override"
+    | "providers"
+    | "experiment"
+    | "diagnostics"
+    | "filter"
+    | "image"
+    | "video"
+    | "document"
+) {
+  const path =
+    kind === "search"
+      ? '<circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 5 5"></path>'
+      : kind === "library"
+        ? '<path d="M4 5.5h16"></path><path d="M6 5.5v13.5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5.5"></path><path d="M9 5.5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1.5"></path>'
+        : kind === "tools"
+          ? '<path d="M12 3v4"></path><path d="M12 17v4"></path><path d="M3 12h4"></path><path d="M17 12h4"></path><path d="m5.6 5.6 2.8 2.8"></path><path d="m15.6 15.6 2.8 2.8"></path><path d="m18.4 5.6-2.8 2.8"></path><path d="m8.4 15.6-2.8 2.8"></path>'
+          : kind === "settings"
+            ? '<circle cx="12" cy="12" r="3.2"></circle><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1 1 0 0 1 0 1.4l-1.1 1.1a1 1 0 0 1-1.4 0l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9v.3a1 1 0 0 1-1 1h-1.6a1 1 0 0 1-1-1v-.2a1 1 0 0 0-.7-1 1 1 0 0 0-1.1.2l-.1.1a1 1 0 0 1-1.4 0l-1.1-1.1a1 1 0 0 1 0-1.4l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a1 1 0 0 1-1-1v-1.6a1 1 0 0 1 1-1h.2a1 1 0 0 0 1-.7 1 1 0 0 0-.2-1.1l-.1-.1a1 1 0 0 1 0-1.4L6 5.3a1 1 0 0 1 1.4 0l.1.1a1 1 0 0 0 1.1.2H9a1 1 0 0 0 .6-.9V4.4a1 1 0 0 1 1-1h1.6a1 1 0 0 1 1 1v.2a1 1 0 0 0 .7 1 1 1 0 0 0 1.1-.2l.1-.1a1 1 0 0 1 1.4 0L19 6.4a1 1 0 0 1 0 1.4l-.1.1a1 1 0 0 0-.2 1.1V9c0 .4.2.8.6.9h.3a1 1 0 0 1 1 1v1.6a1 1 0 0 1-1 1h-.2a1 1 0 0 0-1 .7z"></path>'
+            : kind === "content-types"
+              ? '<rect x="4" y="4" width="6" height="6" rx="1.2"></rect><rect x="14" y="4" width="6" height="6" rx="1.2"></rect><rect x="4" y="14" width="6" height="6" rx="1.2"></rect><rect x="14" y="14" width="6" height="6" rx="1.2"></rect>'
+              : kind === "override"
+                ? '<path d="M12 4 4 8l8 4 8-4-8-4Z"></path><path d="m4 12 8 4 8-4"></path><path d="m4 16 8 4 8-4"></path>'
+                : kind === "providers"
+                  ? '<path d="M9 7h6"></path><path d="M7.5 10.5h9"></path><path d="M6.5 14h11"></path><path d="M8 18h8"></path><path d="M5 7h.01"></path><path d="M19 10.5h.01"></path><path d="M5 14h.01"></path><path d="M19 18h.01"></path>'
+                  : kind === "experiment"
+                    ? '<path d="M10 3v5l-4.5 7.5A3 3 0 0 0 8 20h8a3 3 0 0 0 2.5-4.5L14 8V3"></path><path d="M8.5 3h7"></path><path d="M8 14h8"></path>'
+                    : kind === "diagnostics"
+                      ? '<path d="M4 13h3l2-5 4 9 2-4h5"></path><path d="M4 5.5h16"></path><path d="M4 18.5h16"></path>'
+            : kind === "filter"
+              ? '<path d="M4 6h16"></path><path d="M7 12h10"></path><path d="M10 18h4"></path>'
+              : kind === "image"
+                ? '<rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="m7.5 15.5 3.2-3.6 2.8 2.8 2.5-2.7L19 15.5"></path><circle cx="9" cy="9" r="1.2"></circle>'
+                : kind === "video"
+                  ? '<rect x="3.5" y="6" width="17" height="12" rx="2"></rect><path d="m10 9 5 3-5 3z"></path>'
+                  : '<path d="M8 3.5h6l4 4V20a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z"></path><path d="M14 3.5V8h4"></path>';
+
+  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
+}
+
+function settingsSectionLabel(section: SettingsSection) {
+  switch (section) {
+    case "library-overrides":
+      return "当前库覆盖";
+    case "providers":
+      return "连接";
+    case "model-tests":
+      return "模型测试";
+    case "diagnostics":
+      return "诊断";
+    default:
+      return "内容类型";
+  }
+}
+
+function settingsSectionIcon(section: SettingsSection) {
+  switch (section) {
+    case "library-overrides":
+      return "override";
+    case "providers":
+      return "providers";
+    case "model-tests":
+      return "experiment";
+    case "diagnostics":
+      return "diagnostics";
+    default:
+      return "content-types";
+  }
+}
+
+function settingsSectionDescription(section: SettingsSection, library: LibrarySnapshot | null) {
+  switch (section) {
+    case "library-overrides":
+      return library
+        ? `先判断 ${libraryDisplayName(library)} 是沿用默认，还是需要切到库级覆盖。`
+        : "先选择一个库，再判断这一章是沿用默认还是切到库级覆盖。";
+    case "providers":
+      return "把连接状态、当前精确模型和最小可编辑字段收口到同一章里。";
+    case "model-tests":
+      return "模型测试只面向当前草稿，用来验证输入模态、向量形状和相似度。";
+    case "diagnostics":
+      return "先看运行时与连接摘要，再下钻到维护动作和执行空间诊断。";
+    default:
+      return "先配置全局默认的内容类型绑定，再让搜索和库级覆盖复用它。";
+  }
+}
+
+function settingsSectionNavSummary(section: SettingsSection, library: LibrarySnapshot | null) {
+  switch (section) {
+    case "library-overrides":
+      return library ? "判断当前库是否需要脱离默认。" : "先选库，再进入库级差异。";
+    case "providers":
+      return "查看连接状态并编辑当前地址。";
+    case "model-tests":
+      return "基于当前草稿验证输入和结果。";
+    case "diagnostics":
+      return "汇总运行时、维护与执行空间。";
+    default:
+      return "先配置全局默认内容类型绑定。";
+  }
+}
+
+function settingsSectionPill(section: SettingsSection, library: LibrarySnapshot | null) {
+  if (section === "library-overrides") {
+    if (!library) {
+      return {
+        label: "等待库",
+        pillClass: "pending",
+      };
+    }
+    return selectedLibraryContentTypeHasOverride()
+      ? { label: "存在覆盖", pillClass: "ready" }
+      : { label: "沿用默认", pillClass: "muted" };
+  }
+
+  if (section === "providers") {
+    const runtimeOverview = runtimeHealthOverview();
+    if (!runtimeOverview) {
+      return {
+        label: "待刷新",
+        pillClass: "pending",
+      };
+    }
+    return runtimeOverview.processIssues.length || runtimeOverview.providerIssues.length
+      ? { label: "部分受限", pillClass: "error" }
+      : { label: "连接正常", pillClass: "ready" };
+  }
+
+  if (section === "diagnostics") {
+    const runtimeOverview = runtimeHealthOverview();
+    if (!runtimeOverview) {
+      return {
+        label: "待刷新",
+        pillClass: "pending",
+      };
+    }
+    return runtimeOverview.processIssues.length || runtimeOverview.providerIssues.length
+      ? { label: "需要关注", pillClass: "error" }
+      : { label: "运行正常", pillClass: "ready" };
+  }
+
+  if (section === "model-tests") {
+    return {
+      label: "基于草稿",
+      pillClass: "muted",
+    };
+  }
+
+  return {
+    label: "全局默认",
+    pillClass: "ready",
+  };
+}
+
+function settingsMetricsForSection(section: SettingsSection, library: LibrarySnapshot | null) {
+  if (section === "library-overrides") {
+    const contentType = selectedLibraryContentTypeKey();
+    const binding = selectedLibraryContentTypeBinding();
+    const resolved = state.resolvedContentModels?.content_types?.[contentType];
+    return [
+      {
+        label: "当前库",
+        value: library ? libraryDisplayName(library) : "未选择",
+      },
+      {
+        label: "当前类型",
+        value: contentType ? contentTypeDisplayName(contentType) : "未选择",
+      },
+      {
+        label: "覆盖状态",
+        value: library ? (selectedLibraryContentTypeHasOverride() ? "覆盖当前库" : "继承全局默认") : "等待库",
+      },
+      {
+        label: "当前生效",
+        value: resolved ? `${resolved.model_id}@${resolved.model_version}` : binding.model || "未配置",
+      },
+    ];
+  }
+
+  if (section === "providers") {
+    const enabledProviders = state.providerConfigs.filter((provider) => provider.enabled);
+    const localRuntime = state.runtimeHealth?.providers.find(
+      (provider) => provider.provider_id === PROVIDER_ID_LOCAL_SIDECAR
+    );
+    const editableRemoteProviders = state.providerConfigs.filter(
+      (provider) => provider.provider_id !== PROVIDER_ID_LOCAL_SIDECAR
+    );
+    return [
+      {
+        label: "已启用连接",
+        value: `${enabledProviders.length} / ${state.providerConfigs.length || 0}`,
+      },
+      {
+        label: "本地默认",
+        value: localRuntime?.model_id ?? "待解析",
+      },
+      {
+        label: "远端可编辑",
+        value: `${editableRemoteProviders.length} 个`,
+      },
+      {
+        label: "当前编辑",
+        value: selectedProviderConfig()?.display_name ?? "先选择连接",
+      },
+    ];
+  }
+
+  if (section === "model-tests") {
+    const globalSelection = selectedGlobalModelSelection();
+    const librarySelection = selectedLibraryModelSelection();
+    return [
+      {
+        label: "全局草稿",
+        value: globalSelection.model_id || "未解析",
+      },
+      {
+        label: "当前库草稿",
+        value: library ? librarySelection.model_id || "沿用默认" : "等待库",
+      },
+      {
+        label: "原生输入",
+        value: selectedGlobalTestModalities().map((modality) => modelTestModalityDisplayName(modality)).join("、") || "未解析",
+      },
+    ];
+  }
+
+  if (section === "diagnostics") {
+    const runtimeOverview = runtimeHealthOverview();
+    return [
+      {
+        label: "App / Qdrant",
+        value: runtimeOverview
+          ? `${runtimeOverview.processIssues.length ? "有受限项" : "正常"}`
+          : "待刷新",
+      },
+      {
+        label: "已启用连接",
+        value: runtimeOverview ? `${runtimeOverview.enabledProviders.length} 个` : "待刷新",
+      },
+      {
+        label: "受限连接",
+        value: runtimeOverview ? `${runtimeOverview.providerIssues.length} 个` : "待刷新",
+      },
+      {
+        label: "退役执行空间",
+        value: library ? `${retiredVectorSpaceDiagnostics().length} 个` : "等待库",
+      },
+    ];
+  }
+
+  const contentType = selectedGlobalContentTypeKey();
+  const binding = selectedGlobalContentTypeBinding();
+  const totalTypes = availableContentTypeKeys(state.globalContentTypes);
+  const enabledTypes = totalTypes.filter((key) => state.globalContentTypes.content_types[key]?.enabled).length;
+  return [
+    {
+      label: "已启用",
+      value: `${enabledTypes} / ${totalTypes.length || 0}`,
+    },
+    {
+      label: "当前类型",
+      value: contentType ? contentTypeDisplayName(contentType) : "未选择",
+    },
+    {
+      label: "当前绑定",
+      value: binding.model || "未配置",
+    },
+    {
+      label: "向量类型",
+      value: binding.vector_type || "未设置",
+    },
+  ];
+}
+
+function renderSettingsStage(section: SettingsSection, library: LibrarySnapshot | null, body: string) {
+  const pill = settingsSectionPill(section, library);
+  const metrics = settingsMetricsForSection(section, library);
+
+  return `
+    <section
+      class="settings-stage"
+      data-testid="settings-stage"
+      data-settings-stage="${escapeHtml(section)}"
+    >
+      <div class="settings-stage-hero">
+        <div class="settings-stage-copy">
+          <p class="eyebrow">设置章节</p>
+          <h2 data-testid="settings-stage-title">${escapeHtml(settingsSectionLabel(section))}</h2>
+          <p class="helper" data-testid="settings-stage-summary">${escapeHtml(
+            settingsSectionDescription(section, library)
+          )}</p>
+        </div>
+        <span class="pill ${pill.pillClass}" data-testid="settings-stage-pill">${escapeHtml(pill.label)}</span>
+      </div>
+      <div class="settings-stage-metrics" data-testid="settings-stage-metrics">
+        ${metrics
+          .map(
+            (item) => `
+              <article class="settings-stage-metric">
+                <span class="settings-stage-metric-label">${escapeHtml(item.label)}</span>
+                <strong class="settings-stage-metric-value">${escapeHtml(item.value)}</strong>
+              </article>
+            `
+          )
+          .join("")}
+      </div>
+      <div class="settings-stage-body">
+        ${body}
+      </div>
+    </section>
+  `;
+}
+
+function selectedInventorySource(): SourceInventoryItem | null {
+  if (!state.librarySources.length) {
+    return null;
+  }
+  return (
+    state.librarySources.find((source) => source.source_id === state.selectedInventorySourceId) ??
+    state.librarySources[0] ??
+    null
+  );
+}
+
+function selectedInventoryRepresentativeVisualUnit(source: SourceInventoryItem | null) {
+  return source?.representative_visual_unit ?? null;
+}
+
+function selectedInventoryRepresentativePreview(source: SourceInventoryItem | null) {
+  return source?.representative_preview ?? null;
+}
+
+function ensureSelectedInventorySource() {
+  if (!state.librarySources.length) {
+    state.selectedInventorySourceId = "";
+    state.inventoryDetailSheetOpen = false;
+    return;
+  }
+  if (!state.librarySources.some((source) => source.source_id === state.selectedInventorySourceId)) {
+    state.selectedInventorySourceId = state.librarySources[0]?.source_id ?? "";
+  }
+}
+
+function canSearchLibrary(library: LibrarySnapshot | null) {
+  return Boolean(library && libraryOperationalReadiness(library).searchableUnits > 0);
+}
+
+function librarySearchStageNextAction(library: LibrarySnapshot | null) {
+  if (!library) {
+    return "library";
+  }
+
+  const readiness = libraryOperationalReadiness(library);
+  if (readiness.searchableUnits > 0) {
+    if (readiness.status === "配置需关注") {
+      return "settings";
+    }
+    if (readiness.status === "观察未稳定" || readiness.status === "需要关注") {
+      return "source-prep";
+    }
+    return "search";
+  }
+
+  if (readiness.status === "等待配置") {
+    return "settings";
+  }
+  if (readiness.status === "正在准备中") {
+    return "jobs";
+  }
+  return "source-prep";
+}
+
+function currentSearchScopeStageState(library: LibrarySnapshot | null) {
+  if (!library) {
+    return {
+      status: "准备中",
+      pillClass: "pending",
+      summary: "先创建或选择一个库，搜索舞台就会接入真实内容。",
+      nextAction: "library",
+      searchEnabled: false,
+      needsPreparation: true,
+      searchableLibraries: 0,
+      totalLibraries: 0,
+      searchableUnits: 0,
+      pendingLibraries: 0,
+    };
+  }
+
+  if (!allLibrariesTextScopeActive()) {
+    const readiness = libraryOperationalReadiness(library);
+    return {
+      status: readiness.status,
+      pillClass: readiness.pillClass,
+      summary: readiness.summary,
+      nextAction: librarySearchStageNextAction(library),
+      searchEnabled: readiness.searchableUnits > 0,
+      needsPreparation: readiness.searchableUnits <= 0,
+      searchableLibraries: readiness.searchableUnits > 0 ? 1 : 0,
+      totalLibraries: 1,
+      searchableUnits: readiness.searchableUnits,
+      pendingLibraries: readiness.pendingJobs > 0 ? 1 : 0,
+    };
+  }
+
+  const readiness = libraryOperationalReadiness(library);
+  const totalLibraries = state.libraries.length;
+  const searchableLibraries = state.libraries.filter((item) => item.counts.accepted_items > 0).length;
+  const searchableUnits = state.libraries.reduce(
+    (sum, item) => sum + Math.max(item.counts.accepted_items, 0),
+    0
+  );
+  const pendingLibraries = state.libraries.filter((item) => item.counts.pending_jobs > 0).length;
+
+  if (searchableLibraries > 0) {
+    const trailingSummary =
+      searchableLibraries < totalLibraries
+        ? `其余 ${totalLibraries - searchableLibraries} 个库仍在准备中或为空。`
+        : "当前范围里的库都已经进入可搜索状态。";
+    return {
+      status: "可搜索",
+      pillClass: "ready",
+      summary: `当前范围覆盖 ${totalLibraries} 个库；其中 ${searchableLibraries} 个库已可搜索，共 ${searchableUnits} 个对象可以直接参与文本搜索。${trailingSummary}`,
+      nextAction: "search",
+      searchEnabled: true,
+      needsPreparation: false,
+      searchableLibraries,
+      totalLibraries,
+      searchableUnits,
+      pendingLibraries,
+    };
+  }
+
+  const nextAction = librarySearchStageNextAction(library);
+  const selectedLibrarySummary =
+    totalLibraries > 1
+      ? `当前选中库 ${libraryDisplayName(library)}：${readiness.summary}`
+      : readiness.summary;
+
+  if (pendingLibraries > 0) {
+    return {
+      status: "准备中",
+      pillClass: "pending",
+      summary: `所有库范围里还没有可搜索库；${pendingLibraries} 个库仍在导入或建索引。${selectedLibrarySummary ? ` ${selectedLibrarySummary}` : ""}`,
+      nextAction,
+      searchEnabled: false,
+      needsPreparation: true,
+      searchableLibraries,
+      totalLibraries,
+      searchableUnits,
+      pendingLibraries,
+    };
+  }
+
+  const pillClass =
+    readiness.pillClass === "error"
+      ? "error"
+      : readiness.pillClass === "pending"
+        ? "pending"
+        : "muted";
+  const status = pillClass === "error" ? "部分受限" : pillClass === "pending" ? "准备中" : "等待内容";
+
+  return {
+    status,
+    pillClass,
+    summary: `所有库范围里还没有可搜索库；先让至少一个库进入可搜索状态。${selectedLibrarySummary ? ` ${selectedLibrarySummary}` : ""}`,
+    nextAction,
+    searchEnabled: false,
+    needsPreparation: true,
+    searchableLibraries,
+    totalLibraries,
+    searchableUnits,
+    pendingLibraries,
+  };
+}
+
+function canSearchCurrentScope(library: LibrarySnapshot | null) {
+  return currentSearchScopeStageState(library).searchEnabled;
+}
+
+function libraryNeedsPreparation(library: LibrarySnapshot | null) {
+  return currentSearchScopeStageState(library).needsPreparation;
+}
+
+function searchStageNextAction(library: LibrarySnapshot | null) {
+  return currentSearchScopeStageState(library).nextAction;
+}
+
+function currentSearchStageState(library: LibrarySnapshot | null) {
+  const readiness = currentSearchScopeStageState(library);
+  return {
+    status: readiness.status,
+    pillClass: readiness.pillClass,
+    summary: readiness.summary,
+  };
+}
+
+function runtimeHealthOverview() {
+  if (!state.runtimeHealth) {
+    return null;
+  }
+
+  const processSnapshots = [state.runtimeHealth.app, state.runtimeHealth.qdrant];
+  const processIssues = processSnapshots.filter((snapshot) => snapshot.status !== "available");
+  const enabledProviders = state.runtimeHealth.providers.filter((provider) => provider.enabled);
+  const providerIssues = enabledProviders.filter((provider) => provider.status !== "available");
+
+  return {
+    processSnapshots,
+    processIssues,
+    enabledProviders,
+    providerIssues,
+    summary:
+      processIssues.length || providerIssues.length
+        ? `运行时有 ${processIssues.length + providerIssues.length} 个受限项，建议打开诊断查看详细状态。`
+        : enabledProviders.length
+          ? `运行时健康，${enabledProviders.length} 个已启用连接当前可用。`
+          : "运行时健康，当前没有启用中的连接异常。",
+  };
+}
+
+function shellRuntimeStatusLabel(status: string) {
+  if (status === "available") {
+    return "正常";
+  }
+  if (status === "not_enabled") {
+    return "未启用";
+  }
+  if (status === "runtime_unavailable" || status === "not_supported") {
+    return "受限";
+  }
+  return "待确认";
+}
+
+function currentStatusCapsule(library: LibrarySnapshot | null) {
+  const runtimeOverview = runtimeHealthOverview();
+
+  if (state.globalError) {
+    return {
+      label: "部分受限",
+      pillClass: "error",
+      summary: state.globalError.message,
+    };
+  }
+  if (runtimeOverview && (runtimeOverview.processIssues.length || runtimeOverview.providerIssues.length)) {
+    return {
+      label: "部分受限",
+      pillClass: "error",
+      summary: runtimeOverview.summary,
+    };
+  }
+  if (!library) {
+    return {
+      label: "准备中",
+      pillClass: "pending",
+      summary: "还没有选定库，先创建或选择一个库。",
+    };
+  }
+
+  const readiness = libraryOperationalReadiness(library);
+
+  if (library.counts.pending_jobs > 0 && readiness.searchableUnits <= 0) {
+    return {
+      label: "准备中",
+      pillClass: "pending",
+      summary: readiness.summary,
+    };
+  }
+  if (readiness.searchableUnits <= 0) {
+    return {
+      label: readiness.pillClass === "pending" ? "准备中" : "部分受限",
+      pillClass: readiness.pillClass,
+      summary: readiness.summary,
+    };
+  }
+  if (library.counts.pending_jobs > 0) {
+    return {
+      label: "准备中",
+      pillClass: "pending",
+      summary: `当前库还有 ${library.counts.pending_jobs} 个后台任务未完成。`,
+    };
+  }
+  if (readiness.status === "观察未稳定" || readiness.status === "需要关注" || readiness.status === "配置需关注") {
+    return {
+      label: "部分受限",
+      pillClass: readiness.pillClass,
+      summary: readiness.summary,
+    };
+  }
+  return {
+    label: "Ready",
+    pillClass: "ready",
+    summary: "当前库可直接执行搜索和结果复用。",
+  };
+}
+
+function renderSearchStatusNextStep(library: LibrarySnapshot | null, context: "utility" | "outcome" = "utility") {
+  if (!library) {
+    return "";
+  }
+
+  const allLibrariesScope = allLibrariesTextScopeActive();
+  const readiness = libraryOperationalReadiness(library);
+  const scopeState = currentSearchScopeStageState(library);
+  const nextAction = scopeState.nextAction;
+  const actions = [];
+  let title = allLibrariesScope ? "可以直接跨库搜索" : "可以直接搜索";
+  let summary = allLibrariesScope
+    ? scopeState.summary
+    : "当前库已经进入可搜索状态，下一步更适合直接发起查询或调整查询方式。";
+
+  if (nextAction === "settings") {
+    title = allLibrariesScope ? "先完成一个库的搜索配置" : "检查当前库覆盖";
+    summary = scopeState.summary;
+    actions.push(`
+      <button
+        type="button"
+        class="${context === "utility" ? "secondary-button" : ""}"
+        data-testid="${escapeHtml(context === "utility" ? "utility-drawer-status-open-library-overrides" : "search-error-open-library-overrides")}"
+        data-open-settings-section="library-overrides"
+      >
+        前往当前库覆盖
+      </button>
+    `);
+  } else if (nextAction === "jobs") {
+    title = allLibrariesScope ? "等待至少一个库准备完成" : "等待当前任务完成";
+    summary = scopeState.summary;
+    actions.push(`
+      <button
+        type="button"
+        class="${context === "utility" ? "secondary-button" : ""}"
+        data-testid="${escapeHtml(context === "utility" ? "utility-drawer-status-open-jobs" : "search-outcome-open-jobs")}"
+        data-utilities-action="focus-search-jobs"
+      >
+        查看任务
+      </button>
+    `);
+  } else if (nextAction === "source-prep") {
+    title = allLibrariesScope
+      ? "让至少一个库进入可搜索状态"
+      : readiness.status === "尚未接入来源根"
+        ? "接入第一个来源根"
+        : readiness.status === "来源根已停用"
+          ? "恢复一个来源根"
+          : readiness.status === "需要关注"
+            ? "先检查来源根健康"
+            : readiness.status === "观察未稳定"
+              ? "恢复来源观察"
+              : "准备第一批内容";
+    summary = scopeState.summary;
+    actions.push(`
+      <button
+        type="button"
+        class="${context === "utility" ? "secondary-button" : ""}"
+        data-testid="${escapeHtml(context === "utility" ? "utility-drawer-status-open-source-prep" : "search-outcome-open-source-prep")}"
+        data-utilities-action="focus-source-prep"
+      >
+        打开来源准备
+      </button>
+    `);
+    actions.push(`
+      <button
+        type="button"
+        class="secondary-button"
+        data-testid="${escapeHtml(context === "utility" ? "utility-drawer-status-open-inventory" : "search-outcome-open-inventory")}"
+        data-workspace="inventory"
+      >
+        前往库管理
+      </button>
+    `);
+  }
+
+  return `
+    <div class="utility-drawer-summary-card search-status-next-step" data-testid="${escapeHtml(
+      context === "utility" ? "utility-drawer-status-next-step" : "search-outcome-next-step"
+    )}">
+      <strong>${escapeHtml(title)}</strong>
+      <p class="helper">${escapeHtml(summary)}</p>
+      ${actions.length ? `<div class="inline-actions">${actions.join("")}</div>` : ""}
+    </div>
+  `;
 }
 
 function emptyInventorySummary(): InventorySummary {
@@ -370,6 +1233,27 @@ function resetInventoryFilters() {
   };
 }
 
+function hydrateLibraryManagementDraft(library: LibrarySnapshot | null) {
+  if (!library) {
+    state.libraryManagementDraftLibraryId = "";
+    state.libraryManagementDisplayNameDraft = "";
+    state.manageLibraryPopoverOpen = false;
+    return;
+  }
+
+  state.libraryManagementDraftLibraryId = library.id;
+  state.libraryManagementDisplayNameDraft = library.display_name;
+}
+
+function upsertLibrarySnapshot(library: LibrarySnapshot) {
+  const index = state.libraries.findIndex((item) => item.id === library.id);
+  if (index >= 0) {
+    state.libraries.splice(index, 1, library);
+    return;
+  }
+  state.libraries.unshift(library);
+}
+
 function resetSearchFilters() {
   state.searchFilters = {
     visualUnitKind: "",
@@ -378,6 +1262,10 @@ function resetSearchFilters() {
     timeRangeStartMsDraft: "",
     timeRangeEndMsDraft: "",
   };
+}
+
+function resetSearchResultLibraryFocus() {
+  state.searchResultLibraryFocusId = "";
 }
 
 function resetProviderEditor() {
@@ -399,7 +1287,7 @@ function providerConfigLabel(providerId?: string | null) {
   }
   const provider = state.providerConfigs.find((item) => item.provider_id === providerId);
   if (!provider) {
-    return `${providerId} (missing)`;
+    return `${providerId} (缺失)`;
   }
   return `${provider.display_name} (${provider.provider_kind})`;
 }
@@ -436,7 +1324,7 @@ function formatResolvedModel(selection: ResolvedModelSelectionPayload | undefine
   }
   const parts = [selection.provider_id, `${selection.model_id}@${selection.model_version}`];
   if (selection.model_revision && selection.model_revision !== selection.model_version) {
-    parts.push(`runtime ${selection.model_revision}`);
+    parts.push(`修订 ${selection.model_revision}`);
   }
   return parts.join(" · ");
 }
@@ -448,13 +1336,13 @@ function formatResolvedContentModel(selection: ResolvedContentModelSelectionPayl
 function formatBindingSource(bindingSource: BindingSource | undefined) {
   switch (bindingSource) {
     case "global_content_type":
-      return "global content type";
+      return "全局内容类型";
     case "library_content_type":
-      return "library content type";
+      return "当前库覆盖";
     case "settings_model_test":
-      return "settings model test";
+      return "设置模型测试";
     default:
-      return bindingSource ? bindingSource.replaceAll("_", " ") : "unknown";
+      return bindingSource ? bindingSource.replaceAll("_", " ") : "未知来源";
   }
 }
 
@@ -477,7 +1365,7 @@ function formatResolvedContentModelContext(
 }
 
 function formatEmbeddingCapabilityValues(values: string[] | undefined) {
-  return values?.length ? values.join(", ") : "none";
+  return values?.length ? values.join(", ") : "无";
 }
 
 function formatEmbeddingCapabilities(
@@ -485,28 +1373,30 @@ function formatEmbeddingCapabilities(
   options: { includePrefix?: boolean } = {}
 ) {
   if (!capabilities) {
-    return options.includePrefix ? "Embedding capabilities · unavailable" : "unavailable";
+    return options.includePrefix ? "嵌入能力 · 不可用" : "不可用";
   }
 
   const parts = [
-    `inputs ${formatEmbeddingCapabilityValues(capabilities.input_types)}`,
-    `vectors ${formatEmbeddingCapabilityValues(capabilities.vector_types)}`,
-    `mixed inputs ${capabilities.supports_mixed_inputs ? "yes" : "no"}`,
+    `输入 ${formatEmbeddingCapabilityValues(capabilities.input_types)}`,
+    `向量 ${formatEmbeddingCapabilityValues(capabilities.vector_types)}`,
+    `混合输入 ${capabilities.supports_mixed_inputs ? "是" : "否"}`,
   ];
   if (options.includePrefix) {
-    parts.unshift("Embedding capabilities");
+    parts.unshift("嵌入能力");
   }
   return parts.join(" · ");
 }
 
 function formatExecutionInputTypes(inputTypes: string[] | undefined, options: { includePrefix?: boolean } = {}) {
-  const value = inputTypes?.length ? inputTypes.join(", ") : "none";
-  return options.includePrefix ? `Execution inputs · ${value}` : value;
+  const value = inputTypes?.length ? inputTypes.join(", ") : "无";
+  return options.includePrefix ? `执行输入 · ${value}` : value;
 }
 
 function resetInventoryState() {
   state.librarySources = [];
   state.inventorySummary = emptyInventorySummary();
+  state.selectedInventorySourceId = "";
+  state.inventoryDetailSheetOpen = false;
 }
 
 function searchHasMoreResults() {
@@ -516,20 +1406,20 @@ function searchHasMoreResults() {
 function searchFiltersSummary() {
   const tokens = [];
   if (state.searchFilters.visualUnitKind) {
-    tokens.push(`kind=${state.searchFilters.visualUnitKind}`);
+    tokens.push(`对象类型=${visualUnitKindDisplayName(state.searchFilters.visualUnitKind)}`);
   }
   if (state.searchFilters.sourceType) {
-    tokens.push(`source_type=${state.searchFilters.sourceType}`);
+    tokens.push(`来源类型=${sourceTypeDisplayName(state.searchFilters.sourceType)}`);
   }
   if (state.searchFilters.pathPrefix.trim()) {
-    tokens.push(`path_prefix=${state.searchFilters.pathPrefix.trim()}`);
+    tokens.push(`路径前缀=${state.searchFilters.pathPrefix.trim()}`);
   }
   if (
     state.searchFilters.timeRangeStartMsDraft.trim() ||
     state.searchFilters.timeRangeEndMsDraft.trim()
   ) {
     tokens.push(
-      `time_range=${state.searchFilters.timeRangeStartMsDraft.trim() || "?"}→${state.searchFilters.timeRangeEndMsDraft.trim() || "?"}`
+      `时间范围=${state.searchFilters.timeRangeStartMsDraft.trim() || "?"}→${state.searchFilters.timeRangeEndMsDraft.trim() || "?"}`
     );
   }
   return tokens.length ? tokens.join(" · ") : "未启用额外过滤器";
@@ -618,6 +1508,10 @@ function resetSourceRootEditor() {
   state.sourceRootIncludeExtensionsDraft = "";
 }
 
+function keepSearchPreparationDisclosureOpen() {
+  state.searchPreparationDisclosureOpen = true;
+}
+
 function populateSourceRootEditor(sourceRoot) {
   state.editingSourceRootId = sourceRoot.source_root_id;
   state.sourceRootPathDraft = sourceRoot.root_path ?? "";
@@ -669,10 +1563,26 @@ function contentTypeOrderValue(contentType: string) {
   return index >= 0 ? index : CONTENT_TYPE_ORDER.length;
 }
 
-function sortedContentTypeKeys(payload: ContentTypesPayload) {
-  return Object.keys(payload.content_types).sort((left, right) => {
+function sortContentTypes(values: Iterable<string>) {
+  return [...values].sort((left, right) => {
     return contentTypeOrderValue(left) - contentTypeOrderValue(right) || left.localeCompare(right);
   });
+}
+
+function sortedContentTypeKeys(payload: ContentTypesPayload) {
+  return sortContentTypes(Object.keys(payload.content_types));
+}
+
+function availableContentTypeKeys(
+  ...payloads: Array<{ content_types?: Record<string, unknown> } | null | undefined>
+) {
+  const keys = new Set<string>(CONTENT_TYPE_ORDER);
+  for (const payload of payloads) {
+    for (const key of Object.keys(payload?.content_types ?? {})) {
+      keys.add(key);
+    }
+  }
+  return sortContentTypes(keys);
 }
 
 function catalogEntriesForProvider(providerId: string | null | undefined): ModelCatalogEntry[] {
@@ -733,18 +1643,24 @@ function defaultContentTypeBinding(): ContentTypeBindingPayload {
 
 function selectedGlobalContentTypeKey() {
   const selected = state.selectedGlobalContentType;
-  if (selected && state.globalContentTypes.content_types[selected]) {
+  const available = availableContentTypeKeys(state.globalContentTypes);
+  if (selected && available.includes(selected)) {
     return selected;
   }
-  return sortedContentTypeKeys(state.globalContentTypes)[0] ?? "";
+  return available[0] ?? "";
 }
 
 function selectedLibraryContentTypeKey() {
   const selected = state.selectedLibraryContentType;
-  if (selected && state.libraryContentTypes.content_types[selected]) {
+  const available = availableContentTypeKeys(
+    state.globalContentTypes,
+    state.libraryContentTypes,
+    state.resolvedContentModels ? { content_types: state.resolvedContentModels.content_types } : null
+  );
+  if (selected && available.includes(selected)) {
     return selected;
   }
-  return sortedContentTypeKeys(state.libraryContentTypes)[0] ?? "";
+  return available[0] ?? "";
 }
 
 function selectedGlobalContentTypeBinding(): ContentTypeBindingPayload {
@@ -755,10 +1671,21 @@ function selectedGlobalContentTypeBinding(): ContentTypeBindingPayload {
 }
 
 function selectedLibraryContentTypeBinding(): ContentTypeBindingPayload {
+  const contentType = selectedLibraryContentTypeKey();
   return (
-    state.libraryContentTypes.content_types[selectedLibraryContentTypeKey()] ??
+    state.libraryContentTypes.content_types[contentType] ??
+    state.globalContentTypes.content_types[contentType] ??
     defaultContentTypeBinding()
   );
+}
+
+function libraryContentTypeHasOverride(contentType: string) {
+  return Object.prototype.hasOwnProperty.call(state.libraryContentTypes.content_types, contentType);
+}
+
+function selectedLibraryContentTypeHasOverride() {
+  const contentType = selectedLibraryContentTypeKey();
+  return contentType ? libraryContentTypeHasOverride(contentType) : false;
 }
 
 function selectionFromBinding(binding: ContentTypeBindingPayload): ModelSelectionPayload {
@@ -945,7 +1872,7 @@ function settingsModelTestSupportMessage(
   if (!supportedModalities.length) {
     return entry.message;
   }
-  return `${entry.message} · 原生输入：${supportedModalities.join(", ")}`;
+  return `${entry.message} · 原生输入：${supportedModalities.map((modality) => modelTestModalityDisplayName(modality)).join("、")}`;
 }
 
 function canExecuteSettingsModelTest(selection: ModelSelectionPayload) {
@@ -961,7 +1888,7 @@ function currentDraftProviderSummary(providerId: string) {
     parts.push(draft.baseUrl);
   }
   if (draft.enabled === false) {
-    parts.push("disabled");
+    parts.push("已停用");
   }
   return parts.join(" · ");
 }
@@ -983,14 +1910,14 @@ function renderModelTestResult(testIdPrefix: string, result: ModelTestData | nul
       <p class="helper">${escapeHtml(result.resolved_model.message)}</p>
       <div class="detail-grid model-test-grid">
         <div class="detail-block">
-          <h5>Vectors</h5>
+          <h5>向量</h5>
           <pre data-testid="${testIdPrefix}-vectors">${escapeHtml(JSON.stringify(result.vectors, null, 2))}</pre>
         </div>
         ${
           result.pooled_vector?.length
             ? `
               <div class="detail-block">
-                <h5>Pooled vector</h5>
+                <h5>池化向量</h5>
                 <pre data-testid="${testIdPrefix}-pooled-vector">${escapeHtml(JSON.stringify(result.pooled_vector, null, 2))}</pre>
               </div>
             `
@@ -998,14 +1925,14 @@ function renderModelTestResult(testIdPrefix: string, result: ModelTestData | nul
         }
       </div>
       <div class="detail-block">
-        <h5>Input summary</h5>
+        <h5>输入摘要</h5>
         <pre>${escapeHtml(JSON.stringify(result.input_summary, null, 2))}</pre>
       </div>
       ${
         result.comparison
           ? `
             <div class="detail-block">
-              <h5>Comparison</h5>
+              <h5>对照结果</h5>
               <div class="job-meta">
                 <span class="pill muted">${escapeHtml(result.comparison.operation_kind)}</span>
                 <span class="pill muted" data-testid="${testIdPrefix}-comparison-shape">${escapeHtml(
@@ -1015,10 +1942,10 @@ function renderModelTestResult(testIdPrefix: string, result: ModelTestData | nul
                   result.comparison.similarity_to_primary.toFixed(6)
                 )}</span>
               </div>
-              <p class="helper">input_modality: ${escapeHtml(result.comparison.input_modality)}</p>
+              <p class="helper">输入模态：${escapeHtml(modelTestModalityDisplayName(result.comparison.input_modality))}</p>
               <div class="detail-grid model-test-grid">
                 <div class="detail-block">
-                  <h5>Comparison vectors</h5>
+                  <h5>对照向量</h5>
                   <pre data-testid="${testIdPrefix}-comparison-vectors">${escapeHtml(
                     JSON.stringify(result.comparison.vectors, null, 2)
                   )}</pre>
@@ -1027,7 +1954,7 @@ function renderModelTestResult(testIdPrefix: string, result: ModelTestData | nul
                   result.comparison.pooled_vector?.length
                     ? `
                       <div class="detail-block">
-                        <h5>Comparison pooled vector</h5>
+                        <h5>对照池化向量</h5>
                         <pre data-testid="${testIdPrefix}-comparison-pooled-vector">${escapeHtml(
                           JSON.stringify(result.comparison.pooled_vector, null, 2)
                         )}</pre>
@@ -1037,7 +1964,7 @@ function renderModelTestResult(testIdPrefix: string, result: ModelTestData | nul
                 }
               </div>
               <div class="detail-block">
-                <h5>Comparison input summary</h5>
+                <h5>对照输入摘要</h5>
                 <pre>${escapeHtml(JSON.stringify(result.comparison.input_summary, null, 2))}</pre>
               </div>
             </div>
@@ -1082,13 +2009,14 @@ function renderSettingsModelTestPanel(options: {
   const comparisonFileRequired = comparisonModalityDraft === "image";
   const disabled =
     !supportedModalities.length || !canExecuteSettingsModelTest(selection) || pending;
+  const catalogEntry = selectedCatalogEntryForSelection(selection);
 
   return `
     <section class="model-test-panel" data-testid="${testIdPrefix}-panel">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Test</p>
-          <h3>${scope === "global" ? "Test current global model" : "Test current library model"}</h3>
+          <p class="eyebrow">测试</p>
+          <h3>${scope === "global" ? "测试当前全局模型" : "测试当前库模型"}</h3>
         </div>
       </div>
       <p class="helper" data-testid="${testIdPrefix}-draft-summary">
@@ -1097,10 +2025,17 @@ function renderSettingsModelTestPanel(options: {
       <p class="helper" data-testid="${testIdPrefix}-support-message">
         ${escapeHtml(settingsModelTestSupportMessage(selection, supportedModalities))}
       </p>
+      ${
+        catalogEntry
+          ? `<p class="helper" data-testid="${scope}-model-capabilities">${escapeHtml(
+              formatEmbeddingCapabilities(catalogEntry.embedding_capabilities, { includePrefix: true })
+            )}</p>`
+          : ""
+      }
       <form id="${testIdPrefix}-form" class="stack-form" data-testid="${testIdPrefix}-form">
         <div class="filter-grid settings-filter-grid">
           <label>
-            <span>primary.input_modality</span>
+            <span>主输入模态</span>
             <select
               id="${testIdPrefix}-modality"
               data-testid="${testIdPrefix}-modality"
@@ -1111,12 +2046,12 @@ function renderSettingsModelTestPanel(options: {
                     .map(
                       (modality) => `
                         <option value="${escapeHtml(modality)}" ${modality === inputModality ? "selected" : ""}>
-                          ${escapeHtml(modality)}
+                          ${escapeHtml(modelTestModalityDisplayName(modality))}
                         </option>
                       `
                     )
                     .join("")
-                : '<option value="" selected>not_supported</option>'}
+                : '<option value="" selected>当前不可用</option>'}
             </select>
           </label>
           ${
@@ -1154,20 +2089,20 @@ function renderSettingsModelTestPanel(options: {
         }
         <div class="filter-grid settings-filter-grid">
           <label>
-            <span>comparison.input_modality</span>
+            <span>对照输入模态</span>
             <select
               id="${testIdPrefix}-comparison-modality"
               data-testid="${testIdPrefix}-comparison-modality"
               ${supportedModalities.length ? "" : "disabled"}
             >
-              <option value="" ${comparisonModalityDraft ? "" : "selected"}>none</option>
+              <option value="" ${comparisonModalityDraft ? "" : "selected"}>不启用</option>
               ${supportedModalities
                 .map(
                   (modality) => `
                     <option value="${escapeHtml(modality)}" ${
                       modality === comparisonModalityDraft ? "selected" : ""
                     }>
-                      ${escapeHtml(modality)}
+                      ${escapeHtml(modelTestModalityDisplayName(modality))}
                     </option>
                   `
                 )
@@ -1220,7 +2155,7 @@ function renderSettingsModelTestPanel(options: {
             data-testid="${testIdPrefix}-submit-button"
             ${disabled ? "disabled" : ""}
           >
-            ${pending ? "Testing..." : "测试当前模型"}
+            ${pending ? "测试中..." : "测试当前模型"}
           </button>
         </div>
       </form>
@@ -1238,31 +2173,1025 @@ function sourceRootDisplayName(sourceRootId) {
 }
 
 function sourceRootInventoryLabel(source: SourceInventoryItem) {
-  return source.source_root_label || source.source_root_id || "manual import";
+  return source.source_root_label || source.source_root_id || "手动导入";
 }
 
 function currentWorkspaceMeta() {
   if (state.activeWorkspace === "inventory") {
     return {
-      title: "Inventory workspace",
-      summary:
-        "来源清单、状态过滤与 coverage 核对集中到独立 Inventory 工作区；Search 回到查询、结果与详情的连续主任务流。",
+      title: "库管理",
+      summary: "在独立工作区里管理当前库、核对来源状态并浏览详情。",
     };
   }
 
   if (state.activeWorkspace === "settings") {
     return {
-      title: "Settings workspace",
-      summary:
-        "在同一处查看内建 provider、全局 content type 绑定、库级 content type 绑定和当前 resolved content model。",
+      title: "设置",
+      summary: "在同一处调整内容类型、当前库覆盖、连接、模型测试和诊断信息。",
     };
   }
 
   return {
-    title: "Search workspace",
-    summary:
-      "查询入口、结果浏览与详情保持在同一搜索工作区连续完成；来源清单与状态过滤已移到独立 Inventory 工作区。",
+    title: "搜索",
+    summary: "把建库、导入、搜索、阅读结果和对象复用收束到同一主舞台里完成。",
   };
+}
+
+function utilityDrawerSectionLabel(section: UtilityDrawerSection) {
+  switch (section) {
+    case "jobs":
+      return "当前库任务";
+    case "source-prep":
+      return "来源准备";
+    case "maintenance":
+      return "运行时 / 维护";
+    default:
+      return "系统状态";
+  }
+}
+
+function utilityDrawerToolSection(): UtilityDrawerSection {
+  return state.utilityDrawerSection === "status" ? "maintenance" : state.utilityDrawerSection;
+}
+
+function renderLibraryOptions(items: LibrarySnapshot[]) {
+  return items
+    .map(
+      (item) => `
+        <option value="${escapeHtml(item.id)}" ${item.id === state.selectedLibraryId ? "selected" : ""}>
+          ${escapeHtml(
+            `${libraryDisplayName(item)} (${item.id})${libraryIsArchived(item) ? " · 已归档" : ""}`
+          )}
+        </option>
+      `
+    )
+    .join("");
+}
+
+function renderManageLibraryPopover(library: LibrarySnapshot | null) {
+  if (!library) {
+    return "";
+  }
+
+  return `
+    <details
+      class="manage-library-popover"
+      data-testid="manage-library-popover"
+      ${state.manageLibraryPopoverOpen ? "open" : ""}
+    >
+      <summary class="secondary-button" data-testid="open-manage-library-button">管理当前库</summary>
+      <div class="compact-form stack-form" data-testid="manage-library-card">
+        <div class="compact-callout">
+          <strong>${escapeHtml(libraryDisplayName(library))}</strong>
+          <p class="helper">
+            当前稳定标识是 ${escapeHtml(library.id)}。
+            ${
+              libraryIsArchived(library)
+                ? "这个库当前已归档，仍然会保留内容与来源，可以随时恢复。"
+                : "这里可以修改显示名称、归档当前库，或直接删除。"
+            }
+          </p>
+        </div>
+        <form
+          id="rename-library-form"
+          class="stack-form"
+          data-testid="rename-library-form"
+          data-library-rename-form="true"
+        >
+          <label>
+            <span>显示名称</span>
+            <input
+              id="manage-library-name"
+              data-testid="manage-library-name-input"
+              data-library-management-display-name-input="true"
+              name="manageLibraryDisplayName"
+              type="text"
+              value="${escapeHtml(state.libraryManagementDisplayNameDraft)}"
+              placeholder="例如：季度报告库"
+              required
+            />
+          </label>
+          <button type="submit" data-testid="rename-library-button">保存名称</button>
+        </form>
+        <button
+          type="button"
+          id="toggle-library-archive-button"
+          data-testid="toggle-library-archive-button"
+          data-library-archive-action="true"
+          class="secondary-button"
+        >
+          ${libraryIsArchived(library) ? "恢复当前库" : "归档当前库"}
+        </button>
+        <button
+          type="button"
+          id="delete-library-button"
+          data-testid="delete-library-button"
+          data-library-delete-action="true"
+          class="secondary-button destructive-button"
+        >
+          删除当前库
+        </button>
+      </div>
+    </details>
+  `;
+}
+
+function renderCreateLibraryPopover() {
+  return `
+    <details
+      class="create-library-popover"
+      data-testid="create-library-popover"
+      ${state.createLibraryPopoverOpen || !state.libraries.length ? "open" : ""}
+    >
+      <summary class="secondary-button" data-testid="open-create-library-button">新建库</summary>
+      <form id="create-library-form" class="stack-form compact-form" data-testid="create-library-form">
+        <label>
+          <span>显示名称</span>
+          <input
+            id="library-name"
+            data-testid="library-name-input"
+            name="libraryDisplayName"
+            type="text"
+            value="${escapeHtml(state.libraryDisplayNameDraft)}"
+            placeholder="例如：季度报告库"
+            required
+          />
+        </label>
+        <label>
+          <span>自定义库编号（library_id，可选）</span>
+          <input
+            id="library-id"
+            data-testid="library-id-input"
+            name="libraryId"
+            type="text"
+            value="${escapeHtml(state.libraryIdDraft)}"
+            placeholder="例如：quarterly-reports"
+          />
+        </label>
+        <button type="submit" data-testid="create-library-button">创建库</button>
+      </form>
+    </details>
+  `;
+}
+
+function renderLibraryContextCluster(
+  library: LibrarySnapshot | null,
+  placement: "search" | "workspace" = "search"
+) {
+  const activeLibraries = state.libraries.filter((item) => !libraryIsArchived(item));
+  const archivedLibraries = state.libraries.filter((item) => libraryIsArchived(item));
+
+  if (placement === "search") {
+    return renderSearchScopeBar(library, activeLibraries, archivedLibraries);
+  }
+
+  const label = "当前库";
+  const selectorLabel = "切换库";
+  const identity = library
+    ? library.id
+    : state.libraries.length
+      ? "先选择一个库"
+      : "先创建第一个库";
+  const summary = library
+    ? `${library.id} · 可搜索 ${library.counts.accepted_items} · 待处理 ${library.counts.pending_jobs}`
+    : state.libraries.length
+      ? "先选择一个库，再继续当前工作。"
+      : "先创建第一个库，再开始导入或搜索。";
+
+  return `
+    <section
+      class="library-context-cluster library-context-cluster-${escapeHtml(placement)}"
+      data-testid="library-context-cluster"
+    >
+      <div class="library-context-head">
+        <div class="library-context-copy">
+          <span class="scope-label">${escapeHtml(label)}</span>
+          <div class="library-context-current" data-testid="current-library-card">
+            <strong data-testid="current-library-name">${escapeHtml(library ? libraryDisplayName(library) : state.libraries.length ? "未选择库" : "还没有库")}</strong>
+            <span class="helper" data-testid="current-library-id">${escapeHtml(identity)}</span>
+            <span class="helper library-context-summary">${escapeHtml(summary)}</span>
+            ${
+              library
+                ? `
+                  <span
+                    class="pill ${libraryLifecyclePillClass(library)}"
+                    data-testid="current-library-lifecycle"
+                  >
+                    ${escapeHtml(libraryLifecycleLabel(library))}
+                  </span>
+                `
+                : ""
+            }
+          </div>
+        </div>
+        <div class="library-context-controls">
+          <label class="context-rail-field context-rail-selector">
+            <span>${escapeHtml(selectorLabel)}</span>
+            <select id="library-select" data-testid="library-select" ${state.libraries.length ? "" : "disabled"}>
+              ${
+                state.libraries.length
+                  ? [
+                      activeLibraries.length
+                        ? `
+                          <optgroup label="活跃库">
+                            ${renderLibraryOptions(activeLibraries)}
+                          </optgroup>
+                        `
+                        : "",
+                      archivedLibraries.length
+                        ? `
+                          <optgroup label="已归档">
+                            ${renderLibraryOptions(archivedLibraries)}
+                          </optgroup>
+                        `
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join("")
+                  : `<option value="">还没有库</option>`
+              }
+            </select>
+          </label>
+          <div class="library-context-actions">
+            ${renderManageLibraryPopover(library)}
+            ${renderCreateLibraryPopover()}
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderSearchScopeBar(
+  library: LibrarySnapshot | null,
+  activeLibraries: LibrarySnapshot[],
+  archivedLibraries: LibrarySnapshot[]
+) {
+  const allLibrariesActive = state.searchScope === "all_libraries";
+  const searchButtonDisabled = !library || !canSearchCurrentScope(library);
+  const hasAdvancedFilters =
+    Boolean(state.searchFilters.pathPrefix.trim()) ||
+    Boolean(state.searchFilters.timeRangeStartMsDraft.trim()) ||
+    Boolean(state.searchFilters.timeRangeEndMsDraft.trim());
+  const hasFilterSelections =
+    Boolean(state.searchFilters.visualUnitKind) ||
+    Boolean(state.searchFilters.sourceType) ||
+    hasAdvancedFilters;
+
+  return `
+    <section
+      class="library-context-cluster library-context-cluster-search search-scope-bar"
+      data-testid="search-scope-bar"
+    >
+      <div class="search-scope-controls">
+        <div class="search-scope-row">
+          <div class="search-scope-toggle-group">
+            <button
+              type="button"
+              class="search-scope-toggle ${state.searchScope === "library" ? "active" : ""}"
+              data-testid="search-scope-library"
+              data-search-scope="library"
+            >
+              当前库
+            </button>
+            <button
+              type="button"
+              class="search-scope-toggle ${allLibrariesActive ? "active" : ""}"
+              data-testid="search-scope-all-libraries"
+              data-search-scope="all_libraries"
+              ${state.libraries.length ? "" : "disabled"}
+            >
+              所有库
+            </button>
+          </div>
+          <div class="search-scope-actions">
+            <label class="context-rail-selector search-scope-selector" aria-label="当前库">
+              <select id="library-select" data-testid="library-select" ${state.libraries.length ? "" : "disabled"}>
+                ${
+                  state.libraries.length
+                    ? [
+                        activeLibraries.length
+                          ? `
+                            <optgroup label="活跃库">
+                              ${renderLibraryOptions(activeLibraries)}
+                            </optgroup>
+                          `
+                          : "",
+                        archivedLibraries.length
+                          ? `
+                            <optgroup label="已归档">
+                              ${renderLibraryOptions(archivedLibraries)}
+                            </optgroup>
+                          `
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join("")
+                    : `<option value="">还没有库</option>`
+                }
+              </select>
+            </label>
+            <button
+              type="submit"
+              form="search-form"
+              class="search-submit-inline"
+              data-testid="search-submit-button"
+              ${searchButtonDisabled ? "disabled" : ""}
+            >
+              Search
+            </button>
+          </div>
+        </div>
+        ${
+          hasFilterSelections
+            ? `<p class="helper search-filter-summary" data-testid="search-filter-summary">${escapeHtml(searchFiltersSummary())}</p>`
+            : ""
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderContextRail(library: LibrarySnapshot | null) {
+  const status = currentStatusCapsule(library);
+  return `
+    <div class="context-rail-shell context-rail-shell-product" data-testid="context-rail">
+      <div class="context-rail-brand">
+        <p class="eyebrow">FauniSearch</p>
+        <div class="context-rail-brand-copy">
+          <p class="context-rail-tagline">Unified · Native · Powerful</p>
+        </div>
+      </div>
+      <div class="context-rail-status">
+        <button
+          type="button"
+          class="pill ${status.pillClass} utility-trigger-pill"
+          data-testid="utility-drawer-open-status"
+          data-utility-drawer-open="status"
+          aria-expanded="${state.utilityDrawerOpen && state.utilityDrawerSection === "status" ? "true" : "false"}"
+        >
+          <span class="status-dot"></span>
+          ${escapeHtml(status.label)}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderUtilityDrawerStatusSection(library: LibrarySnapshot | null) {
+  const status = currentStatusCapsule(library);
+  const stageState = currentSearchStageState(library);
+  const runtimeOverview = runtimeHealthOverview();
+  const providerStatusClass =
+    runtimeOverview && runtimeOverview.providerIssues.length
+      ? "error"
+      : runtimeOverview?.enabledProviders.length
+        ? "ready"
+        : "muted";
+
+  return `
+    <section class="utility-drawer-section" data-testid="utility-drawer-section-status">
+      <div class="utility-drawer-section-head">
+        <div>
+          <p class="eyebrow">系统状态</p>
+          <h3>状态摘要</h3>
+        </div>
+        <span class="pill ${status.pillClass}" data-testid="utility-drawer-status-pill">${escapeHtml(status.label)}</span>
+      </div>
+      <p class="helper" data-testid="utility-drawer-status-summary">${escapeHtml(status.summary)}</p>
+      <div class="status-capsule-stage" data-testid="utility-drawer-stage-state">
+        <span class="pill ${stageState.pillClass}">${escapeHtml(stageState.status)}</span>
+        <p class="helper">${escapeHtml(stageState.summary)}</p>
+      </div>
+      ${renderSearchStatusNextStep(library)}
+      <dl class="stats compact-stats utility-drawer-stats">
+        <div><dt>当前库</dt><dd>${escapeHtml(library ? libraryDisplayName(library) : "未选择")}</dd></div>
+        <div><dt>可搜索内容</dt><dd>${escapeHtml(library?.counts.accepted_items ?? 0)}</dd></div>
+        <div><dt>后台任务</dt><dd>${escapeHtml(library?.counts.pending_jobs ?? 0)}</dd></div>
+      </dl>
+      <ul class="status-capsule-runtime-list">
+        ${
+          runtimeOverview
+            ? `
+              <li class="status-capsule-runtime-item" data-testid="utility-drawer-runtime-app">
+                <div>
+                  <strong>${escapeHtml(state.runtimeHealth!.app.display_name)}</strong>
+                  <p class="helper">${escapeHtml(state.runtimeHealth!.app.message)}</p>
+                </div>
+                <span class="pill ${providerSelectionPillClass(state.runtimeHealth!.app.status)}">${escapeHtml(shellRuntimeStatusLabel(state.runtimeHealth!.app.status))}</span>
+              </li>
+              <li class="status-capsule-runtime-item" data-testid="utility-drawer-runtime-qdrant">
+                <div>
+                  <strong>${escapeHtml(state.runtimeHealth!.qdrant.display_name)}</strong>
+                  <p class="helper">${escapeHtml(state.runtimeHealth!.qdrant.message)}</p>
+                </div>
+                <span class="pill ${providerSelectionPillClass(state.runtimeHealth!.qdrant.status)}">${escapeHtml(shellRuntimeStatusLabel(state.runtimeHealth!.qdrant.status))}</span>
+              </li>
+              <li class="status-capsule-runtime-item" data-testid="utility-drawer-runtime-providers">
+                <div>
+                  <strong>连接</strong>
+                  <p class="helper">${escapeHtml(runtimeOverview.summary)}</p>
+                </div>
+                <span class="pill ${providerStatusClass}">${escapeHtml(
+                  runtimeOverview.providerIssues.length
+                    ? `${runtimeOverview.providerIssues.length} 受限`
+                    : runtimeOverview.enabledProviders.length
+                      ? `${runtimeOverview.enabledProviders.length} 可用`
+                      : "未启用"
+                )}</span>
+              </li>
+            `
+            : `
+              <li class="status-capsule-runtime-item" data-testid="utility-drawer-runtime-loading">
+                <div>
+                  <strong>运行时快照</strong>
+                  <p class="helper">当前还没有拿到运行时健康快照，进入诊断页后会显示更完整的状态。</p>
+                </div>
+                <span class="pill muted">待刷新</span>
+              </li>
+            `
+        }
+      </ul>
+      <div class="utility-drawer-actions">
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-open-diagnostics"
+          data-workspace="settings"
+          data-settings-section="diagnostics"
+        >
+          前往诊断
+        </button>
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-open-jobs"
+          data-utility-drawer-section="jobs"
+        >
+          查看任务
+        </button>
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-open-source-prep"
+          data-utility-drawer-section="source-prep"
+        >
+          来源准备
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderSourcePrepSummaryCards(library: LibrarySnapshot | null) {
+  if (!library) {
+    return `
+      <div class="utility-drawer-summary-card">
+        <strong>还没有当前库</strong>
+        <p class="helper">先在顶部创建或选择一个库，来源准备和导入动作才会接入真实库上下文。</p>
+      </div>
+    `;
+  }
+
+  const activeSourceRoots = state.sourceRoots.filter((item) => item.enabled).length;
+  const pendingJobs = library.counts.pending_jobs;
+  const lastActionSummary = state.sourceRoots
+    .map((item) => item.last_action?.summary)
+    .find(Boolean);
+
+  return `
+    <div class="utility-drawer-summary-grid">
+      <div class="utility-drawer-summary-card">
+        <strong>${escapeHtml(libraryDisplayName(library))}</strong>
+        <p class="helper">${escapeHtml(library.id)} · 可搜索 ${escapeHtml(library.counts.accepted_items)} · 待处理 ${escapeHtml(pendingJobs)}</p>
+      </div>
+      <div class="utility-drawer-summary-card">
+        <strong>来源根</strong>
+        <p class="helper">${escapeHtml(state.sourceRoots.length)} 个来源根，启用中 ${escapeHtml(activeSourceRoots)} 个。</p>
+      </div>
+      <div class="utility-drawer-summary-card">
+        <strong>导入状态</strong>
+        <p class="helper">${escapeHtml(lastActionSummary ?? "还没有来源准备动作记录，可从搜索舞台或来源浏览开始。")}</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderUtilityDrawerSourcePrepSection(library: LibrarySnapshot | null) {
+  return `
+    <section class="utility-drawer-section" data-testid="utility-drawer-section-source-prep">
+      <div class="utility-drawer-section-head">
+        <div>
+          <p class="eyebrow">来源准备</p>
+          <h3>导入与来源准备</h3>
+        </div>
+      </div>
+      <p class="helper">桌面端把来源准备收拢到统一辅助面里，但真正的导入表单和来源根编辑仍在搜索舞台或来源浏览里完成。</p>
+      ${renderSourcePrepSummaryCards(library)}
+      <div class="utility-drawer-actions utility-drawer-actions-stacked">
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-focus-search-prep"
+          data-utilities-action="focus-source-prep"
+          ${library ? "" : "disabled"}
+        >
+          在搜索舞台打开来源准备
+        </button>
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-open-inventory"
+          data-workspace="inventory"
+          ${library ? "" : "disabled"}
+        >
+          前往来源浏览
+        </button>
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-open-diagnostics-from-source-prep"
+          data-workspace="settings"
+          data-settings-section="diagnostics"
+          ${library ? "" : "disabled"}
+        >
+          前往诊断
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderUtilityDrawerJobsSection(library: LibrarySnapshot | null) {
+  const shouldInlineJobs = !shouldRenderSearchNextStepDock(library);
+
+  return `
+    <section class="utility-drawer-section" data-testid="utility-drawer-section-jobs">
+      <div class="utility-drawer-section-head">
+        <div>
+          <p class="eyebrow">当前库任务</p>
+          <h3>任务面板</h3>
+        </div>
+        ${
+          library
+            ? `<span class="pill ${library.counts.pending_jobs > 0 ? "pending" : "muted"}">${escapeHtml(
+                library.counts.pending_jobs > 0 ? `${library.counts.pending_jobs} 进行中` : "无进行中任务"
+              )}</span>`
+            : ""
+        }
+      </div>
+      ${
+        shouldInlineJobs
+          ? renderJobs()
+          : `
+            <div class="utility-drawer-summary-card">
+              <strong>任务仍在准备流里可见</strong>
+              <p class="helper">当前搜索舞台已经显示下一步引导和任务回执。为了避免重复占位，这里保留工作区跳转入口。</p>
+            </div>
+          `
+      }
+      <div class="utility-drawer-actions">
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-focus-search-jobs"
+          data-utilities-action="focus-search-jobs"
+          ${library ? "" : "disabled"}
+        >
+          在搜索舞台打开任务
+        </button>
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-open-diagnostics-from-jobs"
+          data-workspace="settings"
+          data-settings-section="diagnostics"
+          ${library ? "" : "disabled"}
+        >
+          前往诊断
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderUtilityDrawerMaintenanceSection(library: LibrarySnapshot | null) {
+  const retiredVectorSpaces = retiredVectorSpaceDiagnostics();
+
+  return `
+    <section class="utility-drawer-section" data-testid="utility-drawer-section-maintenance">
+      <div class="utility-drawer-section-head">
+        <div>
+          <p class="eyebrow">运行时 / 维护</p>
+          <h3>工具动作</h3>
+        </div>
+      </div>
+      <div class="utility-drawer-summary-grid">
+        <div class="utility-drawer-summary-card">
+          <strong>当前库维护</strong>
+          <p class="helper">${escapeHtml(
+            library
+              ? `${libraryDisplayName(library)} 当前可执行刷新、重扫、重建和退役执行空间清理。`
+              : "先选择一个库，再执行库级维护动作。"
+          )}</p>
+        </div>
+        <div class="utility-drawer-summary-card">
+          <strong>退役执行空间</strong>
+          <p class="helper">${escapeHtml(
+            retiredVectorSpaces.length
+              ? `${retiredVectorSpaces.length} 个退役执行空间可立即清理。`
+              : "当前没有可清理的退役执行空间。"
+          )}</p>
+        </div>
+      </div>
+      <div class="utility-drawer-actions utility-drawer-actions-stacked">
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="utility-drawer-open-runtime-health"
+          data-workspace="settings"
+          data-settings-section="diagnostics"
+        >
+          查看运行时健康
+        </button>
+        <button type="button" class="secondary-button" data-testid="utility-drawer-refresh-library" data-utilities-action="refresh-library" ${library ? "" : "disabled"}>刷新当前库</button>
+        <button type="button" class="secondary-button" data-testid="utility-drawer-rescan-library" data-utilities-action="rescan-library" ${library ? "" : "disabled"}>重扫当前库</button>
+        <button type="button" class="secondary-button" data-testid="utility-drawer-rebuild-library" data-utilities-action="rebuild-library" ${library ? "" : "disabled"}>重建当前库</button>
+        <button type="button" class="secondary-button" data-testid="utility-drawer-cleanup-retired-vector-spaces" data-utilities-action="cleanup-retired-vector-spaces" ${library && retiredVectorSpaces.length ? "" : "disabled"}>清理退役执行空间</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderUtilityDrawer(library: LibrarySnapshot | null) {
+  if (!state.utilityDrawerOpen) {
+    return "";
+  }
+
+  const section =
+    state.utilityDrawerSection === "jobs"
+      ? renderUtilityDrawerJobsSection(library)
+      : state.utilityDrawerSection === "source-prep"
+        ? renderUtilityDrawerSourcePrepSection(library)
+        : state.utilityDrawerSection === "maintenance"
+          ? renderUtilityDrawerMaintenanceSection(library)
+          : renderUtilityDrawerStatusSection(library);
+
+  return `
+    <aside
+      class="panel utility-drawer"
+      data-testid="utility-drawer"
+      data-drawer-section="${escapeHtml(state.utilityDrawerSection)}"
+    >
+      <div class="utility-drawer-head">
+        <div>
+          <p class="eyebrow">辅助面</p>
+          <h2>${escapeHtml(utilityDrawerSectionLabel(state.utilityDrawerSection))}</h2>
+        </div>
+        <button
+          type="button"
+          class="secondary-button utility-drawer-close"
+          data-testid="utility-drawer-close"
+          data-utility-drawer-close="true"
+        >
+          收起
+        </button>
+      </div>
+      <nav class="utility-drawer-nav" data-testid="utility-drawer-nav" aria-label="辅助面分段">
+        ${(["status", "jobs", "source-prep", "maintenance"] as const)
+          .map(
+            (sectionId) => `
+              <button
+                type="button"
+                class="secondary-button utility-drawer-tab ${state.utilityDrawerSection === sectionId ? "active" : ""}"
+                data-testid="utility-drawer-tab-${escapeHtml(sectionId)}"
+                data-utility-drawer-section="${escapeHtml(sectionId)}"
+              >
+                ${escapeHtml(utilityDrawerSectionLabel(sectionId))}
+              </button>
+            `
+          )
+          .join("")}
+      </nav>
+      <div class="utility-drawer-body">
+        ${section}
+      </div>
+    </aside>
+  `;
+}
+
+function renderSearchStateStrip(library: LibrarySnapshot | null) {
+  const stageState = currentSearchStageState(library);
+  if (stageState.status === "可搜索") {
+    return "";
+  }
+  return `
+    <div class="search-state-strip" data-testid="search-state-strip">
+      <span class="pill ${stageState.pillClass}">${escapeHtml(stageState.status)}</span>
+      <p class="helper">${escapeHtml(stageState.summary)}</p>
+    </div>
+  `;
+}
+
+function renderSearchLoadingNotice() {
+  if (!state.searchInFlight) {
+    return "";
+  }
+
+  return `
+    <div class="search-results-loading" data-testid="search-loading-notice">
+      <p class="helper">搜索中...</p>
+    </div>
+  `;
+}
+
+function shouldRenderSearchNextStepDock(library: LibrarySnapshot | null) {
+  if (!library) {
+    return true;
+  }
+
+  if (libraryNeedsPreparation(library)) {
+    return true;
+  }
+
+  return (
+    state.searchPreparationDisclosureOpen ||
+    state.searchJobsDisclosureOpen ||
+    Boolean(state.editingSourceRootId)
+  );
+}
+
+function renderSearchNextStepDock(library: LibrarySnapshot | null) {
+  if (!shouldRenderSearchNextStepDock(library)) {
+    return "";
+  }
+
+  if (!library) {
+    return `
+      <aside class="next-step-dock" data-testid="search-next-step-dock">
+        <p class="eyebrow">下一步</p>
+        <h3>先去库管理</h3>
+        <p class="helper">新建库和当前库管理已经移到库管理工作区；先完成库准备，再回到 Search 发起查询。</p>
+        <div class="dock-note">
+          <strong>主路径</strong>
+          <p class="helper">库管理 → 导入内容 → 等待可搜索 → 发起搜索。</p>
+        </div>
+        <div class="dock-actions">
+          <button
+            type="button"
+            data-testid="search-next-step-open-inventory"
+            data-workspace="inventory"
+          >
+            前往库管理
+          </button>
+        </div>
+      </aside>
+    `;
+  }
+
+  const allLibrariesScope = allLibrariesTextScopeActive();
+  const readiness = libraryOperationalReadiness(library);
+  const scopeState = currentSearchScopeStageState(library);
+  const nextAction = scopeState.nextAction;
+  const supportDisclosures = renderSearchSupportDisclosures(library, nextAction);
+  const dockFacts = allLibrariesScope
+    ? [
+        `覆盖 ${scopeState.totalLibraries} 个库`,
+        `可搜索库 ${scopeState.searchableLibraries}`,
+        `对象 ${scopeState.searchableUnits}`,
+        `准备中 ${scopeState.pendingLibraries}`,
+      ]
+    : [
+        `启用来源根 ${readiness.enabledRoots}`,
+        `可搜索 ${readiness.searchableUnits}`,
+        `待处理 ${readiness.pendingJobs}`,
+      ];
+  const readinessNote = `
+    <div class="dock-note">
+      <strong>${escapeHtml(allLibrariesScope ? "当前范围" : libraryDisplayName(library))}</strong>
+      <p class="helper">${escapeHtml(dockFacts.join(" · "))}</p>
+      ${
+        !allLibrariesScope && readiness.lastActionSummary
+          ? `<p class="helper">${escapeHtml(readiness.lastActionSummary)}</p>`
+          : ""
+      }
+    </div>
+  `;
+
+  if (nextAction === "settings") {
+    return `
+      <aside class="next-step-dock" data-testid="search-next-step-dock">
+        <p class="eyebrow">下一步</p>
+        <h3>${escapeHtml(allLibrariesScope ? "先完成一个库的搜索配置" : "检查当前库覆盖")}</h3>
+        <p class="helper">${escapeHtml(scopeState.summary)}</p>
+        <div class="dock-note">
+          <strong>配置状态</strong>
+          <p class="helper">${escapeHtml(
+            allLibrariesScope
+              ? "所有库范围里还没有可搜索库；先让至少一个库的内容类型与 resolved model 完成就绪。"
+              : `${readiness.blockedContentTypes} 个启用内容类型仍未就绪；先确认当前库覆盖、连接与 resolved model。`
+          )}</p>
+        </div>
+        <div class="dock-actions">
+          <button
+            type="button"
+            data-testid="search-next-step-open-library-overrides"
+            data-open-settings-section="library-overrides"
+          >
+            前往当前库覆盖
+          </button>
+        </div>
+        ${renderProviderBridge(library)}
+        ${supportDisclosures}
+      </aside>
+    `;
+  }
+
+  if (nextAction === "jobs") {
+    return `
+      <aside class="next-step-dock" data-testid="search-next-step-dock">
+        <p class="eyebrow">下一步</p>
+        <h3>${escapeHtml(allLibrariesScope ? "等待至少一个库准备完成" : "等待当前任务完成")}</h3>
+        <p class="helper">${escapeHtml(scopeState.summary)}</p>
+        ${readinessNote}
+        <div class="dock-actions">
+          <button
+            type="button"
+            data-testid="search-next-step-open-jobs"
+            data-utilities-action="focus-search-jobs"
+          >
+            查看任务
+          </button>
+          <button
+            type="button"
+            class="secondary-button"
+            data-testid="search-next-step-open-source-prep"
+            data-utilities-action="focus-source-prep"
+          >
+            打开来源准备
+          </button>
+        </div>
+        ${supportDisclosures}
+      </aside>
+    `;
+  }
+
+  if (libraryNeedsPreparation(library)) {
+    const title =
+      allLibrariesScope
+        ? "让至少一个库进入可搜索状态"
+        : readiness.status === "尚未接入来源根"
+        ? "接入第一个来源根"
+        : readiness.status === "来源根已停用"
+          ? "恢复一个来源根"
+          : readiness.status === "需要关注"
+            ? "先检查来源根健康"
+            : readiness.status === "观察未稳定"
+              ? "恢复来源观察"
+              : "准备第一批内容";
+    return `
+      <aside class="next-step-dock" data-testid="search-next-step-dock">
+        <p class="eyebrow">下一步</p>
+        <h3>${escapeHtml(title)}</h3>
+        <p class="helper">${escapeHtml(scopeState.summary)}</p>
+        ${readinessNote}
+        <div class="dock-actions">
+          <button
+            type="button"
+            data-testid="search-next-step-open-source-prep"
+            data-utilities-action="focus-source-prep"
+          >
+            打开来源准备
+          </button>
+          <button
+            type="button"
+            class="secondary-button"
+            data-testid="search-next-step-open-inventory"
+            data-workspace="inventory"
+          >
+            前往库管理
+          </button>
+        </div>
+        ${renderInventoryBridge(library)}
+        ${renderProviderBridge(library)}
+        ${supportDisclosures}
+      </aside>
+    `;
+  }
+
+  return `
+    <aside class="next-step-dock" data-testid="search-next-step-dock">
+      <p class="eyebrow">${escapeHtml(allLibrariesScope ? "当前范围" : "当前库")}</p>
+      <h3>${escapeHtml(allLibrariesScope ? "所有库" : libraryDisplayName(library))}</h3>
+      <p class="helper">${escapeHtml(
+        allLibrariesScope
+          ? scopeState.summary
+          : `${library.id} · 可搜索 ${library.counts.accepted_items} · 待处理 ${library.counts.pending_jobs}`
+      )}</p>
+      <div class="dock-note">
+        <strong>建议</strong>
+        <p class="helper">${escapeHtml(
+          allLibrariesScope
+            ? "先发起一轮跨库文本查询，再从结果卡或详情面继续下钻到命中库。"
+            : "先搜一轮，再从结果卡或详情面直接复用对象作为下一次查询输入。"
+        )}</p>
+      </div>
+      <div class="dock-actions">
+        <button
+          type="button"
+          class="secondary-button"
+          data-testid="search-next-step-open-source-prep"
+          data-utilities-action="focus-source-prep"
+        >
+          打开来源准备
+        </button>
+      </div>
+      ${renderInventoryBridge(library)}
+      ${renderProviderBridge(library)}
+      ${supportDisclosures}
+    </aside>
+  `;
+}
+
+function renderSearchSupportDisclosures(library: LibrarySnapshot | null, nextAction = searchStageNextAction(library)) {
+  if (!library) {
+    return "";
+  }
+
+  const preparationOpen =
+    state.searchPreparationDisclosureOpen ||
+    Boolean(state.editingSourceRootId) ||
+    nextAction === "source-prep";
+  const showJobs = Boolean(state.importReceipt) || library.counts.pending_jobs > 0 || nextAction === "jobs";
+  const jobsOpen = state.searchJobsDisclosureOpen || library.counts.pending_jobs > 0 || nextAction === "jobs";
+
+  return `
+    <div class="next-step-support">
+      <details
+        id="search-preparation-disclosure"
+        class="support-disclosure support-disclosure-subtle"
+        ${preparationOpen ? "open" : ""}
+      >
+        <summary>导入与来源准备</summary>
+        <div class="support-disclosure-body">
+          ${renderImportPanel(library)}
+          ${renderSourceRootsPanel(library)}
+        </div>
+      </details>
+      ${
+        showJobs
+          ? `
+            <details
+              id="search-jobs-disclosure"
+              class="support-disclosure support-disclosure-subtle"
+              ${jobsOpen ? "open" : ""}
+            >
+              <summary>任务与回执</summary>
+              <div class="support-disclosure-body">
+                <section class="panel panel-tight utility-panel">
+                  <div class="panel-head">
+                    <div>
+                      <p class="eyebrow">任务</p>
+                      <h2>任务面板</h2>
+                    </div>
+                  </div>
+                  ${renderJobs()}
+                </section>
+              </div>
+            </details>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderImportPanel(library: LibrarySnapshot | null) {
+  return `
+    <section class="panel panel-tight utility-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">导入</p>
+          <h2>导入内容</h2>
+        </div>
+      </div>
+      <form id="import-form" class="stack-form" data-testid="import-form">
+        <label>
+          <span>本地路径</span>
+          <textarea
+            id="import-paths"
+            data-testid="import-paths-input"
+            rows="6"
+            placeholder="/path/to/file.pdf&#10;/path/to/image.png"
+            ${library ? "" : "disabled"}
+          >${escapeHtml(state.importPathsDraft)}</textarea>
+        </label>
+        <button type="submit" data-testid="import-submit-button" ${library ? "" : "disabled"}>提交导入</button>
+      </form>
+      <p class="helper">当前仍以服务器可读的本地路径作为正式导入入口；逐行填写文件或目录路径后即可提交导入。</p>
+      ${renderImportReceipt()}
+    </section>
+  `;
 }
 
 function sleep(ms) {
@@ -1286,8 +3215,33 @@ function jobPillClass(status) {
   return "muted";
 }
 
+function canCancelJob(job: JobSnapshot) {
+  return job.cancelable && !isTerminalJobStatus(job.status);
+}
+
+function canRetryJob(job: JobSnapshot) {
+  return job.retryable && (job.status === "failed" || job.status === "canceled");
+}
+
+function canResumeJob(job: JobSnapshot) {
+  return job.retryable && (job.status === "failed" || job.status === "canceled");
+}
+
+function formatJobAttemptLabel(job: JobSnapshot) {
+  const parts = [`第 ${job.current_attempt.attempt} 次尝试`];
+  if (job.retried_from_job_id) {
+    parts.push(`重试自 ${job.retried_from_job_id}`);
+  }
+  return parts.join(" · ");
+}
+
 function selectedVisualUnitId() {
-  return state.selectedVisualUnit?.visual_unit?.visual_unit_id ?? null;
+  const visualUnitId = state.selectedVisualUnit?.visual_unit?.visual_unit_id ?? null;
+  const libraryId = selectedVisualUnitOriginLibraryId();
+  if (!visualUnitId || !libraryId) {
+    return visualUnitId;
+  }
+  return `${libraryId}:${visualUnitId}`;
 }
 
 function sourceName(path) {
@@ -1817,7 +3771,7 @@ function renderStatusNotices() {
   if (state.statusMessage) {
     blocks.push(`
       <div class="notice success">
-        <h4>Working</h4>
+        <h4>进行中</h4>
         <p>${escapeHtml(state.statusMessage)}</p>
       </div>
     `);
@@ -1838,15 +3792,15 @@ function renderImportReceipt() {
   const accepted = state.importReceipt.accepted.length
     ? `
         <div class="receipt-group" data-testid="import-accepted-group">
-          <h4>Accepted</h4>
+          <h4>已接受</h4>
           <ul class="data-list">
             ${state.importReceipt.accepted
               .map(
                 (item) => `
                   <li>
                     <div class="list-head">
-                      <strong>${escapeHtml(item.kind)}</strong>
-                      <span class="helper">${(item.visual_units ?? []).length} 个 visual units</span>
+                      <strong>${escapeHtml(visualUnitKindDisplayName(item.kind))}</strong>
+                      <span class="helper">${(item.visual_units ?? []).length} 个可搜索对象</span>
                     </div>
                     <span>${escapeHtml(item.normalized_path ?? item.original_path)}</span>
                     ${
@@ -1860,7 +3814,7 @@ function renderImportReceipt() {
                                     class="secondary-button"
                                     data-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}"
                                   >
-                                    查看 ${escapeHtml(visualUnit.kind)} · ${escapeHtml(visualUnit.visual_unit_id)}
+                                    查看 ${escapeHtml(visualUnitKindDisplayName(visualUnit.kind))} · ${escapeHtml(visualUnit.visual_unit_id)}
                                   </button>
                                 `
                               )
@@ -1880,7 +3834,7 @@ function renderImportReceipt() {
   const rejected = state.importReceipt.rejected.length
     ? `
         <div class="receipt-group" data-testid="import-rejected-group">
-          <h4>Rejected</h4>
+          <h4>已拒绝</h4>
           <ul class="data-list">
             ${state.importReceipt.rejected
               .map(
@@ -1936,15 +3890,15 @@ function renderSourceRootRulesSummary(rules) {
   const excludeGlobs = rules?.exclude_globs ?? [];
   const includeExtensions = rules?.include_extensions ?? [];
 
-  parts.push(includeGlobs.length ? `include ${includeGlobs.length}` : "include all");
-  parts.push(excludeGlobs.length ? `exclude ${excludeGlobs.length}` : "exclude none");
-  parts.push(includeExtensions.length ? includeExtensions.join(", ") : "all source types");
+  parts.push(includeGlobs.length ? `包含规则 ${includeGlobs.length}` : "包含全部");
+  parts.push(excludeGlobs.length ? `排除规则 ${excludeGlobs.length}` : "不排除");
+  parts.push(includeExtensions.length ? includeExtensions.join(", ") : "全部来源类型");
   return parts.join(" · ");
 }
 
 function formatScanTime(lastScanAtMs) {
   if (!lastScanAtMs) {
-    return "尚未 refresh / rescan";
+    return "尚未刷新或重扫";
   }
   return new Date(Number(lastScanAtMs)).toLocaleString();
 }
@@ -1959,7 +3913,7 @@ function renderSourceRootsPanel(library) {
         data-testid="library-refresh-button"
         ${library && state.sourceRoots.length ? "" : "disabled"}
       >
-        库级 refresh
+        库级刷新
       </button>
       <button
         type="button"
@@ -1968,7 +3922,7 @@ function renderSourceRootsPanel(library) {
         class="secondary-button"
         ${library && state.sourceRoots.length ? "" : "disabled"}
       >
-        库级 rescan
+        库级重扫
       </button>
     </div>
   `;
@@ -1989,22 +3943,22 @@ function renderSourceRootsPanel(library) {
                     <span class="pill muted">${escapeHtml(sourceRoot.watch_state)}</span>
                   </div>
                   <dl class="stats compact-stats">
-                    <div><dt>Observed</dt><dd>${sourceRoot.coverage_summary?.observed_file_count ?? 0}</dd></div>
-                    <div><dt>Matched</dt><dd>${sourceRoot.coverage_summary?.matched_file_count ?? 0}</dd></div>
-                    <div><dt>Active</dt><dd>${sourceRoot.coverage_summary?.active_source_count ?? 0}</dd></div>
-                    <div><dt>Inactive</dt><dd>${sourceRoot.coverage_summary?.inactive_source_count ?? 0}</dd></div>
+                    <div><dt>已观察</dt><dd>${sourceRoot.coverage_summary?.observed_file_count ?? 0}</dd></div>
+                    <div><dt>匹配</dt><dd>${sourceRoot.coverage_summary?.matched_file_count ?? 0}</dd></div>
+                    <div><dt>正常</dt><dd>${sourceRoot.coverage_summary?.active_source_count ?? 0}</dd></div>
+                    <div><dt>未启用</dt><dd>${sourceRoot.coverage_summary?.inactive_source_count ?? 0}</dd></div>
                   </dl>
                   <p class="helper">${escapeHtml(renderSourceRootRulesSummary(sourceRoot.rules))}</p>
-                  <p class="helper">Last scan: ${escapeHtml(formatScanTime(sourceRoot.coverage_summary?.last_scan_at_ms))}</p>
+                  <p class="helper">最近扫描：${escapeHtml(formatScanTime(sourceRoot.coverage_summary?.last_scan_at_ms))}</p>
                   ${
                     sourceRoot.last_action
-                      ? `<p class="helper">Last action: ${escapeHtml(sourceRoot.last_action.action)} · ${escapeHtml(sourceRoot.last_action.status)} · ${escapeHtml(sourceRoot.last_action.summary)}</p>`
+                      ? `<p class="helper">最近动作：${escapeHtml(sourceRoot.last_action.action)} · ${escapeHtml(sourceRoot.last_action.status)} · ${escapeHtml(sourceRoot.last_action.summary)}</p>`
                       : ""
                   }
                   <div class="inline-actions">
                     <button type="button" class="secondary-button" data-source-root-edit-id="${escapeHtml(sourceRoot.source_root_id)}">编辑</button>
-                    <button type="button" data-source-root-refresh-id="${escapeHtml(sourceRoot.source_root_id)}" ${sourceRoot.enabled ? "" : "disabled"}>refresh</button>
-                    <button type="button" class="secondary-button" data-source-root-rescan-id="${escapeHtml(sourceRoot.source_root_id)}" ${sourceRoot.enabled ? "" : "disabled"}>rescan</button>
+                    <button type="button" data-source-root-refresh-id="${escapeHtml(sourceRoot.source_root_id)}" ${sourceRoot.enabled ? "" : "disabled"}>刷新</button>
+                    <button type="button" class="secondary-button" data-source-root-rescan-id="${escapeHtml(sourceRoot.source_root_id)}" ${sourceRoot.enabled ? "" : "disabled"}>重扫</button>
                     <button type="button" class="secondary-button" data-source-root-toggle-id="${escapeHtml(sourceRoot.source_root_id)}">
                       ${sourceRoot.enabled ? "停用" : "启用"}
                     </button>
@@ -2016,13 +3970,13 @@ function renderSourceRootsPanel(library) {
             .join("")}
         </ul>
       `
-    : '<p class="empty" data-testid="source-root-empty">当前库还没有来源根。先创建一个本地目录来源根，再触发 refresh / rescan。</p>';
+    : '<p class="empty" data-testid="source-root-empty">当前库还没有来源根。先创建一个本地目录来源根，再触发刷新或重扫。</p>';
 
   return `
     <section class="panel panel-tight">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Sources</p>
+          <p class="eyebrow">来源</p>
           <h2>来源根管理</h2>
         </div>
         ${panelActions}
@@ -2050,7 +4004,7 @@ function renderSourceRootsPanel(library) {
           <span>启用该来源根并接入 watcher</span>
         </label>
         <label>
-          <span>Include globs</span>
+          <span>包含规则（globs）</span>
           <textarea
             id="source-root-include-globs"
             data-testid="source-root-include-globs-input"
@@ -2060,7 +4014,7 @@ function renderSourceRootsPanel(library) {
           >${escapeHtml(state.sourceRootIncludeGlobsDraft)}</textarea>
         </label>
         <label>
-          <span>Exclude globs</span>
+          <span>排除规则（globs）</span>
           <textarea
             id="source-root-exclude-globs"
             data-testid="source-root-exclude-globs-input"
@@ -2070,7 +4024,7 @@ function renderSourceRootsPanel(library) {
           >${escapeHtml(state.sourceRootExcludeGlobsDraft)}</textarea>
         </label>
         <label>
-          <span>Include extensions</span>
+          <span>包含扩展名</span>
           <input
             id="source-root-include-extensions"
             data-testid="source-root-include-extensions-input"
@@ -2095,33 +4049,47 @@ function renderSourceRootsPanel(library) {
 }
 
 function renderWorkspaceSwitcher() {
+  const toolsActive = state.utilityDrawerOpen && state.utilityDrawerSection !== "status";
   return `
-    <div class="workspace-switch" data-testid="workspace-switch">
+    <nav class="workspace-switch" data-testid="workspace-switch" aria-label="主工作区切换">
       <button
         type="button"
-        class="${state.activeWorkspace === "search" ? "" : "secondary-button"}"
+        class="workspace-switch-button ${state.activeWorkspace === "search" ? "active" : ""}"
         data-testid="workspace-tab-search"
         data-workspace="search"
       >
-        Search
+        ${renderUiIcon("search")}
+        <span>搜索</span>
       </button>
       <button
         type="button"
-        class="${state.activeWorkspace === "inventory" ? "" : "secondary-button"}"
+        class="workspace-switch-button ${state.activeWorkspace === "inventory" ? "active" : ""}"
         data-testid="workspace-tab-inventory"
         data-workspace="inventory"
       >
-        Inventory
+        ${renderUiIcon("library")}
+        <span>库管理</span>
       </button>
       <button
         type="button"
-        class="${state.activeWorkspace === "settings" ? "" : "secondary-button"}"
+        class="workspace-switch-button ${toolsActive ? "active" : ""}"
+        data-testid="workspace-tab-tools"
+        data-utility-drawer-open="${escapeHtml(utilityDrawerToolSection())}"
+        aria-expanded="${toolsActive ? "true" : "false"}"
+      >
+        ${renderUiIcon("tools")}
+        <span>工具</span>
+      </button>
+      <button
+        type="button"
+        class="workspace-switch-button ${state.activeWorkspace === "settings" ? "active" : ""}"
         data-testid="workspace-tab-settings"
         data-workspace="settings"
       >
-        Settings
+        ${renderUiIcon("settings")}
+        <span>设置</span>
       </button>
-    </div>
+    </nav>
   `;
 }
 
@@ -2132,24 +4100,24 @@ function renderInventoryBridge(library) {
 
   const summaryText =
     state.activeWorkspace === "inventory" && state.inventorySummary.total
-      ? `当前库共有 ${state.inventorySummary.total} 条来源记录，active ${state.inventorySummary.active}，invalidated ${state.inventorySummary.invalidated}，out_of_scope ${state.inventorySummary.out_of_scope}。`
-      : "来源清单、状态过滤与来源级观察已移到独立 Inventory 工作区。";
+      ? `当前库共有 ${state.inventorySummary.total} 条来源记录，正常 ${state.inventorySummary.active}，已失效 ${state.inventorySummary.invalidated}，超出范围 ${state.inventorySummary.out_of_scope}。`
+      : "来源清单、状态过滤与来源级观察已移到独立来源浏览工作区。";
 
   return `
     <div class="workspace-bridge" data-testid="inventory-bridge">
-      <p class="eyebrow">Inventory</p>
+      <p class="eyebrow">库管理</p>
       <p class="helper" data-testid="inventory-bridge-summary">${escapeHtml(summaryText)}</p>
       <div class="inline-actions">
         ${
           state.activeWorkspace === "inventory"
-            ? '<span class="pill ready" data-testid="inventory-bridge-state">Inventory active</span>'
+            ? '<span class="pill ready" data-testid="inventory-bridge-state">库管理已打开</span>'
             : `<button
                 type="button"
                 class="secondary-button"
                 data-testid="inventory-bridge-button"
                 data-workspace="inventory"
               >
-                查看 Inventory
+                前往库管理
               </button>`
         }
       </div>
@@ -2159,15 +4127,15 @@ function renderInventoryBridge(library) {
 
 function renderInventorySummaryBar() {
   const summaryItems = [
-    { label: "Total", value: state.inventorySummary.total, testId: "inventory-summary-total" },
-    { label: "Active", value: state.inventorySummary.active, testId: "inventory-summary-active" },
+    { label: "来源记录", value: state.inventorySummary.total, testId: "inventory-summary-total" },
+    { label: "正常", value: state.inventorySummary.active, testId: "inventory-summary-active" },
     {
-      label: "Invalidated",
+      label: "已失效",
       value: state.inventorySummary.invalidated,
       testId: "inventory-summary-invalidated",
     },
     {
-      label: "Out of scope",
+      label: "超出范围",
       value: state.inventorySummary.out_of_scope,
       testId: "inventory-summary-out-of-scope",
     },
@@ -2189,25 +4157,648 @@ function renderInventorySummaryBar() {
   `;
 }
 
+function inventoryFilterSummaryItems() {
+  const items = [];
+  if (state.inventoryFilters.sourceRootId) {
+    if (state.inventoryFilters.sourceRootId === "manual") {
+      items.push("手动导入");
+    } else {
+      const sourceRoot = state.sourceRoots.find(
+        (item) => item.source_root_id === state.inventoryFilters.sourceRootId
+      );
+      items.push(sourceRoot?.root_path ?? state.inventoryFilters.sourceRootId);
+    }
+  }
+  if (state.inventoryFilters.sourceType) {
+    items.push(sourceTypeDisplayName(state.inventoryFilters.sourceType));
+  }
+  if (state.inventoryFilters.sourceStatus) {
+    items.push(sourceStatusDisplayName(state.inventoryFilters.sourceStatus));
+  }
+  return items;
+}
+
+function renderInventoryActionRow(library: LibrarySnapshot | null) {
+  return `
+    <div class="inline-actions inventory-action-row">
+      <button
+        type="button"
+        class="secondary-button"
+        data-testid="inventory-action-focus-source-prep"
+        data-utilities-action="focus-source-prep"
+        ${library ? "" : "disabled"}
+      >
+        前往来源准备
+      </button>
+      <button
+        type="button"
+        class="secondary-button"
+        data-testid="inventory-action-refresh-library"
+        data-utilities-action="refresh-library"
+        ${library ? "" : "disabled"}
+      >
+        刷新当前库
+      </button>
+      <button
+        type="button"
+        class="secondary-button"
+        data-testid="inventory-action-rescan-library"
+        data-utilities-action="rescan-library"
+        ${library ? "" : "disabled"}
+      >
+        重扫当前库
+      </button>
+    </div>
+  `;
+}
+
+function sourceRootStatusDisplayName(status) {
+  if (status === "ready") {
+    return "就绪";
+  }
+  if (status === "degraded") {
+    return "需关注";
+  }
+  if (status === "disabled") {
+    return "已停用";
+  }
+  return status;
+}
+
+function sourceRootWatchStateDisplayName(watchState) {
+  if (watchState === "watching") {
+    return "监视中";
+  }
+  if (watchState === "disabled") {
+    return "未监视";
+  }
+  if (watchState === "starting") {
+    return "启动中";
+  }
+  if (watchState === "stopped") {
+    return "已停止";
+  }
+  return watchState;
+}
+
+function sourceRootWatchStatePillClass(watchState) {
+  if (watchState === "watching") {
+    return "ready";
+  }
+  if (watchState === "disabled") {
+    return "muted";
+  }
+  return "pending";
+}
+
+function inventorySourceRootPriority(sourceRoot: SourceRootSnapshot) {
+  if (sourceRoot.status === "degraded") {
+    return 3;
+  }
+  if (sourceRoot.enabled && sourceRoot.watch_state !== "watching") {
+    return 2;
+  }
+  if (sourceRoot.enabled) {
+    return 1;
+  }
+  return 0;
+}
+
+function contentTypeResolvedStatusLabel(status: string) {
+  if (status === "available") {
+    return "已就绪";
+  }
+  if (status === "not_enabled") {
+    return "连接未启用";
+  }
+  if (status === "runtime_unavailable") {
+    return "运行时受限";
+  }
+  if (status === "not_supported") {
+    return "当前不支持";
+  }
+  return status;
+}
+
+function contentTypeReadinessEntries() {
+  const contentTypes = availableContentTypeKeys(
+    state.globalContentTypes,
+    state.libraryContentTypes,
+    state.resolvedContentModels ? { content_types: state.resolvedContentModels.content_types } : null
+  );
+
+  return contentTypes.map((contentType) => {
+    const binding =
+      state.libraryContentTypes.content_types[contentType] ??
+      state.globalContentTypes.content_types[contentType] ??
+      defaultContentTypeBinding();
+    const resolved = state.resolvedContentModels?.content_types?.[contentType];
+    const selection = selectionFromBinding(binding);
+    const hasOverride = libraryContentTypeHasOverride(contentType);
+
+    if (!binding.enabled) {
+      return {
+        contentType,
+        statusLabel: "已停用",
+        pillClass: "muted",
+        summary: "当前不参与这个库的后续搜索与入库。",
+        context: hasOverride ? "当前库覆盖" : "沿用全局默认",
+      };
+    }
+
+    if (!binding.model) {
+      return {
+        contentType,
+        statusLabel: "未配置模型",
+        pillClass: "error",
+        summary: "已经启用，但当前没有绑定模型。",
+        context: hasOverride ? "当前库覆盖" : "沿用全局默认",
+      };
+    }
+
+    if (!resolved) {
+      return {
+        contentType,
+        statusLabel: "等待解析",
+        pillClass: "pending",
+        summary: `${composeModelReference(selection) || binding.model} 尚未出现在当前 resolved model 摘要里。`,
+        context: hasOverride ? "当前库覆盖" : "沿用全局默认",
+      };
+    }
+
+    if (resolved.status !== "available") {
+      return {
+        contentType,
+        statusLabel: contentTypeResolvedStatusLabel(resolved.status),
+        pillClass: providerSelectionPillClass(resolved.status),
+        summary: resolved.message,
+        context: formatResolvedContentModelContext(resolved),
+      };
+    }
+
+    return {
+      contentType,
+      statusLabel: "已就绪",
+      pillClass: "ready",
+      summary: formatResolvedContentModel(resolved),
+      context: `${formatBindingSource(resolved.binding_source)} · 向量类型 ${resolved.vector_type}`,
+    };
+  });
+}
+
+function libraryOperationalReadiness(library: LibrarySnapshot) {
+  const enabledRoots = state.sourceRoots.filter((item) => item.enabled);
+  const degradedRoots = state.sourceRoots.filter((item) => item.status === "degraded");
+  const nonWatchingRoots = enabledRoots.filter((item) => item.watch_state !== "watching");
+  const watchIssues = nonWatchingRoots.length;
+  const searchableUnits = library.counts.accepted_items;
+  const pendingJobs = library.counts.pending_jobs;
+  const contentTypeEntries = contentTypeReadinessEntries();
+  const blockedContentTypes = contentTypeEntries.filter(
+    (entry) => entry.pillClass === "error" || entry.pillClass === "pending"
+  );
+  const lastActionSummary =
+    state.sourceRoots.map((item) => item.last_action?.summary).find(Boolean) ?? "";
+
+  if (!state.sourceRoots.length) {
+    return {
+      status: "尚未接入来源根",
+      pillClass: "muted",
+      summary: "这个库还没有来源根。先接入一个本地目录来源根，再执行 refresh 或 rescan。",
+      enabledRoots: 0,
+      degradedRoots: 0,
+      watchIssues: 0,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  if (!enabledRoots.length) {
+    return {
+      status: "来源根已停用",
+      pillClass: "muted",
+      summary: "当前所有来源根都已停用；恢复至少一个来源根后，这个库才会继续承接 watcher、refresh 与 rescan。",
+      enabledRoots: 0,
+      degradedRoots: degradedRoots.length,
+      watchIssues,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  if (pendingJobs > 0 && searchableUnits <= 0) {
+    return {
+      status: "正在准备中",
+      pillClass: "pending",
+      summary: "当前已有来源根接入，后台任务正在导入或建索引；任务完成后，这个库就会进入可搜索状态。",
+      enabledRoots: enabledRoots.length,
+      degradedRoots: degradedRoots.length,
+      watchIssues,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  if (degradedRoots.length > 0) {
+    const details = [];
+    details.push(`${degradedRoots.length} 个来源根处于需关注状态`);
+    if (watchIssues > 0) {
+      details.push(`${watchIssues} 个启用来源根当前不在监视中`);
+    }
+    details.push(
+      searchableUnits > 0
+        ? `当前仍有 ${searchableUnits} 个可搜索对象可继续使用`
+        : "建议先检查来源根，再执行一次 refresh 或 rescan"
+    );
+    return {
+      status: "需要关注",
+      pillClass: "error",
+      summary: `${details.join("，")}。`,
+      enabledRoots: enabledRoots.length,
+      degradedRoots: degradedRoots.length,
+      watchIssues,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  if (watchIssues > 0) {
+    return {
+      status: "观察未稳定",
+      pillClass: "pending",
+      summary:
+        searchableUnits > 0
+          ? `${watchIssues} 个启用来源根当前不在监视中，但这个库仍有 ${searchableUnits} 个可搜索对象。`
+          : `${watchIssues} 个启用来源根当前不在监视中；建议先恢复监视或手动执行 refresh / rescan。`,
+      enabledRoots: enabledRoots.length,
+      degradedRoots: degradedRoots.length,
+      watchIssues,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  if (blockedContentTypes.length > 0 && searchableUnits <= 0) {
+    return {
+      status: "等待配置",
+      pillClass: "pending",
+      summary: `${blockedContentTypes.length} 个启用内容类型当前还未就绪；先检查当前库覆盖与 resolved model，再继续导入或搜索。`,
+      enabledRoots: enabledRoots.length,
+      degradedRoots: degradedRoots.length,
+      watchIssues,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  if (blockedContentTypes.length > 0) {
+    return {
+      status: "配置需关注",
+      pillClass: "pending",
+      summary: `${blockedContentTypes.length} 个启用内容类型当前未完全就绪；已有对象仍可搜索，但后续入库会受当前库覆盖与 resolved model 影响。`,
+      enabledRoots: enabledRoots.length,
+      degradedRoots: degradedRoots.length,
+      watchIssues,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  if (searchableUnits <= 0) {
+    return {
+      status: "等待内容",
+      pillClass: "muted",
+      summary: "来源根已经接入，但这个库还没有可搜索对象。先导入首批内容，或对现有来源执行 refresh / rescan。",
+      enabledRoots: enabledRoots.length,
+      degradedRoots: degradedRoots.length,
+      watchIssues,
+      searchableUnits,
+      pendingJobs,
+      blockedContentTypes: blockedContentTypes.length,
+      lastActionSummary,
+    };
+  }
+
+  return {
+    status: "可搜索",
+    pillClass: "ready",
+    summary: `当前库已接入 ${enabledRoots.length} 个启用来源根，${searchableUnits} 个对象可以直接参与搜索。`,
+    enabledRoots: enabledRoots.length,
+    degradedRoots: degradedRoots.length,
+    watchIssues,
+    searchableUnits,
+    pendingJobs,
+    blockedContentTypes: blockedContentTypes.length,
+    lastActionSummary,
+  };
+}
+
+function renderInventoryLibraryManagementBand(library: LibrarySnapshot | null) {
+  if (!library) {
+    return "";
+  }
+
+  const readiness = libraryOperationalReadiness(library);
+  const contentTypeEntries = contentTypeReadinessEntries();
+  const configIssues = contentTypeEntries.filter(
+    (entry) => entry.pillClass === "error" || entry.pillClass === "pending"
+  ).length;
+  const sourceRootSnapshots = [...state.sourceRoots].sort((left, right) => {
+    const priorityDiff = inventorySourceRootPriority(right) - inventorySourceRootPriority(left);
+    if (priorityDiff !== 0) {
+      return priorityDiff;
+    }
+    return left.root_path.localeCompare(right.root_path);
+  });
+  const metrics = [
+    { label: "启用来源根", value: readiness.enabledRoots },
+    { label: "需关注", value: readiness.degradedRoots + readiness.watchIssues + configIssues },
+    { label: "可搜索对象", value: readiness.searchableUnits },
+    { label: "待处理任务", value: readiness.pendingJobs },
+  ];
+
+  return `
+    <section class="inventory-library-band" data-testid="inventory-library-management">
+      <article class="panel inventory-library-overview">
+        <div class="inventory-library-head">
+          <div>
+            <p class="eyebrow">当前库管理</p>
+            <h3 data-testid="inventory-library-name">${escapeHtml(libraryDisplayName(library))}</h3>
+            <p class="helper inventory-library-id">${escapeHtml(library.id)}</p>
+          </div>
+          <span
+            class="pill ${libraryLifecyclePillClass(library)}"
+            data-testid="inventory-library-lifecycle"
+          >
+            ${escapeHtml(libraryLifecycleLabel(library))}
+          </span>
+        </div>
+        <div class="inventory-library-readiness" data-testid="inventory-library-readiness">
+          <div class="inventory-library-readiness-head">
+            <span class="pill ${escapeHtml(readiness.pillClass)}" data-testid="inventory-library-readiness-status">
+              ${escapeHtml(readiness.status)}
+            </span>
+            <span class="helper inventory-library-note">当前库级动作直接作用于这个库本身。</span>
+          </div>
+          <p class="helper" data-testid="inventory-library-readiness-summary">${escapeHtml(readiness.summary)}</p>
+          ${
+            readiness.lastActionSummary
+              ? `<p class="helper inventory-library-readiness-meta">${escapeHtml(readiness.lastActionSummary)}</p>`
+              : ""
+          }
+        </div>
+        <div class="inventory-library-metrics" data-testid="inventory-library-metrics">
+          ${metrics
+            .map(
+              (item) => `
+                <article class="inventory-library-metric">
+                  <span class="inventory-library-metric-label">${escapeHtml(item.label)}</span>
+                  <strong class="inventory-library-metric-value">${escapeHtml(item.value)}</strong>
+                </article>
+              `
+            )
+            .join("")}
+        </div>
+        <section class="inventory-library-root-strip" data-testid="inventory-library-root-strip">
+          <div class="inventory-library-root-strip-head">
+            <strong>来源根快照</strong>
+            <span class="helper">
+              ${
+                state.sourceRoots.length
+                  ? `${escapeHtml(state.sourceRoots.length)} 个来源根`
+                  : "还没有来源根"
+              }
+            </span>
+          </div>
+          ${
+            sourceRootSnapshots.length
+              ? `
+                <ul class="inventory-library-root-list" data-testid="inventory-library-root-list">
+                  ${sourceRootSnapshots
+                    .map(
+                      (sourceRoot) => `
+                        <li
+                          class="inventory-library-root-card"
+                          data-testid="inventory-library-root-card"
+                          data-source-root-id="${escapeHtml(sourceRoot.source_root_id)}"
+                        >
+                          <div class="inventory-library-root-head">
+                            <strong>${escapeHtml(sourceRoot.root_path)}</strong>
+                            <span class="helper">
+                              匹配 ${escapeHtml(sourceRoot.coverage_summary?.matched_file_count ?? 0)} · 正常 ${escapeHtml(
+                                sourceRoot.coverage_summary?.active_source_count ?? 0
+                              )}
+                            </span>
+                          </div>
+                          <div class="pill-row compact-row inventory-library-root-pills">
+                            <span class="pill ${sourceRootStatusPillClass(sourceRoot.status)}">
+                              ${escapeHtml(sourceRootStatusDisplayName(sourceRoot.status))}
+                            </span>
+                            <span class="pill ${sourceRootWatchStatePillClass(sourceRoot.watch_state)}">
+                              ${escapeHtml(sourceRootWatchStateDisplayName(sourceRoot.watch_state))}
+                            </span>
+                          </div>
+                          <p class="helper inventory-library-root-meta">
+                            ${
+                              sourceRoot.last_action?.summary
+                                ? escapeHtml(sourceRoot.last_action.summary)
+                                : escapeHtml(`最近扫描：${formatScanTime(sourceRoot.coverage_summary?.last_scan_at_ms)}`)
+                            }
+                          </p>
+                        </li>
+                      `
+                    )
+                    .join("")}
+                </ul>
+              `
+              : '<p class="helper inventory-library-root-empty">先从来源准备接入第一个本地目录来源根。</p>'
+          }
+        </section>
+        <section class="inventory-library-config-strip" data-testid="inventory-library-config-strip">
+          <div class="inventory-library-root-strip-head">
+            <div>
+              <strong>当前库覆盖与模型绑定</strong>
+              <p class="helper inventory-library-root-meta">
+                当前展示当前库在各内容类型上的启用状态、resolved model 与需要关注的绑定问题。
+              </p>
+            </div>
+            <button
+              type="button"
+              class="secondary-button"
+              data-testid="inventory-open-library-overrides-button"
+              data-open-settings-section="library-overrides"
+            >
+              查看当前库覆盖
+            </button>
+          </div>
+          <ul class="inventory-library-config-list" data-testid="inventory-library-config-list">
+            ${contentTypeEntries
+              .map(
+                (entry) => `
+                  <li
+                    class="inventory-library-config-card"
+                    data-testid="inventory-library-config-card"
+                    data-content-type="${escapeHtml(entry.contentType)}"
+                  >
+                    <div class="inventory-library-config-head">
+                      <strong>${escapeHtml(contentTypeDisplayName(entry.contentType))}</strong>
+                      <span class="pill ${entry.pillClass}">${escapeHtml(entry.statusLabel)}</span>
+                    </div>
+                    <p class="helper inventory-library-config-summary">${escapeHtml(entry.summary)}</p>
+                    <p class="helper inventory-library-config-context">${escapeHtml(entry.context)}</p>
+                  </li>
+                `
+              )
+              .join("")}
+          </ul>
+        </section>
+      </article>
+      <article class="panel inventory-library-actions">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">管理动作</p>
+            <h3>修改当前库身份与生命周期</h3>
+          </div>
+        </div>
+        <form
+          class="stack-form compact-form"
+          data-testid="inventory-manage-library-form"
+          data-library-rename-form="true"
+        >
+          <label>
+            <span>显示名称</span>
+            <input
+              data-testid="inventory-manage-library-name-input"
+              data-library-management-display-name-input="true"
+              name="manageLibraryDisplayName"
+              type="text"
+              value="${escapeHtml(state.libraryManagementDisplayNameDraft)}"
+              placeholder="例如：季度报告库"
+              required
+            />
+          </label>
+          <button type="submit" data-testid="inventory-rename-library-button">保存名称</button>
+        </form>
+        <div class="inline-actions inventory-library-action-row">
+          <button
+            type="button"
+            class="secondary-button"
+            data-testid="inventory-toggle-library-archive-button"
+            data-library-archive-action="true"
+          >
+            ${libraryIsArchived(library) ? "恢复当前库" : "归档当前库"}
+          </button>
+          <button
+            type="button"
+            class="secondary-button destructive-button"
+            data-testid="inventory-delete-library-button"
+            data-library-delete-action="true"
+          >
+            删除当前库
+          </button>
+        </div>
+      </article>
+    </section>
+  `;
+}
+
+function inventoryRepresentativeKind(source: SourceInventoryItem) {
+  return source.representative_visual_unit?.kind ?? source.kind;
+}
+
+function inventoryRepresentativeSourceType(source: SourceInventoryItem) {
+  return source.representative_visual_unit?.source_type ?? source.source_type;
+}
+
+function inventoryRepresentativeKindIcon(source: SourceInventoryItem) {
+  const kind = inventoryRepresentativeKind(source);
+  if (kind === "video_segment") {
+    return "video";
+  }
+  if (kind === "document_page") {
+    return "document";
+  }
+  return "image";
+}
+
+function renderInventorySourceThumbnail(source: SourceInventoryItem) {
+  const kind = inventoryRepresentativeKind(source);
+  const preview = source.representative_preview;
+  if (kind === "image" && preview?.url) {
+    return `
+      <img
+        class="inventory-source-thumbnail"
+        src="${escapeHtml(preview.url)}"
+        alt="${escapeHtml(sourceName(source.source_path))}"
+        loading="lazy"
+      />
+    `;
+  }
+
+  return `
+    <div class="inventory-source-thumbnail inventory-source-thumbnail-placeholder">
+      ${renderUiIcon(inventoryRepresentativeKindIcon(source))}
+      <span>${escapeHtml(visualUnitKindDisplayName(kind))}</span>
+    </div>
+  `;
+}
+
 function renderProviderOptions(currentValue = "", includeEmpty = false) {
   const emptyOption = includeEmpty
-    ? `<option value="" ${!currentValue ? "selected" : ""}>none</option>`
+    ? `<option value="" ${!currentValue ? "selected" : ""}>未选择</option>`
     : "";
   const hasCurrentValue =
     !!currentValue && state.providerConfigs.some((provider) => provider.provider_id === currentValue);
   const missingOption =
     currentValue && !hasCurrentValue
-      ? `<option value="${escapeHtml(currentValue)}" selected>${escapeHtml(currentValue)} (configured)</option>`
+      ? `<option value="${escapeHtml(currentValue)}" selected>${escapeHtml(currentValue)} (已配置)</option>`
       : "";
   return `${emptyOption}${missingOption}${state.providerConfigs
     .map(
       (provider) => `
         <option value="${escapeHtml(provider.provider_id)}" ${provider.provider_id === currentValue ? "selected" : ""}>
-          ${escapeHtml(provider.display_name)} (${escapeHtml(provider.provider_kind)}${provider.enabled ? "" : " · disabled"})
+          ${escapeHtml(provider.display_name)} (${escapeHtml(provider.provider_kind)}${provider.enabled ? "" : " · 已停用"})
         </option>
       `
     )
     .join("")}`;
+}
+
+function renderContentTypeTabs(scope: "global" | "library", selected: string, contentTypes: string[]) {
+  return `
+    <div class="content-type-tabs" data-testid="${escapeHtml(scope)}-content-type-tabs">
+      ${contentTypes
+        .map(
+          (contentType) => `
+            <button
+              type="button"
+              class="content-type-tab ${contentType === selected ? "active" : ""}"
+              data-testid="${escapeHtml(scope)}-content-type-tab-${escapeHtml(contentType)}"
+              data-content-type-scope="${escapeHtml(scope)}"
+              data-content-type="${escapeHtml(contentType)}"
+            >
+              <span class="eyebrow">${escapeHtml(contentType)}</span>
+              <strong>${escapeHtml(contentTypeDisplayName(contentType))}</strong>
+            </button>
+          `
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function renderProviderBridge(library: LibrarySnapshot | null) {
@@ -2220,29 +4811,63 @@ function renderProviderBridge(library: LibrarySnapshot | null) {
     ? selections
         .map(
           (selection) =>
-            `${selection.content_type}: ${formatResolvedContentModel(selection)} · ${selection.status}`
+            `${contentTypeDisplayName(selection.content_type)}：${formatResolvedContentModel(selection)} · ${selection.status}`
         )
         .join(" | ")
-    : "当前库的 resolved content model 尚未加载。";
+    : "当前库的当前生效模型尚未加载。";
 
   return `
     <div class="workspace-bridge" data-testid="provider-bridge">
-      <p class="eyebrow">Providers</p>
+      <p class="eyebrow">设置</p>
       <p class="helper" data-testid="provider-bridge-summary">${escapeHtml(summary)}</p>
       <div class="inline-actions">
         ${
           state.activeWorkspace === "settings"
-            ? '<span class="pill ready" data-testid="provider-bridge-state">Settings active</span>'
+            ? '<span class="pill ready" data-testid="provider-bridge-state">设置已打开</span>'
             : `<button
                 type="button"
                 class="secondary-button"
                 data-testid="provider-bridge-button"
                 data-workspace="settings"
               >
-                查看 Settings
+                前往设置
               </button>`
         }
       </div>
+    </div>
+  `;
+}
+
+function providerRuntimeSnapshot(providerId: string) {
+  return state.runtimeHealth?.providers.find((provider) => provider.provider_id === providerId) ?? null;
+}
+
+function renderProviderRuntimeSummary(providerId: string, options: { editor?: boolean } = {}) {
+  const runtimeProvider = providerRuntimeSnapshot(providerId);
+  const testId = options.editor
+    ? "provider-editor-runtime-summary"
+    : `provider-runtime-summary-${providerId}`;
+
+  if (!runtimeProvider) {
+    return `
+      <div class="provider-runtime-summary" data-testid="${escapeHtml(testId)}">
+        <p class="helper">当前还没有拿到这个连接的运行时模型快照。</p>
+      </div>
+    `;
+  }
+
+  const facts = [
+    runtimeProvider.model_id ? `当前模型 ${runtimeProvider.model_id}` : "当前模型 未解析",
+    runtimeProvider.model_version ? `模型版本 ${runtimeProvider.model_version}` : "模型版本 未解析",
+    runtimeProvider.model_revision ? `模型修订 ${runtimeProvider.model_revision}` : null,
+  ]
+    .filter(Boolean)
+    .map((value) => `<span class="helper">${escapeHtml(String(value))}</span>`)
+    .join("");
+
+  return `
+    <div class="provider-runtime-summary" data-testid="${escapeHtml(testId)}">
+      ${facts}
     </div>
   `;
 }
@@ -2259,6 +4884,12 @@ function renderProviderConfigsPanel() {
                 <div class="provider-profile-main">
                   <strong>${escapeHtml(provider.display_name)}</strong>
                   <span class="helper">${escapeHtml(provider.provider_id)} · ${escapeHtml(provider.provider_kind)}</span>
+                  ${
+                    provider.base_url
+                      ? `<span class="helper">${escapeHtml(provider.base_url)}</span>`
+                      : ""
+                  }
+                  ${renderProviderRuntimeSummary(provider.provider_id)}
                 </div>
                 <div class="provider-profile-meta">
                   <span class="pill ${providerProbePillClass(provider.probe?.status)}">${escapeHtml(provider.probe?.status ?? "unknown")}</span>
@@ -2270,75 +4901,88 @@ function renderProviderConfigsPanel() {
           .join("")}
       </ul>
     `
-    : `<p class="empty">当前还没有可见 provider。</p>`;
+    : `<p class="empty">当前还没有可用连接。</p>`;
 
   return `
     <section class="panel settings-panel" data-testid="provider-configs-panel">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Providers</p>
-          <h2>Built-in providers</h2>
+          <p class="eyebrow">连接</p>
+          <h2>连接</h2>
         </div>
       </div>
-      <form id="provider-config-form" class="stack-form" data-testid="provider-config-form">
-        <label>
-          <span>Provider</span>
-          <select id="provider-config-id" data-testid="provider-config-id">
-            <option value="" ${!state.editingProviderId ? "selected" : ""}>选择一个 provider</option>
-            ${state.providerConfigs
-              .map(
-                (provider) => `
-                  <option value="${escapeHtml(provider.provider_id)}" ${provider.provider_id === state.editingProviderId ? "selected" : ""}>
-                    ${escapeHtml(provider.display_name)}
-                  </option>
-                `
-              )
-              .join("")}
-          </select>
-        </label>
-        <div class="filter-grid settings-filter-grid">
-          <label class="checkbox-field">
-            <input
-              id="provider-enabled"
-              data-testid="provider-enabled"
-              type="checkbox"
-              ${state.providerEnabledDraft ? "checked" : ""}
-              ${!editingProvider ? "disabled" : ""}
-            />
-            <span>Enabled</span>
-          </label>
+      <div class="provider-configs-layout">
+        <div class="provider-config-list-surface">
+          <p class="helper">左侧保持连接状态与连接摘要；右侧只编辑当前选中的连接，不把这章变成新的运维控制台。</p>
+          ${listMarkup}
+        </div>
+        <form id="provider-config-form" class="stack-form provider-config-editor" data-testid="provider-config-form">
           <label>
-            <span>Base URL</span>
-            <input
-              id="provider-base-url"
-              data-testid="provider-base-url"
-              type="url"
-              value="${escapeHtml(state.providerBaseUrlDraft)}"
-              placeholder="https://dashscope.aliyuncs.com"
-              ${!editingProvider || editingProvider.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
-            />
+            <span>连接</span>
+            <select id="provider-config-id" data-testid="provider-config-id">
+              <option value="" ${!state.editingProviderId ? "selected" : ""}>选择一个连接</option>
+              ${state.providerConfigs
+                .map(
+                  (provider) => `
+                    <option value="${escapeHtml(provider.provider_id)}" ${provider.provider_id === state.editingProviderId ? "selected" : ""}>
+                      ${escapeHtml(provider.display_name)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
           </label>
-        </div>
-        ${
-          editingProvider?.readonly_reason
-            ? `<p class="helper" data-testid="provider-readonly-reason">${escapeHtml(editingProvider.readonly_reason)}</p>`
-            : ""
-        }
-        <div class="inline-actions">
-          <button type="submit" data-testid="provider-config-submit-button" ${!editingProvider ? "disabled" : ""}>
-            保存 provider 配置
-          </button>
-          <button
-            type="button"
-            id="provider-config-reset-button"
-            data-testid="provider-config-reset-button"
-            class="secondary-button"
-          >
-            重置
-          </button>
-        </div>
-      </form>
-      ${listMarkup}
+          <div class="filter-grid settings-filter-grid">
+            <label class="checkbox-field">
+              <input
+                id="provider-enabled"
+                data-testid="provider-enabled"
+                type="checkbox"
+                ${state.providerEnabledDraft ? "checked" : ""}
+                ${!editingProvider ? "disabled" : ""}
+              />
+              <span>启用</span>
+            </label>
+            <label>
+              <span>连接地址</span>
+              <input
+                id="provider-base-url"
+                data-testid="provider-base-url"
+                type="url"
+                value="${escapeHtml(state.providerBaseUrlDraft)}"
+                placeholder="https://dashscope.aliyuncs.com"
+                ${!editingProvider || editingProvider.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
+              />
+            </label>
+          </div>
+          ${
+            editingProvider
+              ? `
+                  <p class="helper">${escapeHtml(editingProvider.provider_id)} · ${escapeHtml(editingProvider.provider_kind)}</p>
+                  ${renderProviderRuntimeSummary(editingProvider.provider_id, { editor: true })}
+                `
+              : `<p class="helper">先从左侧选择一个连接，再修改启用状态或连接地址。</p>`
+          }
+          ${
+            editingProvider?.readonly_reason
+              ? `<p class="helper" data-testid="provider-readonly-reason">${escapeHtml(editingProvider.readonly_reason)}</p>`
+              : ""
+          }
+          <div class="inline-actions">
+            <button type="submit" data-testid="provider-config-submit-button" ${!editingProvider ? "disabled" : ""}>
+              保存连接配置
+            </button>
+            <button
+              type="button"
+              id="provider-config-reset-button"
+              data-testid="provider-config-reset-button"
+              class="secondary-button"
+            >
+              重置
+            </button>
+          </div>
+        </form>
+      </div>
     </section>
   `;
 }
@@ -2347,11 +4991,11 @@ function renderModelIdOptions(providerId: string, currentValue: string, includeE
   const entries = catalogEntriesForProvider(providerId);
   const hasCurrentValue = !!currentValue && entries.some((entry) => entry.model_id === currentValue);
   const emptyOption = includeEmpty
-    ? `<option value="" ${!currentValue ? "selected" : ""}>none</option>`
+    ? `<option value="" ${!currentValue ? "selected" : ""}>未选择</option>`
     : "";
   const missingOption =
     currentValue && !hasCurrentValue
-      ? `<option value="${escapeHtml(currentValue)}" selected>${escapeHtml(currentValue)} (configured)</option>`
+      ? `<option value="${escapeHtml(currentValue)}" selected>${escapeHtml(currentValue)} (已配置)</option>`
       : "";
   return `${emptyOption}${missingOption}${entries
     .map(
@@ -2376,37 +5020,26 @@ function renderVectorTypeOptions(selection: ModelSelectionPayload, currentValue:
     .join("");
 }
 
-function renderGlobalContentTypesPanel() {
+function renderGlobalContentTypesPanel(includeTestPanel = true) {
   const contentType = selectedGlobalContentTypeKey();
   const binding = selectedGlobalContentTypeBinding();
   const selection = selectionFromBinding(binding);
   const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
   const supportedModalities = selectedGlobalTestModalities();
+  const contentTypes = availableContentTypeKeys(state.globalContentTypes);
 
   return `
     <section class="panel settings-panel" data-testid="global-content-types-panel">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Defaults</p>
-          <h2>Global content type bindings</h2>
+          <p class="eyebrow">内容类型</p>
+          <h2>全局内容类型</h2>
         </div>
       </div>
+      ${renderContentTypeTabs("global", contentType, contentTypes)}
       <form id="global-content-types-form" class="stack-form" data-testid="global-content-types-form">
+        <input id="global-content-type" data-testid="global-content-type" type="hidden" value="${escapeHtml(contentType)}" />
         <div class="filter-grid settings-filter-grid">
-          <label>
-            <span>content_type</span>
-            <select id="global-content-type" data-testid="global-content-type">
-              ${sortedContentTypeKeys(state.globalContentTypes)
-                .map(
-                  (value) => `
-                    <option value="${escapeHtml(value)}" ${value === contentType ? "selected" : ""}>
-                      ${escapeHtml(value)}
-                    </option>
-                  `
-                )
-                .join("")}
-            </select>
-          </label>
           <label class="checkbox-field">
             <input
               id="global-content-type-enabled"
@@ -2414,18 +5047,18 @@ function renderGlobalContentTypesPanel() {
               type="checkbox"
               ${binding.enabled ? "checked" : ""}
             />
-            <span>Enabled</span>
+            <span>启用</span>
           </label>
         </div>
         <div class="filter-grid settings-filter-grid">
           <label>
-            <span>provider</span>
+            <span>连接</span>
             <select id="global-content-type-provider-id" data-testid="global-content-type-provider-id">
               ${renderProviderOptions(selection.provider_id)}
             </select>
           </label>
           <label>
-            <span>model_id</span>
+            <span>模型</span>
             <select
               id="global-content-type-model-id"
               data-testid="global-content-type-model-id"
@@ -2435,7 +5068,7 @@ function renderGlobalContentTypesPanel() {
             </select>
           </label>
           <label>
-            <span>vector_type</span>
+            <span>向量类型</span>
             <select
               id="global-content-type-vector-type"
               data-testid="global-content-type-vector-type"
@@ -2456,42 +5089,46 @@ function renderGlobalContentTypesPanel() {
         }
         <p class="helper" data-testid="global-content-type-summary">
           ${escapeHtml(
-            `${contentType} -> ${binding.model || "unconfigured"} · ${binding.vector_type || "no-vector-type"} · ${binding.enabled ? "enabled" : "disabled"}`
+            `${contentTypeDisplayName(contentType)} → ${binding.model || "未配置"} · ${binding.vector_type || "未设置向量类型"} · ${binding.enabled ? "已启用" : "已停用"}`
           )}
         </p>
         <div class="inline-actions">
-          <button type="submit" data-testid="global-content-types-submit-button">保存全局 content type 绑定</button>
+          <button type="submit" data-testid="global-content-types-submit-button">保存全局内容类型绑定</button>
         </div>
       </form>
-      ${renderSettingsModelTestPanel({
-        scope: "global",
-        selection,
-        supportedModalities,
-        modalityDraft: state.globalModelTestModalityDraft,
-        textDraft: state.globalModelTestTextDraft,
-        file: state.globalModelTestFile,
-        comparisonModalityDraft: state.globalModelTestComparisonModalityDraft,
-        comparisonTextDraft: state.globalModelTestComparisonTextDraft,
-        comparisonFile: state.globalModelTestComparisonFile,
-        result: state.globalModelTestResult,
-        error: state.globalModelTestError,
-        pending: state.globalModelTestPending,
-      })}
+      ${
+        includeTestPanel
+          ? renderSettingsModelTestPanel({
+              scope: "global",
+              selection,
+              supportedModalities,
+              modalityDraft: state.globalModelTestModalityDraft,
+              textDraft: state.globalModelTestTextDraft,
+              file: state.globalModelTestFile,
+              comparisonModalityDraft: state.globalModelTestComparisonModalityDraft,
+              comparisonTextDraft: state.globalModelTestComparisonTextDraft,
+              comparisonFile: state.globalModelTestComparisonFile,
+              result: state.globalModelTestResult,
+              error: state.globalModelTestError,
+              pending: state.globalModelTestPending,
+            })
+          : ""
+      }
     </section>
   `;
 }
 
-function renderLibraryContentTypesPanel(library: LibrarySnapshot | null) {
+function renderLibraryContentTypesPanel(library: LibrarySnapshot | null, includeTestPanel = true) {
   if (!library) {
     return `
       <section class="panel settings-panel" data-testid="library-content-types-panel">
         <div class="panel-head">
           <div>
-            <p class="eyebrow">Overrides</p>
-            <h2>Library content type bindings</h2>
+            <p class="eyebrow">当前库覆盖</p>
+            <h2>当前库覆盖</h2>
           </div>
         </div>
-        <p class="empty">先选择一个库，再编辑库级 content type binding。</p>
+        <p class="empty">先选择一个库，再编辑库级内容类型绑定。</p>
       </section>
     `;
   }
@@ -2501,63 +5138,86 @@ function renderLibraryContentTypesPanel(library: LibrarySnapshot | null) {
   const selection = selectionFromBinding(binding);
   const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
   const supportedModalities = selectedLibraryTestModalities();
+  const hasOverride = selectedLibraryContentTypeHasOverride();
+  const contentTypes = availableContentTypeKeys(
+    state.globalContentTypes,
+    state.libraryContentTypes,
+    state.resolvedContentModels ? { content_types: state.resolvedContentModels.content_types } : null
+  );
 
   return `
     <section class="panel settings-panel" data-testid="library-content-types-panel">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Overrides</p>
-          <h2>Library content type bindings</h2>
+          <p class="eyebrow">当前库覆盖</p>
+          <h2>当前库覆盖</h2>
         </div>
       </div>
+      ${renderContentTypeTabs("library", contentType, contentTypes)}
       <form id="library-content-types-form" class="stack-form" data-testid="library-content-types-form">
+        <input id="library-content-type" data-testid="library-content-type" type="hidden" value="${escapeHtml(contentType)}" />
+        <div class="override-mode-switch" data-testid="library-override-mode-switch">
+          <button
+            type="button"
+            class="${!hasOverride ? "active" : "secondary-button"}"
+            data-testid="library-override-mode-inherit"
+            data-library-override-mode="inherit"
+          >
+            继承默认
+          </button>
+          <button
+            type="button"
+            class="${hasOverride ? "active" : "secondary-button"}"
+            data-testid="library-override-mode-override"
+            data-library-override-mode="override"
+          >
+            覆盖当前库
+          </button>
+        </div>
+        <div class="override-mode-summary ${hasOverride ? "override-mode-summary-override" : ""}">
+          <p class="helper">
+            ${
+              hasOverride
+                ? escapeHtml(`当前 ${contentTypeDisplayName(contentType)} 已切到库级覆盖，保存后只影响 ${libraryDisplayName(library)}。`)
+                : escapeHtml(`当前 ${contentTypeDisplayName(contentType)} 正沿用全局内容类型。点击“覆盖当前库”后才会进入可编辑状态。`)
+            }
+          </p>
+        </div>
         <div class="filter-grid settings-filter-grid">
-          <label>
-            <span>content_type</span>
-            <select id="library-content-type" data-testid="library-content-type">
-              ${sortedContentTypeKeys(state.libraryContentTypes)
-                .map(
-                  (value) => `
-                    <option value="${escapeHtml(value)}" ${value === contentType ? "selected" : ""}>
-                      ${escapeHtml(value)}
-                    </option>
-                  `
-                )
-                .join("")}
-            </select>
-          </label>
           <label class="checkbox-field">
             <input
               id="library-content-type-enabled"
               data-testid="library-content-type-enabled"
               type="checkbox"
               ${binding.enabled ? "checked" : ""}
+              ${hasOverride ? "" : "disabled"}
             />
-            <span>Enabled</span>
+            <span>启用</span>
           </label>
         </div>
         <div class="filter-grid settings-filter-grid">
           <label>
-            <span>provider</span>
-            <select id="library-content-type-provider-id" data-testid="library-content-type-provider-id">
+            <span>连接</span>
+            <select id="library-content-type-provider-id" data-testid="library-content-type-provider-id" ${hasOverride ? "" : "disabled"}>
               ${renderProviderOptions(selection.provider_id)}
             </select>
           </label>
           <label>
-            <span>model_id</span>
+            <span>模型</span>
             <select
               id="library-content-type-model-id"
               data-testid="library-content-type-model-id"
-              ${selection.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
+              ${hasOverride && selection.provider_id !== PROVIDER_ID_LOCAL_SIDECAR ? "" : "disabled"}
             >
               ${renderModelIdOptions(selection.provider_id, selection.model_id)}
             </select>
           </label>
           <label>
-            <span>vector_type</span>
+            <span>向量类型</span>
             <select
               id="library-content-type-vector-type"
               data-testid="library-content-type-vector-type"
+              ${hasOverride ? "" : "disabled"}
             >
               ${renderVectorTypeOptions(selection, binding.vector_type)}
             </select>
@@ -2572,35 +5232,40 @@ function renderLibraryContentTypesPanel(library: LibrarySnapshot | null) {
         }
         <p class="helper" data-testid="library-content-type-summary">
           ${escapeHtml(
-            `${contentType} -> ${binding.model || "unconfigured"} · ${binding.vector_type || "no-vector-type"} · ${binding.enabled ? "enabled" : "disabled"}`
+            `${contentTypeDisplayName(contentType)} → ${binding.model || "未配置"} · ${binding.vector_type || "未设置向量类型"} · ${binding.enabled ? "已启用" : "已停用"}`
           )}
         </p>
         <div class="inline-actions">
-          <button type="submit" data-testid="library-content-types-submit-button">保存库级 content type 绑定</button>
+          <button type="submit" data-testid="library-content-types-submit-button" ${hasOverride ? "" : "disabled"}>保存库级内容类型绑定</button>
           <button
             type="button"
             id="library-content-types-reset-button"
             data-testid="library-content-types-reset-button"
             class="secondary-button"
+            ${hasOverride ? "" : "disabled"}
           >
-            重置为全局默认
+            恢复默认
           </button>
         </div>
       </form>
-      ${renderSettingsModelTestPanel({
-        scope: "library",
-        selection,
-        supportedModalities,
-        modalityDraft: state.libraryModelTestModalityDraft,
-        textDraft: state.libraryModelTestTextDraft,
-        file: state.libraryModelTestFile,
-        comparisonModalityDraft: state.libraryModelTestComparisonModalityDraft,
-        comparisonTextDraft: state.libraryModelTestComparisonTextDraft,
-        comparisonFile: state.libraryModelTestComparisonFile,
-        result: state.libraryModelTestResult,
-        error: state.libraryModelTestError,
-        pending: state.libraryModelTestPending,
-      })}
+      ${
+        includeTestPanel
+          ? renderSettingsModelTestPanel({
+              scope: "library",
+              selection,
+              supportedModalities,
+              modalityDraft: state.libraryModelTestModalityDraft,
+              textDraft: state.libraryModelTestTextDraft,
+              file: state.libraryModelTestFile,
+              comparisonModalityDraft: state.libraryModelTestComparisonModalityDraft,
+              comparisonTextDraft: state.libraryModelTestComparisonTextDraft,
+              comparisonFile: state.libraryModelTestComparisonFile,
+              result: state.libraryModelTestResult,
+              error: state.libraryModelTestError,
+              pending: state.libraryModelTestPending,
+            })
+          : ""
+      }
     </section>
   `;
 }
@@ -2615,15 +5280,10 @@ function renderResolvedContentModelsPanel(library: LibrarySnapshot | null) {
       ([contentType, selection]) => `
         <li class="provider-resolution-row">
           <div>
-            <strong>${escapeHtml(contentType)}</strong>
+            <strong>${escapeHtml(contentTypeDisplayName(contentType))}</strong>
             <span class="helper">${escapeHtml(formatResolvedContentModel(selection))} · ${escapeHtml(formatBindingSource(selection.binding_source))}</span>
             <span class="helper">${escapeHtml(formatResolvedContentModelContext(selection))}</span>
-            <span class="helper">${escapeHtml(`vector_type ${selection.vector_type}`)}</span>
-            ${
-              selection.vector_space_id
-                ? `<span class="helper">${escapeHtml(`vector_space ${selection.vector_space_id}`)}</span>`
-                : ""
-            }
+            <span class="helper">${escapeHtml(`向量类型 ${selection.vector_type}`)}</span>
             <span class="helper">${escapeHtml(
               formatEmbeddingCapabilities(selection.embedding_capabilities, { includePrefix: true })
             )}</span>
@@ -2639,13 +5299,19 @@ function renderResolvedContentModelsPanel(library: LibrarySnapshot | null) {
     <section class="panel settings-panel" data-testid="resolved-content-models-panel">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Resolved</p>
-          <h2>Resolved content models for ${escapeHtml(libraryDisplayName(library))}</h2>
+          <p class="eyebrow">当前生效结果</p>
+          <h2>${escapeHtml(libraryDisplayName(library))} 的当前生效模型</h2>
         </div>
       </div>
-      <ul class="provider-resolution-list">${rows || '<li class="empty">暂无 resolved content model。</li>'}</ul>
+      <ul class="provider-resolution-list">${rows || '<li class="empty">暂无当前生效模型。</li>'}</ul>
     </section>
   `;
+}
+
+function retiredVectorSpaceDiagnostics() {
+  return (state.vectorSpaceDiagnostics?.vector_spaces ?? []).filter(
+    (vectorSpace) => vectorSpace.lifecycle_state !== "active"
+  );
 }
 
 function renderVectorSpaceDiagnosticsPanel(library: LibrarySnapshot | null) {
@@ -2659,13 +5325,13 @@ function renderVectorSpaceDiagnosticsPanel(library: LibrarySnapshot | null) {
         vectorSpace.provider_id && vectorSpace.model_id
           ? `${vectorSpace.provider_id}/${vectorSpace.model_id}`
           : null,
-        vectorSpace.model_version ? `version ${vectorSpace.model_version}` : null,
-        vectorSpace.vector_type ? `vector_type ${vectorSpace.vector_type}` : null,
+        vectorSpace.model_version ? `版本 ${vectorSpace.model_version}` : null,
+        vectorSpace.vector_type ? `向量类型 ${vectorSpace.vector_type}` : null,
         vectorSpace.content_types.length
-          ? `content_types ${vectorSpace.content_types.join(", ")}`
+          ? `内容类型 ${vectorSpace.content_types.map((contentType) => contentTypeDisplayName(contentType)).join("、")}`
           : null,
         typeof vectorSpace.retired_at_ms === "number"
-          ? `retired_at ${new Date(vectorSpace.retired_at_ms).toLocaleString()}`
+          ? `停用时间 ${new Date(vectorSpace.retired_at_ms).toLocaleString()}`
           : null,
       ]
         .filter(Boolean)
@@ -2690,11 +5356,78 @@ function renderVectorSpaceDiagnosticsPanel(library: LibrarySnapshot | null) {
     <section class="panel settings-panel" data-testid="vector-space-diagnostics-panel">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Diagnostics</p>
-          <h2>Vector spaces for ${escapeHtml(libraryDisplayName(library))}</h2>
+          <p class="eyebrow">诊断</p>
+          <h2>${escapeHtml(libraryDisplayName(library))} 的执行空间</h2>
         </div>
       </div>
-      <ul class="provider-resolution-list">${rows || '<li class="empty">暂无 vector space diagnostics。</li>'}</ul>
+      <ul class="provider-resolution-list">${rows || '<li class="empty">暂无执行空间诊断。</li>'}</ul>
+    </section>
+  `;
+}
+
+function renderMaintenanceActionsPanel(library: LibrarySnapshot | null) {
+  const retiredVectorSpaces = retiredVectorSpaceDiagnostics();
+
+  if (!library) {
+    return `
+      <section class="panel settings-panel" data-testid="maintenance-actions-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">维护</p>
+            <h2>维护动作</h2>
+          </div>
+        </div>
+        <p class="empty">先选择一个库，再执行重建或清理动作。</p>
+      </section>
+    `;
+  }
+
+  const retiredSummary = retiredVectorSpaces.length
+    ? `当前库还有 ${retiredVectorSpaces.length} 个退役执行空间可立即清理。`
+    : "当前没有退役执行空间待清理。";
+  const retiredList = retiredVectorSpaces.length
+    ? `
+        <div class="pill-row compact-row" data-testid="maintenance-retired-vector-spaces">
+          ${retiredVectorSpaces
+            .map(
+              (vectorSpace) => `
+                <span class="pill muted">${escapeHtml(vectorSpace.vector_space_id)}</span>
+              `
+            )
+            .join("")}
+        </div>
+      `
+    : "";
+
+  return `
+    <section class="panel settings-panel" data-testid="maintenance-actions-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">维护</p>
+          <h2>${escapeHtml(libraryDisplayName(library))} 的维护动作</h2>
+        </div>
+      </div>
+      <p class="helper">显式维护动作仍走后台任务路径，用来处理重建与退役执行空间清理，而不是把这些动作散落在搜索主舞台。</p>
+      <p class="helper" data-testid="maintenance-retired-summary">${escapeHtml(retiredSummary)}</p>
+      ${retiredList}
+      <div class="inline-actions">
+        <button
+          type="button"
+          id="diagnostics-rebuild-library-button"
+          data-testid="diagnostics-rebuild-library"
+        >
+          重建当前库
+        </button>
+        <button
+          type="button"
+          id="diagnostics-cleanup-retired-vector-spaces-button"
+          data-testid="diagnostics-cleanup-retired-vector-spaces"
+          class="secondary-button"
+          ${retiredVectorSpaces.length ? "" : "disabled"}
+        >
+          清理退役执行空间
+        </button>
+      </div>
     </section>
   `;
 }
@@ -2715,7 +5448,7 @@ function renderRuntimeHealthPanel() {
               <div>
                 <strong>${escapeHtml(snapshot.display_name)}</strong>
                 <span class="helper">${escapeHtml(snapshot.message)}</span>
-                <span class="helper">${escapeHtml(`checked ${snapshot.last_checked_at}`)}</span>
+                <span class="helper">${escapeHtml(`最近检查 ${snapshot.last_checked_at}`)}</span>
                 ${details}
               </div>
               <span class="pill ${providerSelectionPillClass(snapshot.status)}">${escapeHtml(snapshot.status)}</span>
@@ -2729,9 +5462,9 @@ function renderRuntimeHealthPanel() {
         .map((provider) => {
           const details = [
             provider.model_id ? `${provider.provider_id}/${provider.model_id}` : provider.provider_id,
-            provider.model_version ? `version ${provider.model_version}` : null,
-            provider.model_revision ? `revision ${provider.model_revision}` : null,
-            provider.last_probed_at ? `probed ${provider.last_probed_at}` : null,
+            provider.model_version ? `版本 ${provider.model_version}` : null,
+            provider.model_revision ? `修订 ${provider.model_revision}` : null,
+            provider.last_probed_at ? `最近探测 ${provider.last_probed_at}` : null,
           ]
             .filter(Boolean)
             .map((value) => `<span class="helper">${escapeHtml(String(value))}</span>`)
@@ -2748,7 +5481,7 @@ function renderRuntimeHealthPanel() {
             : "";
           const adapters = provider.runtime_adapters.length
             ? `<span class="helper">${escapeHtml(
-                `runtime adapters ${provider.runtime_adapters.join(", ")}`
+                `运行时适配器 ${provider.runtime_adapters.join(", ")}`
               )}</span>`
             : "";
 
@@ -2773,59 +5506,411 @@ function renderRuntimeHealthPanel() {
     <section class="panel settings-panel" data-testid="runtime-health-panel">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">Runtime</p>
-          <h2>Runtime health</h2>
+          <p class="eyebrow">运行时</p>
+          <h2>运行时健康</h2>
         </div>
       </div>
       <ul class="provider-resolution-list">
-        ${processRows || '<li class="empty">暂无 runtime health 快照。</li>'}
+        ${processRows || '<li class="empty">暂无运行时健康快照。</li>'}
       </ul>
       <div class="inline-actions">
-        <a href="${endpoints.appHealth}" target="_blank" rel="noreferrer">App health</a>
-        <a href="${endpoints.sidecarHealth}" target="_blank" rel="noreferrer">Sidecar health</a>
+        <a href="${endpoints.appHealth}" target="_blank" rel="noreferrer">App 健康</a>
+        <a href="${endpoints.sidecarHealth}" target="_blank" rel="noreferrer">Sidecar 健康</a>
         <a href="${endpoints.qdrantCollections}" target="_blank" rel="noreferrer">Qdrant</a>
       </div>
       <ul class="provider-resolution-list">
-        ${providerRows || '<li class="empty">暂无 provider runtime diagnostics。</li>'}
+        ${providerRows || '<li class="empty">暂无连接运行时诊断。</li>'}
       </ul>
     </section>
   `;
 }
 
-function renderSettingsPanel(library: LibrarySnapshot | null) {
+function renderModelTestsSection(library: LibrarySnapshot | null) {
+  const globalSelection = selectedGlobalModelSelection();
+  const librarySelection = selectedLibraryModelSelection();
+
   return `
-    <div class="settings-stack" data-testid="settings-workspace">
-      ${renderRuntimeHealthPanel()}
-      ${renderProviderConfigsPanel()}
-      ${renderGlobalContentTypesPanel()}
-      ${renderLibraryContentTypesPanel(library)}
-      ${renderResolvedContentModelsPanel(library)}
-      ${renderVectorSpaceDiagnosticsPanel(library)}
+    <div class="settings-stack">
+      <section class="panel settings-panel settings-explainer-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">模型测试</p>
+            <h2>测试当前草稿</h2>
+          </div>
+        </div>
+        <p class="helper">模型测试固定面向当前未保存草稿，用来验证输入模态、向量形状和相似度，不直接替代正式保存流程。</p>
+      </section>
+      ${renderSettingsModelTestPanel({
+        scope: "global",
+        selection: globalSelection,
+        supportedModalities: selectedGlobalTestModalities(),
+        modalityDraft: state.globalModelTestModalityDraft,
+        textDraft: state.globalModelTestTextDraft,
+        file: state.globalModelTestFile,
+        comparisonModalityDraft: state.globalModelTestComparisonModalityDraft,
+        comparisonTextDraft: state.globalModelTestComparisonTextDraft,
+        comparisonFile: state.globalModelTestComparisonFile,
+        result: state.globalModelTestResult,
+        error: state.globalModelTestError,
+        pending: state.globalModelTestPending,
+      })}
+      ${
+        library
+          ? renderSettingsModelTestPanel({
+              scope: "library",
+              selection: librarySelection,
+              supportedModalities: selectedLibraryTestModalities(),
+              modalityDraft: state.libraryModelTestModalityDraft,
+              textDraft: state.libraryModelTestTextDraft,
+              file: state.libraryModelTestFile,
+              comparisonModalityDraft: state.libraryModelTestComparisonModalityDraft,
+              comparisonTextDraft: state.libraryModelTestComparisonTextDraft,
+              comparisonFile: state.libraryModelTestComparisonFile,
+              result: state.libraryModelTestResult,
+              error: state.libraryModelTestError,
+              pending: state.libraryModelTestPending,
+            })
+          : ""
+      }
     </div>
   `;
 }
 
-function renderLibrarySourcesPanel(library) {
+function renderSettingsNavRail() {
+  const sections: SettingsSection[] = [
+    "content-types",
+    "library-overrides",
+    "providers",
+    "model-tests",
+    "diagnostics",
+  ];
+
+  return `
+    <nav class="settings-nav-rail" data-testid="settings-nav-rail" aria-label="设置章节">
+      <div class="settings-nav-rail-head">
+        <p class="eyebrow">章节导航</p>
+        <p class="helper">先定默认，再核对当前库差异；连接、测试与诊断后置。</p>
+      </div>
+      ${sections
+        .map(
+          (section) => {
+            const pill = settingsSectionPill(section, selectedLibrary());
+            return `
+            <button
+              type="button"
+              class="settings-nav-button ${state.selectedSettingsSection === section ? "active" : ""}"
+              data-testid="settings-nav-${escapeHtml(section)}"
+              data-settings-section="${escapeHtml(section)}"
+            >
+              <span class="settings-nav-icon">${renderUiIcon(settingsSectionIcon(section))}</span>
+              <span class="settings-nav-copy">
+                <strong>${escapeHtml(settingsSectionLabel(section))}</strong>
+                <span class="helper">${escapeHtml(settingsSectionNavSummary(section, selectedLibrary()))}</span>
+              </span>
+              <span class="pill ${pill.pillClass} settings-nav-pill">${escapeHtml(pill.label)}</span>
+            </button>
+          `;
+          }
+        )
+        .join("")}
+    </nav>
+  `;
+}
+
+function renderSettingsPanel(library: LibrarySnapshot | null) {
+  let activeSurface = "";
+  if (state.selectedSettingsSection === "providers") {
+    activeSurface = renderProviderConfigsPanel();
+  } else if (state.selectedSettingsSection === "library-overrides") {
+    activeSurface = `
+      <div class="settings-dual-surface" data-testid="library-overrides-surface">
+        ${renderLibraryContentTypesPanel(library, false)}
+        ${renderResolvedContentModelsPanel(library)}
+      </div>
+    `;
+  } else if (state.selectedSettingsSection === "model-tests") {
+    activeSurface = renderModelTestsSection(library);
+  } else if (state.selectedSettingsSection === "diagnostics") {
+    activeSurface = `
+      <div class="settings-stack">
+        ${renderRuntimeHealthPanel()}
+        ${renderMaintenanceActionsPanel(library)}
+        ${renderVectorSpaceDiagnosticsPanel(library)}
+      </div>
+    `;
+  } else {
+    activeSurface = renderGlobalContentTypesPanel(false);
+  }
+
+  return `
+    <section class="settings-workspace" data-testid="settings-workspace">
+      ${renderLibraryContextCluster(library, "workspace")}
+      <div class="settings-workspace-head">
+        <div>
+          <p class="eyebrow">设置工作区</p>
+          <h2>先配置默认，再核对当前库差异</h2>
+        </div>
+        <p class="helper">章节化设置先服务正式配置动作，再把模型测试与诊断后置到需要的时候展开。</p>
+      </div>
+      <div class="settings-layout">
+        ${renderSettingsNavRail()}
+        <div class="settings-active-surface">
+          ${renderSettingsStage(state.selectedSettingsSection, library, activeSurface)}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderInventoryDetailPanel(library: LibrarySnapshot | null) {
+  const source = selectedInventorySource();
+  const mobileSheetOpen = inventoryDetailSheetIsOpen();
+  const mobileSheetClass = mobileSheetOpen ? "mobile-sheet-open" : "mobile-sheet-closed";
+  const mobileSheetBackdrop = mobileSheetOpen
+    ? `<button
+        type="button"
+        class="mobile-sheet-backdrop"
+        data-testid="inventory-detail-sheet-backdrop"
+        data-mobile-sheet-close="inventory"
+        aria-label="关闭来源详情"
+      ></button>`
+    : "";
+
+  if (!library) {
+    return `
+      ${mobileSheetBackdrop}
+      <section
+        class="panel inventory-detail-panel mobile-sheet-panel ${mobileSheetClass}"
+        data-testid="inventory-detail-panel"
+      >
+        <div class="mobile-sheet-bar">
+          <span class="mobile-sheet-handle" aria-hidden="true"></span>
+          <button
+            type="button"
+            class="secondary-button mobile-sheet-close"
+            data-testid="inventory-detail-sheet-close-button"
+            data-mobile-sheet-close="inventory"
+          >
+            关闭
+          </button>
+        </div>
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">详情</p>
+            <h2>来源详情</h2>
+          </div>
+        </div>
+        <p class="empty">先选择一个库，再浏览来源。</p>
+      </section>
+    `;
+  }
+
+  if (!source) {
+    return `
+      ${mobileSheetBackdrop}
+      <section
+        class="panel inventory-detail-panel mobile-sheet-panel ${mobileSheetClass}"
+        data-testid="inventory-detail-panel"
+      >
+        <div class="mobile-sheet-bar">
+          <span class="mobile-sheet-handle" aria-hidden="true"></span>
+          <button
+            type="button"
+            class="secondary-button mobile-sheet-close"
+            data-testid="inventory-detail-sheet-close-button"
+            data-mobile-sheet-close="inventory"
+          >
+            关闭
+          </button>
+        </div>
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">详情</p>
+            <h2>来源详情</h2>
+          </div>
+        </div>
+        <p class="empty">从左侧列表选中一个来源后，这里会显示它的状态、归属和可搜索单元摘要。</p>
+      </section>
+    `;
+  }
+
+  const representativeVisual = selectedInventoryRepresentativeVisualUnit(source);
+  const representativePreview = selectedInventoryRepresentativePreview(source);
+  const page = pageLabel(representativeVisual?.locator);
+  const segment = videoLabel(representativeVisual?.locator);
+
+  return `
+    ${mobileSheetBackdrop}
+    <section
+      class="panel inventory-detail-panel mobile-sheet-panel ${mobileSheetClass}"
+      data-testid="inventory-detail-panel"
+    >
+      <div class="mobile-sheet-bar">
+        <span class="mobile-sheet-handle" aria-hidden="true"></span>
+        <button
+          type="button"
+          class="secondary-button mobile-sheet-close"
+          data-testid="inventory-detail-sheet-close-button"
+          data-mobile-sheet-close="inventory"
+        >
+          关闭
+        </button>
+      </div>
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">详情</p>
+          <h2>${escapeHtml(sourceName(source.source_path))}</h2>
+        </div>
+      </div>
+      <div class="detail-card inventory-detail-card">
+        <div class="detail-preview inventory-detail-preview">
+          ${
+            representativeVisual && representativePreview
+              ? renderPreviewSurface(
+                  {
+                    ...representativeVisual,
+                    source_path: source.source_path,
+                  },
+                  representativePreview,
+                  "inventory-detail-preview"
+                )
+              : `
+                <div class="preview-placeholder" data-testid="inventory-detail-preview">
+                  <p>当前来源还没有可用的代表性预览。完成一次 refresh / rescan 后，这里会优先显示图像、页预览或视频片段。</p>
+                </div>
+              `
+          }
+        </div>
+        <div class="detail-head">
+          <div class="detail-kicker">
+            <span class="pill ${sourceStatusPillClass(source.status)}">${escapeHtml(sourceStatusDisplayName(source.status))}</span>
+            <span class="pill muted">${escapeHtml(source.kind)}</span>
+            <span class="pill muted">${escapeHtml(source.source_type)}</span>
+            ${representativeVisual ? `<span class="pill ready">${escapeHtml(representativeVisual.kind)}</span>` : ""}
+            ${page ? `<span class="pill muted">${escapeHtml(page)}</span>` : ""}
+            ${segment ? `<span class="pill muted">${escapeHtml(segment)}</span>` : ""}
+          </div>
+          <h4>${escapeHtml(sourceName(source.source_path))}</h4>
+          <p class="helper">${escapeHtml(source.source_path)}</p>
+        </div>
+        <div class="detail-action-row">
+          ${
+            representativePreview
+              ? `<a data-testid="inventory-preview-link" href="${escapeHtml(representativePreview.url)}" target="_blank" rel="noreferrer">打开预览</a>`
+              : ""
+          }
+          ${
+            representativeVisual &&
+            (representativeVisual.kind === "image" || representativeVisual.kind === "document_page")
+              ? `<button type="button" class="secondary-button" data-testid="inventory-use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(representativeVisual.visual_unit_id)}">作为查询图片</button>`
+              : ""
+          }
+          ${
+            representativeVisual && representativeVisual.kind === "document_page"
+              ? `<button type="button" class="secondary-button" data-testid="inventory-use-as-query-document-button" data-use-query-document-visual-unit-id="${escapeHtml(representativeVisual.visual_unit_id)}">作为查询文档</button>`
+              : ""
+          }
+          ${
+            representativeVisual && representativeVisual.kind === "video_segment"
+              ? `<button type="button" class="secondary-button" data-testid="inventory-use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(representativeVisual.visual_unit_id)}">作为查询视频</button>`
+              : ""
+          }
+        </div>
+        <div class="inventory-detail-summary">
+          <article class="inventory-detail-metric">
+            <span class="inventory-detail-metric-label">当前状态</span>
+            <strong class="inventory-detail-metric-value">${escapeHtml(sourceStatusDisplayName(source.status))}</strong>
+          </article>
+          <article class="inventory-detail-metric">
+            <span class="inventory-detail-metric-label">来源类型</span>
+            <strong class="inventory-detail-metric-value">${escapeHtml(sourceTypeDisplayName(source.source_type))}</strong>
+          </article>
+          <article class="inventory-detail-metric">
+            <span class="inventory-detail-metric-label">可搜索对象</span>
+            <strong class="inventory-detail-metric-value">${escapeHtml(source.visual_unit_count)}</strong>
+          </article>
+          <article class="inventory-detail-metric">
+            <span class="inventory-detail-metric-label">代表对象</span>
+            <strong class="inventory-detail-metric-value">${escapeHtml(
+              representativeVisual ? visualUnitKindDisplayName(representativeVisual.kind) : "待生成"
+            )}</strong>
+          </article>
+        </div>
+        <dl class="stats">
+          <div><dt>来源路径</dt><dd class="detail-path">${escapeHtml(source.source_path)}</dd></div>
+          <div><dt>来源根</dt><dd>${escapeHtml(sourceRootInventoryLabel(source))}</dd></div>
+          <div><dt>来源编号</dt><dd>${escapeHtml(source.source_id)}</dd></div>
+          <div><dt>可搜索对象</dt><dd>${escapeHtml(source.visual_unit_count)}</dd></div>
+        </dl>
+        <div class="detail-grid">
+          <div class="detail-block">
+            <h5>当前库</h5>
+            <p class="helper">${escapeHtml(libraryDisplayName(library))} · ${escapeHtml(library.id)}</p>
+            ${
+              source.status_reason
+                ? `<p class="helper">${escapeHtml(source.status_reason)}</p>`
+                : `<p class="helper">当前来源处于 ${escapeHtml(sourceStatusDisplayName(source.status))} 状态，可继续通过过滤器核对它在库中的归属。</p>`
+            }
+          </div>
+          <div class="detail-block">
+            <h5>代表性对象</h5>
+            ${
+              representativeVisual
+                ? `
+                  <p class="helper">${escapeHtml(representativeVisual.visual_unit_id)} · ${escapeHtml(representativeVisual.kind)}</p>
+                  <p class="helper">${escapeHtml(page || segment || "当前以整张图像或默认对象作为代表性预览。")}</p>
+                `
+                : `<p class="helper">当前来源还没有可复用的代表性对象；来源列表仍保持只读观察语义。</p>`
+            }
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderInventoryWorkspace(library: LibrarySnapshot | null) {
+  const filterSummaryItems = inventoryFilterSummaryItems();
   const list = state.librarySources.length
     ? `
         <ul class="inventory-source-list" data-testid="library-source-list">
           ${state.librarySources
             .map(
               (source) => `
-                <li class="inventory-source-row" data-testid="library-source-card" data-source-id="${escapeHtml(source.source_id)}">
-                  <div class="inventory-source-main">
-                    <strong class="inventory-source-path">${escapeHtml(source.source_path)}</strong>
-                    <p class="helper">${escapeHtml(sourceRootInventoryLabel(source))} · ${escapeHtml(source.source_type)} · ${escapeHtml(source.kind)}</p>
-                  </div>
-                  <div class="inventory-source-meta">
-                    <span class="pill ${sourceStatusPillClass(source.status)}">${escapeHtml(source.status)}</span>
-                    <span class="pill muted">visual units ${escapeHtml(source.visual_unit_count)}</span>
-                    ${
-                      source.status_reason
-                        ? `<span class="helper inventory-source-reason">${escapeHtml(source.status_reason)}</span>`
-                        : ""
-                    }
-                  </div>
+                <li
+                  class="inventory-source-row ${source.source_id === state.selectedInventorySourceId ? "active" : ""}"
+                  data-testid="library-source-card"
+                  data-source-id="${escapeHtml(source.source_id)}"
+                >
+                  <button
+                    type="button"
+                    class="inventory-source-select"
+                    data-source-id="${escapeHtml(source.source_id)}"
+                  >
+                    <div class="inventory-source-visual">
+                      ${renderInventorySourceThumbnail(source)}
+                    </div>
+                    <div class="inventory-source-main">
+                      <strong class="inventory-source-name">${escapeHtml(sourceName(source.source_path))}</strong>
+                      <p class="helper inventory-source-path">${escapeHtml(source.source_path)}</p>
+                      <div class="detail-kicker inventory-source-pills">
+                        <span class="pill muted">${escapeHtml(sourceRootInventoryLabel(source))}</span>
+                        <span class="pill muted">${escapeHtml(sourceTypeDisplayName(source.source_type))}</span>
+                        <span class="pill muted">${escapeHtml(
+                          visualUnitKindDisplayName(inventoryRepresentativeKind(source))
+                        )}</span>
+                      </div>
+                    </div>
+                    <div class="inventory-source-meta">
+                      <span class="pill ${sourceStatusPillClass(source.status)}">${escapeHtml(sourceStatusDisplayName(source.status))}</span>
+                      <strong class="inventory-source-count">${escapeHtml(source.visual_unit_count)} 个对象</strong>
+                      ${
+                        source.status_reason
+                          ? `<span class="helper inventory-source-reason">${escapeHtml(source.status_reason)}</span>`
+                          : ""
+                      }
+                    </div>
+                  </button>
                 </li>
               `
             )
@@ -2835,56 +5920,357 @@ function renderLibrarySourcesPanel(library) {
     : '<p class="empty" data-testid="library-source-empty">当前筛选条件下没有来源内容。</p>';
 
   return `
-    <section class="panel inventory-panel" data-testid="inventory-panel">
-      <div class="panel-head">
+    <section class="inventory-workspace" data-testid="inventory-panel">
+      ${renderLibraryContextCluster(library, "workspace")}
+      ${renderInventoryLibraryManagementBand(library)}
+      <div class="inventory-workspace-head">
         <div>
-          <p class="eyebrow">Inventory</p>
-          <h2>来源观察工作区</h2>
+          <p class="eyebrow">库管理工作区</p>
+          <h2>浏览来源，而不是退回后台表</h2>
         </div>
+        <p class="helper">先判断当前库里有哪些来源、它们的状态是否正常，再在右侧阅读详情和代表性预览。</p>
       </div>
       ${renderInventorySummaryBar()}
-      <div class="inventory-filter-dock">
-        <div class="filter-grid inventory-filter-grid">
-          <label>
-            <span>来源根</span>
-            <select id="source-filter-root" data-testid="source-filter-root" ${library ? "" : "disabled"}>
-              <option value="">全部来源根</option>
-              <option value="manual" ${state.inventoryFilters.sourceRootId === "manual" ? "selected" : ""}>manual import</option>
-              ${state.sourceRoots
-                .map(
-                  (sourceRoot) => `
-                    <option value="${escapeHtml(sourceRoot.source_root_id)}" ${state.inventoryFilters.sourceRootId === sourceRoot.source_root_id ? "selected" : ""}>
-                      ${escapeHtml(sourceRoot.root_path)}
-                    </option>
-                  `
-                )
-                .join("")}
-            </select>
-          </label>
-          <label>
-            <span>来源类型</span>
-            <select id="source-filter-type" data-testid="source-filter-type" ${library ? "" : "disabled"}>
-              <option value="">全部类型</option>
-              <option value="image" ${state.inventoryFilters.sourceType === "image" ? "selected" : ""}>image</option>
-              <option value="pdf" ${state.inventoryFilters.sourceType === "pdf" ? "selected" : ""}>pdf</option>
-              <option value="video" ${state.inventoryFilters.sourceType === "video" ? "selected" : ""}>video</option>
-            </select>
-          </label>
-          <label>
-            <span>来源状态</span>
-            <select id="source-filter-status" data-testid="source-filter-status" ${library ? "" : "disabled"}>
-              <option value="">全部状态</option>
-              <option value="active" ${state.inventoryFilters.sourceStatus === "active" ? "selected" : ""}>active</option>
-              <option value="invalidated" ${state.inventoryFilters.sourceStatus === "invalidated" ? "selected" : ""}>invalidated</option>
-              <option value="out_of_scope" ${state.inventoryFilters.sourceStatus === "out_of_scope" ? "selected" : ""}>out_of_scope</option>
-            </select>
-          </label>
-        </div>
-        <p class="helper" data-testid="inventory-filter-summary">
-          当前显示 ${state.librarySources.length} / ${state.inventorySummary.total} 条来源记录。
-        </p>
+      <div class="inventory-layout">
+        <section class="panel inventory-panel inventory-panel-main">
+          <div class="inventory-filter-dock">
+            <div class="inventory-filter-head">
+              <div>
+                <p class="eyebrow">来源过滤</p>
+                <h3>筛选当前库来源</h3>
+              </div>
+              ${renderInventoryActionRow(library)}
+            </div>
+            <div class="filter-grid inventory-filter-grid">
+              <label>
+                <span>来源根</span>
+                <select id="source-filter-root" data-testid="source-filter-root" ${library ? "" : "disabled"}>
+                  <option value="">全部来源根</option>
+                  <option value="manual" ${state.inventoryFilters.sourceRootId === "manual" ? "selected" : ""}>手动导入</option>
+                  ${state.sourceRoots
+                    .map(
+                      (sourceRoot) => `
+                        <option value="${escapeHtml(sourceRoot.source_root_id)}" ${state.inventoryFilters.sourceRootId === sourceRoot.source_root_id ? "selected" : ""}>
+                          ${escapeHtml(sourceRoot.root_path)}
+                        </option>
+                      `
+                    )
+                    .join("")}
+                </select>
+              </label>
+              <label>
+                <span>来源类型</span>
+                <select id="source-filter-type" data-testid="source-filter-type" ${library ? "" : "disabled"}>
+                  <option value="">全部类型</option>
+                  <option value="image" ${state.inventoryFilters.sourceType === "image" ? "selected" : ""}>图片</option>
+                  <option value="pdf" ${state.inventoryFilters.sourceType === "pdf" ? "selected" : ""}>PDF</option>
+                  <option value="video" ${state.inventoryFilters.sourceType === "video" ? "selected" : ""}>视频</option>
+                </select>
+              </label>
+              <label>
+                <span>来源状态</span>
+                <select id="source-filter-status" data-testid="source-filter-status" ${library ? "" : "disabled"}>
+                  <option value="">全部状态</option>
+                  <option value="active" ${state.inventoryFilters.sourceStatus === "active" ? "selected" : ""}>正常</option>
+                  <option value="invalidated" ${state.inventoryFilters.sourceStatus === "invalidated" ? "selected" : ""}>已失效</option>
+                  <option value="out_of_scope" ${state.inventoryFilters.sourceStatus === "out_of_scope" ? "selected" : ""}>超出范围</option>
+                </select>
+              </label>
+            </div>
+            <p class="helper" data-testid="inventory-filter-summary">
+              当前显示 ${state.librarySources.length} / ${state.inventorySummary.total} 条来源记录。
+            </p>
+            <div class="pill-row inventory-filter-pills" data-testid="inventory-filter-pills">
+              ${
+                filterSummaryItems.length
+                  ? filterSummaryItems
+                      .map((item) => `<span class="pill muted">${escapeHtml(item)}</span>`)
+                      .join("")
+                  : '<span class="pill ready">当前显示全部来源</span>'
+              }
+            </div>
+          </div>
+          ${list}
+        </section>
+        ${renderInventoryDetailPanel(library)}
       </div>
-      ${list}
+    </section>
+  `;
+}
+
+function renderLibrarySourcesPanel(library) {
+  return renderInventoryWorkspace(library);
+}
+
+function renderPreviewSurface(visualUnit, preview, testId = "visual-preview") {
+  const title = `${visualUnit.kind} · ${sourceName(visualUnit.source_path)}`;
+
+  if (visualUnit.kind === "image") {
+    return `
+      <img
+        class="preview-image"
+        data-testid="${escapeHtml(testId)}"
+        src="${escapeHtml(preview.url)}"
+        alt="${escapeHtml(title)}"
+        loading="lazy"
+      />
+    `;
+  }
+
+  if (visualUnit.kind === "video_segment") {
+    const startMs = visualUnit.locator?.start_ms ?? 0;
+    const endMs = visualUnit.locator?.end_ms ?? 0;
+    return `
+      <video
+        class="preview-video"
+        data-testid="${escapeHtml(testId)}"
+        data-preview-kind="video"
+        data-start-ms="${escapeHtml(startMs)}"
+        data-end-ms="${escapeHtml(endMs)}"
+        src="${escapeHtml(preview.url)}"
+        controls
+        preload="metadata"
+      ></video>
+    `;
+  }
+
+  return `
+    <iframe
+      class="preview-frame"
+      data-testid="${escapeHtml(testId)}"
+      src="${escapeHtml(preview.url)}"
+      title="${escapeHtml(title)}"
+      loading="lazy"
+    ></iframe>
+  `;
+}
+
+function renderSearchResultPreview(result: SearchResultItem) {
+  const title = `${visualUnitKindDisplayName(result.kind)} · ${sourceName(result.source_path)}`;
+
+  if (result.kind === "image") {
+    return `
+      <img
+        class="result-preview-image"
+        data-testid="result-preview"
+        src="${escapeHtml(result.preview.url)}"
+        alt="${escapeHtml(title)}"
+        loading="lazy"
+      />
+    `;
+  }
+
+  if (result.kind === "video_segment") {
+    const startMs = result.locator?.start_ms ?? 0;
+    const endMs = result.locator?.end_ms ?? 0;
+    return `
+      <video
+        class="result-preview-video"
+        data-testid="result-preview"
+        data-preview-kind="video"
+        data-start-ms="${escapeHtml(startMs)}"
+        data-end-ms="${escapeHtml(endMs)}"
+        src="${escapeHtml(result.preview.url)}"
+        muted
+        playsinline
+        preload="metadata"
+      ></video>
+    `;
+  }
+
+  return `
+    <div
+      class="result-preview-placeholder"
+      data-testid="result-preview"
+      role="img"
+      aria-label="${escapeHtml(title)}"
+    >
+      <span class="result-preview-placeholder-sheet" aria-hidden="true"></span>
+      <span class="result-preview-placeholder-label">${escapeHtml(sourceTypeDisplayName(result.source_type))}</span>
+    </div>
+  `;
+}
+
+function searchResultLibraryBreakdown() {
+  const results = state.searchOutcome?.results ?? [];
+  const breakdown = new Map<string, { libraryId: string; label: string; count: number }>();
+  results.forEach((item) => {
+    const libraryId = item.library_id?.trim();
+    if (!libraryId) {
+      return;
+    }
+    const existing = breakdown.get(libraryId);
+    if (existing) {
+      existing.count += 1;
+      return;
+    }
+    const library = libraryById(libraryId);
+    breakdown.set(libraryId, {
+      libraryId,
+      label: library ? libraryDisplayName(library) : libraryId,
+      count: 1,
+    });
+  });
+  return [...breakdown.values()];
+}
+
+function activeSearchResultLibraryFocus() {
+  if (!allLibrariesTextScopeActive()) {
+    return null;
+  }
+  const libraryId = state.searchResultLibraryFocusId.trim();
+  if (!libraryId) {
+    return null;
+  }
+  return searchResultLibraryBreakdown().find((item) => item.libraryId === libraryId) ?? null;
+}
+
+function visibleSearchResults() {
+  const results = state.searchOutcome?.results ?? [];
+  const activeFocus = activeSearchResultLibraryFocus();
+  if (!activeFocus) {
+    return results;
+  }
+  return results.filter((item) => item.library_id === activeFocus.libraryId);
+}
+
+function groupedSearchResults(results: SearchResultItem[]) {
+  const groups = new Map<
+    string,
+    { libraryId: string; label: string; count: number; items: SearchResultItem[] }
+  >();
+  results.forEach((item) => {
+    const libraryId = item.library_id?.trim() || "unknown";
+    const existing = groups.get(libraryId);
+    if (existing) {
+      existing.items.push(item);
+      existing.count += 1;
+      return;
+    }
+    const library = libraryById(libraryId);
+    groups.set(libraryId, {
+      libraryId,
+      label: library ? libraryDisplayName(library) : libraryId,
+      count: 1,
+      items: [item],
+    });
+  });
+  return [...groups.values()];
+}
+
+function searchResultGroupSummary(libraryId: string, count: number) {
+  if (libraryId === state.selectedLibraryId) {
+    return `当前工作库 · ${count} 条结果`;
+  }
+  return `${count} 条结果 · 可留在 Search 里先聚焦这一组，或直接进入库管理。`;
+}
+
+function renderSearchResultCard(
+  item: SearchResultItem,
+  layout: "default" | "grouped" | "focused" = "default"
+) {
+  const scoreLabel = formatScore(item.score);
+  const page = pageLabel(item.locator);
+  const segment = videoLabel(item.locator);
+  return `
+    <li
+      class="result-card result-card-${layout} ${`${item.library_id}:${item.visual_unit_id}` === selectedVisualUnitId() ? "active" : ""}"
+      data-testid="result-card"
+      data-kind="${escapeHtml(item.kind)}"
+      data-visual-unit-id="${escapeHtml(item.visual_unit_id)}"
+    >
+      <button
+        type="button"
+        class="result-select"
+        data-visual-unit-id="${escapeHtml(item.visual_unit_id)}"
+        data-visual-unit-library-id="${escapeHtml(item.library_id)}"
+      >
+        <div class="result-visual">
+          ${renderSearchResultPreview(item)}
+        </div>
+        <div class="result-body result-body-${layout}">
+          <div class="result-topline">
+            <span class="pill ${item.kind === "image" ? "ready" : "pending"}">${escapeHtml(
+              visualUnitKindDisplayName(item.kind)
+            )}</span>
+            ${page ? `<span class="pill muted">${escapeHtml(page)}</span>` : ""}
+            ${segment ? `<span class="pill muted">${escapeHtml(segment)}</span>` : ""}
+          </div>
+          <div class="result-title-row">
+            <strong class="result-title">${escapeHtml(sourceName(item.source_path))}</strong>
+            ${scoreLabel ? `<span class="pill score-pill" data-testid="result-score">相似度 ${escapeHtml(scoreLabel)}</span>` : ""}
+          </div>
+          <span class="helper result-path">${escapeHtml(item.source_path)}</span>
+        </div>
+      </button>
+      <div class="inline-actions result-actions">
+        <button type="button" class="secondary-button" data-visual-unit-id="${escapeHtml(item.visual_unit_id)}" data-visual-unit-library-id="${escapeHtml(item.library_id)}">查看详情</button>
+        ${
+          item.kind === "image" || item.kind === "document_page"
+            ? `<button type="button" class="secondary-button" data-testid="use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(item.visual_unit_id)}" data-use-query-library-id="${escapeHtml(item.library_id)}">作为查询图片</button>`
+            : ""
+        }
+        ${
+          item.kind === "document_page"
+            ? `<button type="button" class="secondary-button" data-testid="use-as-query-document-button" data-use-query-document-visual-unit-id="${escapeHtml(item.visual_unit_id)}" data-use-query-library-id="${escapeHtml(item.library_id)}">作为查询文档</button>`
+            : ""
+        }
+        ${
+          item.kind === "video_segment"
+            ? `<button type="button" class="secondary-button" data-testid="use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(item.visual_unit_id)}" data-use-query-library-id="${escapeHtml(item.library_id)}">作为查询视频</button>`
+            : ""
+        }
+        <a href="${escapeHtml(item.preview.url)}" target="_blank" rel="noreferrer">打开预览</a>
+      </div>
+    </li>
+  `;
+}
+
+function renderSearchResultGroup(group: {
+  libraryId: string;
+  label: string;
+  count: number;
+  items: SearchResultItem[];
+}) {
+  return `
+    <section
+      class="result-library-group"
+      data-testid="search-result-library-group"
+      data-library-id="${escapeHtml(group.libraryId)}"
+    >
+      <div class="result-library-group-header">
+        <div class="result-library-group-copy">
+          <div class="result-library-group-meta">
+            <span class="scope-label">${escapeHtml(group.libraryId === state.selectedLibraryId ? "当前库" : "命中库")}</span>
+            <span class="helper" data-testid="search-result-library-group-count">${escapeHtml(`${group.count} 条结果`)}</span>
+          </div>
+          <strong data-testid="search-result-library-group-heading">${escapeHtml(group.label)}</strong>
+          <p class="helper result-library-group-summary" data-testid="search-result-library-group-summary">${escapeHtml(
+            searchResultGroupSummary(group.libraryId, group.count)
+          )}</p>
+        </div>
+        <div class="inline-actions result-library-group-actions">
+          <button
+            type="button"
+            class="secondary-button"
+            data-testid="search-result-library-group-focus-${escapeHtml(group.libraryId)}"
+            data-search-result-library-focus="${escapeHtml(group.libraryId)}"
+          >
+            仅看这个库
+          </button>
+          <button
+            type="button"
+            class="secondary-button"
+            data-testid="search-result-library-group-open-inventory-${escapeHtml(group.libraryId)}"
+            data-open-hit-library-id="${escapeHtml(group.libraryId)}"
+          >
+            在库管理查看
+          </button>
+        </div>
+      </div>
+      <ul class="result-list result-group-list">
+        ${group.items.map((item) => renderSearchResultCard(item, "grouped")).join("")}
+      </ul>
     </section>
   `;
 }
@@ -2900,106 +6286,96 @@ function renderVisualPreview() {
 
   const visualUnit = state.selectedVisualUnit.visual_unit;
   const preview = state.selectedVisualUnit.preview;
-  const title = `${visualUnit.kind} · ${sourceName(visualUnit.source_path)}`;
-
-  if (visualUnit.kind === "image") {
-    return `
-      <img
-        class="preview-image"
-        data-testid="visual-preview"
-        src="${escapeHtml(preview.url)}"
-        alt="${escapeHtml(title)}"
-        loading="lazy"
-      />
-    `;
-  }
-
-  if (visualUnit.kind === "video_segment") {
-    const startMs = visualUnit.locator?.start_ms ?? 0;
-    const endMs = visualUnit.locator?.end_ms ?? 0;
-    return `
-      <video
-        class="preview-video"
-        data-testid="visual-preview"
-        data-preview-kind="video"
-        data-start-ms="${escapeHtml(startMs)}"
-        data-end-ms="${escapeHtml(endMs)}"
-        src="${escapeHtml(preview.url)}"
-        controls
-        preload="metadata"
-      ></video>
-    `;
-  }
-
-  return `
-    <iframe
-      class="preview-frame"
-      data-testid="visual-preview"
-      src="${escapeHtml(preview.url)}"
-      title="${escapeHtml(title)}"
-      loading="lazy"
-    ></iframe>
-  `;
+  return renderPreviewSurface(visualUnit, preview, "visual-preview");
 }
 
 function renderVisualUnitDetail() {
   if (!state.selectedVisualUnit) {
-    return '<p class="empty">从导入回执或搜索结果里选择一个 visual unit，右侧会显示预览、定位信息和上下文。</p>';
+    return '<p class="empty">从结果列表选择一个对象后，这里会显示预览与来源信息。</p>';
   }
 
   const visualUnit = state.selectedVisualUnit.visual_unit;
-  const preview = state.selectedVisualUnit.preview;
+  const originLibraryId = selectedVisualUnitOriginLibraryId();
+  const originLibrary = libraryById(originLibraryId);
   const page = pageLabel(visualUnit.locator);
   const segment = videoLabel(visualUnit.locator);
+  const showCrossLibraryContext = allLibrariesTextScopeActive() && originLibraryId;
   return `
     <div class="detail-card" data-testid="visual-unit-detail">
       <div class="detail-preview">
         ${renderVisualPreview()}
       </div>
       <div class="detail-head">
-        <div class="job-meta">
-          <span class="pill ready">${escapeHtml(visualUnit.kind)}</span>
+        <div class="detail-kicker">
+          ${
+            state.searchScope === "all_libraries" && originLibraryId
+              ? `<span class="pill muted">${escapeHtml(originLibrary ? libraryDisplayName(originLibrary) : originLibraryId)}</span>`
+              : ""
+          }
+          <span class="pill ready">${escapeHtml(visualUnitKindDisplayName(visualUnit.kind))}</span>
           ${page ? `<span class="pill muted">${escapeHtml(page)}</span>` : ""}
           ${segment ? `<span class="pill muted">${escapeHtml(segment)}</span>` : ""}
         </div>
         <h4>${escapeHtml(sourceName(visualUnit.source_path))}</h4>
-        <p class="helper">${escapeHtml(visualUnit.visual_unit_id)}</p>
       </div>
+      ${
+        showCrossLibraryContext
+          ? `
+            <section class="detail-library-context" data-testid="detail-library-context">
+              <div class="detail-library-context-copy">
+                <span class="scope-label">命中库</span>
+                <strong data-testid="detail-hit-library-name">${escapeHtml(
+                  originLibrary ? libraryDisplayName(originLibrary) : originLibraryId
+                )}</strong>
+                <p class="helper" data-testid="detail-hit-library-summary">${escapeHtml(
+                  originLibraryId === state.selectedLibraryId
+                    ? "你当前已经在这个库的上下文里阅读结果。"
+                    : `当前选中库仍是 ${libraryDisplayName(selectedLibrary()) || state.selectedLibraryId}；继续管理来源或复用结果时会自动切到命中库，如需先核对 readiness，也可以直接进入库管理。`
+                )}</p>
+              </div>
+              <div class="inline-actions detail-library-context-actions">
+                <button
+                  type="button"
+                  class="secondary-button"
+                  data-testid="detail-open-hit-library-inventory"
+                  data-open-hit-library-id="${escapeHtml(originLibraryId)}"
+                >
+                  在库管理查看
+                </button>
+              </div>
+            </section>
+          `
+          : ""
+      }
       <dl class="stats">
-        <div><dt>Source type</dt><dd>${escapeHtml(visualUnit.source_type)}</dd></div>
-        <div><dt>Source path</dt><dd class="detail-path">${escapeHtml(visualUnit.source_path)}</dd></div>
+        ${
+          originLibraryId
+            ? `<div><dt>命中库</dt><dd>${escapeHtml(originLibrary ? `${libraryDisplayName(originLibrary)} (${originLibraryId})` : originLibraryId)}</dd></div>`
+            : ""
+        }
+        <div><dt>对象编号</dt><dd>${escapeHtml(visualUnit.visual_unit_id)}</dd></div>
+        <div><dt>来源类型</dt><dd>${escapeHtml(sourceTypeDisplayName(visualUnit.source_type))}</dd></div>
+        <div><dt>来源路径</dt><dd class="detail-path">${escapeHtml(visualUnit.source_path)}</dd></div>
       </dl>
-      <div class="detail-grid">
-        <div class="detail-block">
-          <h5>Locator</h5>
-          <pre>${escapeHtml(JSON.stringify(visualUnit.locator, null, 2))}</pre>
-        </div>
-        <div class="detail-block">
-          <h5>Preview</h5>
-          <div class="inline-actions">
-            <a data-testid="preview-link" href="${escapeHtml(preview.url)}" target="_blank" rel="noreferrer">打开预览</a>
-            ${
-              visualUnit.kind === "image" || visualUnit.kind === "document_page"
-                ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询图片</button>`
-                : ""
-            }
-            ${
-              visualUnit.kind === "document_page"
-                ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-document-button" data-use-query-document-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询文档</button>`
-                : ""
-            }
-            ${
-              visualUnit.kind === "video_segment"
-                ? `<button type="button" class="secondary-button" data-testid="detail-use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}">作为查询视频</button>`
-                : ""
-            }
+      <details class="detail-technical-disclosure" data-testid="detail-technical-disclosure">
+        <summary>技术信息</summary>
+        <div class="detail-technical-content" data-testid="detail-technical-content">
+          <div class="detail-grid">
+            <div class="detail-block">
+              <h5>定位信息</h5>
+              <pre>${escapeHtml(JSON.stringify(visualUnit.locator, null, 2))}</pre>
+            </div>
+            <div class="detail-block">
+              <h5>阅读提示</h5>
+              <p class="helper">当前详情面会在后台轮询期间保持预览挂载不变，方便继续阅读和复用结果。</p>
+            </div>
+          </div>
+          <div class="detail-block">
+            <h5>邻近上下文</h5>
+            <pre>${escapeHtml(JSON.stringify(state.selectedVisualUnit.neighbor_context, null, 2))}</pre>
           </div>
         </div>
-      </div>
-      <div class="detail-block">
-        <h5>Neighbor context</h5>
-        <pre>${escapeHtml(JSON.stringify(state.selectedVisualUnit.neighbor_context, null, 2))}</pre>
-      </div>
+      </details>
     </div>
   `;
 }
@@ -3025,7 +6401,52 @@ function renderJobs() {
               </div>
               <h4>${escapeHtml(job.kind)} · ${escapeHtml(job.phase)}</h4>
               <p>${escapeHtml(job.current_attempt.summary)}</p>
-              <small>${job.progress.completed}/${job.progress.total} ${escapeHtml(job.progress.unit)}</small>
+              <p class="helper" data-testid="job-attempt-lineage">${escapeHtml(formatJobAttemptLabel(job))}</p>
+              <div class="detail-action-row">
+                <small>${job.progress.completed}/${job.progress.total} ${escapeHtml(job.progress.unit)}</small>
+                ${
+                  canCancelJob(job)
+                    ? `
+                      <button
+                        type="button"
+                        class="secondary-button"
+                        data-testid="job-cancel-button"
+                        data-job-cancel-id="${escapeHtml(job.job_id)}"
+                      >
+                        取消任务
+                      </button>
+                    `
+                    : ""
+                }
+                ${
+                  canResumeJob(job)
+                    ? `
+                      <button
+                        type="button"
+                        class="secondary-button"
+                        data-testid="job-resume-button"
+                        data-job-resume-id="${escapeHtml(job.job_id)}"
+                      >
+                        继续任务
+                      </button>
+                    `
+                    : ""
+                }
+                ${
+                  canRetryJob(job)
+                    ? `
+                      <button
+                        type="button"
+                        class="secondary-button"
+                        data-testid="job-retry-button"
+                        data-job-retry-id="${escapeHtml(job.job_id)}"
+                      >
+                        重试任务
+                      </button>
+                    `
+                    : ""
+                }
+              </div>
             </li>
           `
         )
@@ -3035,16 +6456,24 @@ function renderJobs() {
 }
 
 function renderSearchOutcome() {
+  const library = selectedLibrary();
+
   if (!state.searchOutcome) {
-    return '<p class="empty">结果列表会显示在这里。导入成功后，这里会以统一列表混排 `video_segment`、`image` 和 `document_page`，并可直接打开右侧详情。</p>';
+    return "";
   }
 
   if (state.searchOutcome.error) {
     const details = state.searchOutcome.error.details?.content_types ?? [];
     return `
       <div class="notice error" data-testid="search-error-notice">
+        <p class="eyebrow">这次查询没有完成</p>
         <h4 data-testid="search-error-code">${escapeHtml(state.searchOutcome.error.code)}</h4>
         <p data-testid="search-error-message">${escapeHtml(state.searchOutcome.error.message)}</p>
+        ${
+          details.length
+            ? `<p class="helper">部分内容类型当前没有完成准备或配置；这次失败不是“没有命中结果”，可以直接检查当前库覆盖。</p>`
+            : ""
+        }
         ${
           details.length
             ? `<ul class="data-list" data-testid="search-error-details">
@@ -3052,7 +6481,7 @@ function renderSearchOutcome() {
                   .map(
                     (item) => `
                       <li>
-                        <strong>${escapeHtml(item.content_type ?? "unknown")}</strong>
+                        <strong>${escapeHtml(contentTypeDisplayName(item.content_type ?? "unknown"))}</strong>
                         <span>${escapeHtml(item.job?.job_id ?? "no-job")} · ${escapeHtml(item.job?.phase ?? item.status)}</span>
                       </li>
                     `
@@ -3061,31 +6490,67 @@ function renderSearchOutcome() {
               </ul>`
             : ""
         }
+        ${
+          details.length
+            ? `
+              <div class="inline-actions">
+                <button
+                  type="button"
+                  data-testid="search-error-open-library-overrides"
+                  data-open-settings-section="library-overrides"
+                >
+                  前往当前库覆盖
+                </button>
+              </div>
+            `
+            : ""
+        }
       </div>
     `;
   }
 
-  const results = state.searchOutcome.results ?? [];
+  const allResults = state.searchOutcome.results ?? [];
+  const results = visibleSearchResults();
   const unsupportedContentTypes = state.searchOutcome.unsupported_content_types ?? [];
+  const resultLibraryCount = new Set(allResults.map((item) => item.library_id).filter(Boolean)).size;
+  const libraryBreakdown = searchResultLibraryBreakdown();
+  const activeLibraryFocus = activeSearchResultLibraryFocus();
+  const groupedResults = groupedSearchResults(results);
+  const showLibraryGroupedResults =
+    allLibrariesTextScopeActive() && !activeLibraryFocus && groupedResults.length > 1;
+  const resultsSurfaceMode = showLibraryGroupedResults
+    ? "grouped"
+    : activeLibraryFocus
+      ? "focused"
+      : "default";
   if (!results.length) {
     return `
-      <div class="notice success">
-        <h4>No results</h4>
-        <p>当前真实检索链路没有返回匹配结果。可以换一个查询词，或确认目标库已经导入相关内容。</p>
+      <div class="notice neutral" data-testid="search-empty-notice">
+        <p class="eyebrow">这次查询没有命中</p>
+        <h4>${escapeHtml(
+          allLibrariesTextScopeActive() ? "当前范围可搜索，但本次没有返回结果" : "当前库可搜索，但本次没有返回结果"
+        )}</h4>
+        <p>${escapeHtml(
+          allLibrariesTextScopeActive()
+            ? "可以换一个查询词、放宽过滤器，或确认当前范围里的相关内容已经导入到至少一个库。"
+            : "可以换一个查询词、放宽过滤器，或确认当前范围里的相关内容已经导入并进入当前库。"
+        )}</p>
         ${
           unsupportedContentTypes.length
-            ? `<ul class="data-list" data-testid="search-unsupported-content-types">
+            ? `<p class="helper">另外有部分内容类型在这次查询里被跳过；如果这不是预期，可以检查当前库覆盖。</p>
+               <ul class="data-list" data-testid="search-unsupported-content-types">
                 ${unsupportedContentTypes
                   .map(
                     (item) => `
                       <li>
-                        <strong>${escapeHtml(item.content_type)}</strong>
+                        <strong>${escapeHtml(contentTypeDisplayName(item.content_type))}</strong>
                         <span>${escapeHtml(item.model)} · ${escapeHtml(item.reason)}</span>
                       </li>
                     `
                   )
                   .join("")}
-              </ul>`
+              </ul>
+              ${renderSearchStatusNextStep(library, "outcome")}`
             : ""
         }
       </div>
@@ -3093,6 +6558,11 @@ function renderSearchOutcome() {
   }
 
   return `
+    <div
+      class="search-results-surface search-results-surface-${resultsSurfaceMode}"
+      data-testid="search-results-surface"
+      data-search-results-surface="${resultsSurfaceMode}"
+    >
     ${
       unsupportedContentTypes.length
         ? `<div class="notice warning" data-testid="search-unsupported-content-types">
@@ -3102,7 +6572,7 @@ function renderSearchOutcome() {
                 .map(
                   (item) => `
                     <li>
-                      <strong>${escapeHtml(item.content_type)}</strong>
+                      <strong>${escapeHtml(contentTypeDisplayName(item.content_type))}</strong>
                       <span>${escapeHtml(item.model)} · ${escapeHtml(item.reason)}</span>
                     </li>
                   `
@@ -3113,68 +6583,62 @@ function renderSearchOutcome() {
         : ""
     }
     <div class="results-summary">
-      <div>
-        <p class="eyebrow">Results</p>
-        <h3>命中 ${results.length} 条结果</h3>
-      </div>
-      <p class="helper" data-testid="search-results-summary">
-        ${escapeHtml(searchHasMoreResults() ? "当前页后仍有更多结果，可继续追加加载。" : "点击结果卡片后，右侧会更新预览和详情。")}
-      </p>
+      <h3 data-testid="search-results-summary">${
+        activeLibraryFocus
+          ? `当前查看 ${escapeHtml(activeLibraryFocus.label)} · ${results.length} 条结果`
+          : `命中 ${results.length} 条结果${allLibrariesTextScopeActive() && resultLibraryCount ? ` · 来自 ${resultLibraryCount} 个库` : ""}`
+      }</h3>
     </div>
-    <ul class="result-list" data-testid="result-list">
-      ${results
-        .map(
-          (item) => {
-            const scoreLabel = formatScore(item.score);
-            const page = pageLabel(item.locator);
-            const segment = videoLabel(item.locator);
-            return `
-            <li
-              class="result-card ${item.visual_unit_id === selectedVisualUnitId() ? "active" : ""}"
-              data-testid="result-card"
-              data-kind="${escapeHtml(item.kind)}"
-              data-visual-unit-id="${escapeHtml(item.visual_unit_id)}"
-            >
+    ${
+      allLibrariesTextScopeActive() && libraryBreakdown.length
+        ? `
+          <section class="results-library-strip" data-testid="search-result-library-strip">
+            <span class="scope-label">命中库分布</span>
+            <div class="results-library-chips">
               <button
                 type="button"
-                class="result-select"
-                data-visual-unit-id="${escapeHtml(item.visual_unit_id)}"
+                class="secondary-button result-library-chip ${activeLibraryFocus ? "" : "active"}"
+                data-testid="search-result-library-focus-all"
+                data-search-result-library-focus=""
               >
-                <div class="result-topline">
-                  <span class="pill ${item.kind === "image" ? "ready" : "pending"}">${escapeHtml(item.kind)}</span>
-                  ${page ? `<span class="pill muted">${escapeHtml(page)}</span>` : ""}
-                  ${segment ? `<span class="pill muted">${escapeHtml(segment)}</span>` : ""}
-                  ${scoreLabel ? `<span class="pill score-pill" data-testid="result-score">score ${escapeHtml(scoreLabel)}</span>` : ""}
-                </div>
-                <strong>${escapeHtml(sourceName(item.source_path))}</strong>
-                <span class="helper">${escapeHtml(item.source_path)}</span>
-                <span class="helper">${escapeHtml(item.source_type)} · ${escapeHtml(JSON.stringify(item.locator))}</span>
+                ${escapeHtml(`全部结果 · ${allResults.length}`)}
               </button>
-              <div class="inline-actions">
-                <button type="button" class="secondary-button" data-visual-unit-id="${escapeHtml(item.visual_unit_id)}">查看详情</button>
-                ${
-                  item.kind === "image" || item.kind === "document_page"
-                    ? `<button type="button" class="secondary-button" data-testid="use-as-query-image-button" data-use-query-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询图片</button>`
-                    : ""
-                }
-                ${
-                  item.kind === "document_page"
-                    ? `<button type="button" class="secondary-button" data-testid="use-as-query-document-button" data-use-query-document-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询文档</button>`
-                    : ""
-                }
-                ${
-                  item.kind === "video_segment"
-                    ? `<button type="button" class="secondary-button" data-testid="use-as-query-video-button" data-use-query-video-visual-unit-id="${escapeHtml(item.visual_unit_id)}">作为查询视频</button>`
-                    : ""
-                }
-                <a href="${escapeHtml(item.preview.url)}" target="_blank" rel="noreferrer">Preview</a>
-              </div>
-            </li>
-          `;
-          }
-        )
-        .join("")}
-    </ul>
+              ${libraryBreakdown
+                .map(
+                  (item) => `
+                    <button
+                      type="button"
+                      class="secondary-button result-library-chip ${activeLibraryFocus?.libraryId === item.libraryId ? "active" : ""}"
+                      data-testid="search-result-library-focus-${escapeHtml(item.libraryId)}"
+                      data-search-result-library-focus="${escapeHtml(item.libraryId)}"
+                    >
+                      ${escapeHtml(`${item.label} · ${item.count}`)}
+                    </button>
+                  `
+                )
+                .join("")}
+            </div>
+          </section>
+        `
+        : ""
+    }
+    ${
+      showLibraryGroupedResults
+        ? `
+          <div class="result-library-groups" data-testid="search-result-library-groups">
+            ${groupedResults.map((group) => renderSearchResultGroup(group)).join("")}
+          </div>
+        `
+        : `
+          <ul class="result-list" data-testid="result-list">
+            ${results
+              .map((item) =>
+                renderSearchResultCard(item, activeLibraryFocus ? "focused" : "default")
+              )
+              .join("")}
+          </ul>
+        `
+    }
     ${
       searchHasMoreResults()
         ? `
@@ -3185,153 +6649,142 @@ function renderSearchOutcome() {
               id="search-load-more-button"
               data-testid="search-load-more-button"
             >
-              Load more
+              加载更多
             </button>
           </div>
         `
         : ""
     }
+    </div>
   `;
 }
 
-function renderSearchControls(library) {
+function renderSearchControls(library, readingMode = false) {
   const queryPreview = queryImagePreviewUrl();
   const queryVideoPreview = queryVideoPreviewUrl();
   const queryDocumentPreview = queryDocumentPreviewUrl();
   const queryVideoDuration = state.queryVideoDurationMs;
   const queryVideoStartMs = currentQueryVideoStartMs();
   const queryVideoEndMs = currentQueryVideoEndMs();
-  return `
-    <div class="search-mode-switch" data-testid="search-mode-switch">
-      <button
-        type="button"
-        class="${state.searchMode === "text" ? "" : "secondary-button"}"
-        data-testid="search-mode-text"
-        data-search-mode="text"
-      >
-        Text
-      </button>
-      <button
-        type="button"
-        class="${state.searchMode === "image" ? "" : "secondary-button"}"
-        data-testid="search-mode-image"
-        data-search-mode="image"
-      >
-        Image
-      </button>
-      <button
-        type="button"
-        class="${state.searchMode === "video" ? "" : "secondary-button"}"
-        data-testid="search-mode-video"
-        data-search-mode="video"
-      >
-        Video
-      </button>
-      <button
-        type="button"
-        class="${state.searchMode === "document" ? "" : "secondary-button"}"
-        data-testid="search-mode-document"
-        data-search-mode="document"
-      >
-        Document
-      </button>
-    </div>
-    <form id="search-form" class="stack-form search-form" data-testid="search-form">
-      <div class="search-filter-dock" data-testid="search-filter-dock">
-        <div class="job-meta">
-          <strong>搜索过滤器</strong>
-          <span class="helper" data-testid="search-filter-summary">${escapeHtml(searchFiltersSummary())}</span>
-        </div>
-        <div class="filter-grid search-filter-grid">
-          <label>
-            <span>视觉对象类型</span>
-            <select id="search-filter-kind" data-testid="search-filter-kind" ${library ? "" : "disabled"}>
-              <option value="">全部</option>
-              <option value="image" ${state.searchFilters.visualUnitKind === "image" ? "selected" : ""}>image</option>
-              <option value="document_page" ${state.searchFilters.visualUnitKind === "document_page" ? "selected" : ""}>document_page</option>
-              <option value="video_segment" ${state.searchFilters.visualUnitKind === "video_segment" ? "selected" : ""}>video_segment</option>
-            </select>
-          </label>
-          <label>
-            <span>来源类型</span>
-            <select id="search-filter-source-type" data-testid="search-filter-source-type" ${library ? "" : "disabled"}>
-              <option value="">全部</option>
-              <option value="image" ${state.searchFilters.sourceType === "image" ? "selected" : ""}>image</option>
-              <option value="pdf" ${state.searchFilters.sourceType === "pdf" ? "selected" : ""}>pdf</option>
-              <option value="video" ${state.searchFilters.sourceType === "video" ? "selected" : ""}>video</option>
-            </select>
-          </label>
-          <label>
-            <span>路径前缀</span>
-            <input
-              id="search-filter-path-prefix"
-              data-testid="search-filter-path-prefix"
-              type="text"
-              value="${escapeHtml(state.searchFilters.pathPrefix)}"
-              placeholder="/abs/path/prefix"
-              ${library ? "" : "disabled"}
-            />
-          </label>
-          <label>
-            <span>时间范围开始 ms</span>
-            <input
-              id="search-filter-time-range-start"
-              data-testid="search-filter-time-range-start"
-              type="number"
-              inputmode="numeric"
-              min="0"
-              step="1"
-              value="${escapeHtml(state.searchFilters.timeRangeStartMsDraft)}"
-              placeholder="仅作用于视频时间命中"
-              ${library ? "" : "disabled"}
-            />
-          </label>
-          <label>
-            <span>时间范围结束 ms</span>
-            <input
-              id="search-filter-time-range-end"
-              data-testid="search-filter-time-range-end"
-              type="number"
-              inputmode="numeric"
-              min="0"
-              step="1"
-              value="${escapeHtml(state.searchFilters.timeRangeEndMsDraft)}"
-              placeholder="仅作用于视频时间命中"
-              ${library ? "" : "disabled"}
-            />
-          </label>
-        </div>
-        <div class="inline-actions">
+  const hasAdvancedFilters =
+    Boolean(state.searchFilters.pathPrefix.trim()) ||
+    Boolean(state.searchFilters.timeRangeStartMsDraft.trim()) ||
+    Boolean(state.searchFilters.timeRangeEndMsDraft.trim());
+  const hasFilterSelections =
+    Boolean(state.searchFilters.visualUnitKind) ||
+    Boolean(state.searchFilters.sourceType) ||
+    hasAdvancedFilters;
+  const filterPanelOpen = state.searchFiltersPanelOpen || hasFilterSelections;
+  const activeModeLabel = searchModeDisplayName(state.searchMode);
+  const modeActionButtons = `
+    <button
+      type="button"
+      class="secondary-button search-filter-button ${filterPanelOpen ? "active" : ""}"
+      id="search-filter-toggle-button"
+      data-testid="search-filter-toggle-button"
+      aria-expanded="${filterPanelOpen ? "true" : "false"}"
+    >
+      ${renderUiIcon("filter")}
+      <span>过滤</span>
+    </button>
+    ${
+      state.searchMode !== "text"
+        ? `
           <button
             type="button"
-            id="clear-search-filters-button"
-            data-testid="clear-search-filters-button"
-            class="secondary-button"
-            ${library ? "" : "disabled"}
+            class="secondary-button search-mode-pill"
+            data-testid="search-mode-text"
+            data-search-mode="text"
           >
-            清除过滤器
+            文本
           </button>
+        `
+        : ""
+    }
+    <button
+      type="button"
+      class="search-mode-icon-button ${state.searchMode === "image" ? "active" : ""}"
+      data-testid="search-mode-image"
+      data-search-mode="image"
+      aria-label="图片查询"
+      title="图片查询"
+    >
+      ${renderUiIcon("image")}
+    </button>
+    <button
+      type="button"
+      class="search-mode-icon-button ${state.searchMode === "video" ? "active" : ""}"
+      data-testid="search-mode-video"
+      data-search-mode="video"
+      aria-label="视频查询"
+      title="视频查询"
+    >
+      ${renderUiIcon("video")}
+    </button>
+    <button
+      type="button"
+      class="search-mode-icon-button ${state.searchMode === "document" ? "active" : ""}"
+      data-testid="search-mode-document"
+      data-search-mode="document"
+      aria-label="文档查询"
+      title="文档查询"
+    >
+      ${renderUiIcon("document")}
+    </button>
+  `;
+  return `
+    <form
+      id="search-form"
+      class="stack-form search-form ${readingMode ? "search-form-reading" : ""}"
+      data-testid="search-form"
+    >
+      <div class="search-stage-card">
+        <div class="search-composer-shell">
+          <div class="search-composer-main ${state.searchMode === "text" ? "search-composer-main-text" : "search-composer-main-object"}">
+            ${
+              state.searchMode === "text"
+                ? `
+                  <label class="search-main-input query-text-card search-composer-input-shell">
+                    <span class="search-input-row">
+                      <span class="search-lens" aria-hidden="true"></span>
+                      <input
+                        id="search-text"
+                        data-testid="search-text-input"
+                        type="text"
+                        value="${escapeHtml(state.searchTextDraft)}"
+                        placeholder="Type, paste, or upload to search"
+                        ${library ? "" : "disabled"}
+                      />
+                    </span>
+                  </label>
+                `
+                : `
+                  <div class="search-mode-copy">
+                    <span class="pill ready">${escapeHtml(activeModeLabel)}查询</span>
+                    <p class="helper">
+                      ${
+                        state.searchMode === "image"
+                          ? "上传、粘贴或复用图片作为查询输入。"
+                          : state.searchMode === "video"
+                            ? "上传视频、选择库内视频源，或复用结果片段作为查询输入。"
+                            : "上传 PDF 或复用结果页作为查询输入。"
+                      }
+                    </p>
+                  </div>
+                `
+            }
+          </div>
+          <div class="search-composer-actions" data-testid="search-mode-switch">
+            ${modeActionButtons}
+          </div>
         </div>
-      </div>
-      ${
-        state.searchMode === "text"
-          ? `
-            <label>
-              <span>查询文本</span>
-              <input
-                id="search-text"
-                data-testid="search-text-input"
-                type="text"
-                value="${escapeHtml(state.searchTextDraft)}"
-                placeholder="尝试输入财报页面中的问题或关键词"
-                ${library ? "" : "disabled"}
-              />
-            </label>
-          `
-          : state.searchMode === "image"
-            ? `
+        ${
+          state.searchMode === "text"
+            ? ""
+            : state.searchMode === "image"
+              ? `
             <div class="query-image-panel" data-testid="query-image-panel">
-              <label>
+              <label class="query-source-field">
                 <span>查询图片</span>
                 <input
                   id="query-image-input"
@@ -3341,23 +6794,27 @@ function renderSearchControls(library) {
                   ${library ? "" : "disabled"}
                 />
               </label>
-              <div class="query-image-card" data-testid="query-image-card">
-                <div class="job-meta">
-                  <span class="pill ${state.queryImageAsset || state.queryImageLibraryObject ? "ready" : "muted"}">${escapeHtml(queryImageStatusLabel())}</span>
+              <div class="query-image-card query-surface-card" data-testid="query-image-card">
+                <div class="job-meta query-surface-meta">
+                  <div class="query-surface-copy">
+                    <span class="pill ${state.queryImageAsset || state.queryImageLibraryObject ? "ready" : "muted"}">${escapeHtml(queryImageStatusLabel())}</span>
+                    ${
+                      queryImageDisplayName()
+                        ? `<span class="helper query-surface-name">${escapeHtml(queryImageDisplayName())}</span>`
+                        : `<span class="helper query-surface-placeholder">当前还没有查询图片。</span>`
+                    }
+                  </div>
+                </div>
+                <div class="query-preview-surface">
                   ${
-                    queryImageDisplayName()
-                      ? `<span class="helper">${escapeHtml(queryImageDisplayName())}</span>`
-                      : ""
+                    queryPreview
+                      ? isDocumentPageQueryImage()
+                        ? `<iframe class="query-image-preview-frame" data-testid="query-image-preview" src="${escapeHtml(queryPreview)}" title="查询图片预览" loading="lazy"></iframe>`
+                        : `<img class="query-image-preview" data-testid="query-image-preview" src="${escapeHtml(queryPreview)}" alt="查询图片预览" />`
+                      : `<p class="empty query-preview-empty" data-testid="query-image-empty">选择一张本地图片后，这里会显示查询图片预览。</p>`
                   }
                 </div>
-                ${
-                  queryPreview
-                    ? isDocumentPageQueryImage()
-                      ? `<iframe class="query-image-preview-frame" data-testid="query-image-preview" src="${escapeHtml(queryPreview)}" title="Query image preview" loading="lazy"></iframe>`
-                      : `<img class="query-image-preview" data-testid="query-image-preview" src="${escapeHtml(queryPreview)}" alt="Query image preview" />`
-                    : `<p class="empty" data-testid="query-image-empty">选择一张本地图片后，这里会显示查询图片预览。</p>`
-                }
-                <div class="inline-actions">
+                <div class="inline-actions query-surface-actions">
                   <button type="button" id="clear-query-image-button" data-testid="clear-query-image-button" class="secondary-button" ${state.queryImageFile || state.queryImageAsset || state.queryImageLibraryObject ? "" : "disabled"}>清除</button>
                   ${
                     activeQueryImagePreview()
@@ -3377,10 +6834,10 @@ function renderSearchControls(library) {
               </div>
             </div>
           `
-            : state.searchMode === "video"
-              ? `
+              : state.searchMode === "video"
+                ? `
             <div class="query-video-panel" data-testid="query-video-panel">
-              <label>
+              <label class="query-source-field">
                 <span>查询视频</span>
                 <input
                   id="query-video-input"
@@ -3390,7 +6847,7 @@ function renderSearchControls(library) {
                   ${library ? "" : "disabled"}
                 />
               </label>
-              <label>
+              <label class="query-source-field">
                 <span>或复用库内视频源</span>
                 <select
                   id="query-video-source-select"
@@ -3412,27 +6869,31 @@ function renderSearchControls(library) {
                     .join("")}
                 </select>
               </label>
-              <div class="query-video-card" data-testid="query-video-card">
-                <div class="job-meta">
-                  <span class="pill ${state.queryVideoAsset || state.queryVideoSource || state.queryVideoLibraryObject ? "ready" : "muted"}">${escapeHtml(queryVideoStatusLabel())}</span>
+              <div class="query-video-card query-surface-card" data-testid="query-video-card">
+                <div class="job-meta query-surface-meta">
+                  <div class="query-surface-copy">
+                    <span class="pill ${state.queryVideoAsset || state.queryVideoSource || state.queryVideoLibraryObject ? "ready" : "muted"}">${escapeHtml(queryVideoStatusLabel())}</span>
+                    ${
+                      queryVideoDisplayName()
+                        ? `<span class="helper query-surface-name">${escapeHtml(queryVideoDisplayName())}</span>`
+                        : `<span class="helper query-surface-placeholder">当前还没有查询视频。</span>`
+                    }
+                  </div>
+                </div>
+                <div class="query-preview-surface">
                   ${
-                    queryVideoDisplayName()
-                      ? `<span class="helper">${escapeHtml(queryVideoDisplayName())}</span>`
-                      : ""
+                    queryVideoPreview
+                      ? `<video
+                          class="query-video-preview"
+                          data-testid="query-video-preview"
+                          src="${escapeHtml(queryVideoPreview)}"
+                          controls
+                          preload="metadata"
+                        ></video>`
+                      : `<p class="empty query-preview-empty" data-testid="query-video-empty">选择一个本地视频或库内视频源后，这里会显示查询视频预览。</p>`
                   }
                 </div>
-                ${
-                  queryVideoPreview
-                    ? `<video
-                        class="query-video-preview"
-                        data-testid="query-video-preview"
-                        src="${escapeHtml(queryVideoPreview)}"
-                        controls
-                        preload="metadata"
-                      ></video>`
-                    : `<p class="empty" data-testid="query-video-empty">选择一个本地视频或库内视频源后，这里会显示查询视频预览。</p>`
-                }
-                <div class="query-range-card" data-testid="query-video-range-card">
+                <div class="query-range-card query-surface-subcard" data-testid="query-video-range-card">
                   <div class="job-meta">
                     <strong>时间范围</strong>
                     <span class="helper">${escapeHtml(queryVideoRangeSummary())}</span>
@@ -3441,35 +6902,35 @@ function renderSearchControls(library) {
                     state.queryVideoLibraryObject
                       ? `<p class="helper">当前使用库内 video_segment；查询范围固定为该片段自身的时间范围。</p>`
                       : queryVideoDuration
-                      ? `
-                        <div class="range-grid">
-                          <label>
-                            <span>开始时间</span>
-                            <input
-                              id="query-video-range-start"
-                              data-testid="query-video-range-start"
-                              type="range"
-                              min="0"
-                              max="${escapeHtml(Math.max(queryVideoDuration - 1, 0))}"
-                              step="${escapeHtml(queryVideoRangeStep())}"
-                              value="${escapeHtml(queryVideoStartMs)}"
-                            />
-                          </label>
-                          <label>
-                            <span>结束时间</span>
-                            <input
-                              id="query-video-range-end"
-                              data-testid="query-video-range-end"
-                              type="range"
-                              min="1"
-                              max="${escapeHtml(queryVideoDuration)}"
-                              step="${escapeHtml(queryVideoRangeStep())}"
-                              value="${escapeHtml(Math.max(queryVideoEndMs, 1))}"
-                            />
-                          </label>
-                        </div>
-                      `
-                      : `<p class="helper">视频元数据加载后即可通过时间轴拖选查询片段；不拖选时默认整段视频。</p>`
+                        ? `
+                          <div class="range-grid">
+                            <label>
+                              <span>开始时间</span>
+                              <input
+                                id="query-video-range-start"
+                                data-testid="query-video-range-start"
+                                type="range"
+                                min="0"
+                                max="${escapeHtml(Math.max(queryVideoDuration - 1, 0))}"
+                                step="${escapeHtml(queryVideoRangeStep())}"
+                                value="${escapeHtml(queryVideoStartMs)}"
+                              />
+                            </label>
+                            <label>
+                              <span>结束时间</span>
+                              <input
+                                id="query-video-range-end"
+                                data-testid="query-video-range-end"
+                                type="range"
+                                min="1"
+                                max="${escapeHtml(queryVideoDuration)}"
+                                step="${escapeHtml(queryVideoRangeStep())}"
+                                value="${escapeHtml(Math.max(queryVideoEndMs, 1))}"
+                              />
+                            </label>
+                          </div>
+                        `
+                        : `<p class="helper">视频元数据加载后即可通过时间轴拖选查询片段；不拖选时默认整段视频。</p>`
                   }
                   <div class="inline-actions">
                     <button
@@ -3483,7 +6944,7 @@ function renderSearchControls(library) {
                     </button>
                   </div>
                 </div>
-                <div class="inline-actions">
+                <div class="inline-actions query-surface-actions">
                   <button
                     type="button"
                     id="clear-query-video-button"
@@ -3502,9 +6963,9 @@ function renderSearchControls(library) {
               </div>
             </div>
           `
-              : `
+                : `
             <div class="query-document-panel" data-testid="query-document-panel">
-              <label>
+              <label class="query-source-field">
                 <span>查询文档</span>
                 <input
                   id="query-document-input"
@@ -3514,21 +6975,25 @@ function renderSearchControls(library) {
                   ${library ? "" : "disabled"}
                 />
               </label>
-              <div class="query-document-card" data-testid="query-document-card">
-                <div class="job-meta">
-                  <span class="pill ${state.queryDocumentAsset || state.queryDocumentLibraryObject ? "ready" : "muted"}">${escapeHtml(queryDocumentStatusLabel())}</span>
+              <div class="query-document-card query-surface-card" data-testid="query-document-card">
+                <div class="job-meta query-surface-meta">
+                  <div class="query-surface-copy">
+                    <span class="pill ${state.queryDocumentAsset || state.queryDocumentLibraryObject ? "ready" : "muted"}">${escapeHtml(queryDocumentStatusLabel())}</span>
+                    ${
+                      queryDocumentDisplayName()
+                        ? `<span class="helper query-surface-name">${escapeHtml(queryDocumentDisplayName())}</span>`
+                        : `<span class="helper query-surface-placeholder">当前还没有查询文档。</span>`
+                    }
+                  </div>
+                </div>
+                <div class="query-preview-surface">
                   ${
-                    queryDocumentDisplayName()
-                      ? `<span class="helper">${escapeHtml(queryDocumentDisplayName())}</span>`
-                      : ""
+                    queryDocumentPreview
+                      ? `<iframe class="query-document-preview-frame" data-testid="query-document-preview" src="${escapeHtml(queryDocumentPreview)}" title="查询文档预览" loading="lazy"></iframe>`
+                      : `<p class="empty query-preview-empty" data-testid="query-document-empty">选择一个本地 PDF 或从结果复用 document_page 后，这里会显示查询文档预览。</p>`
                   }
                 </div>
-                ${
-                  queryDocumentPreview
-                    ? `<iframe class="query-document-preview-frame" data-testid="query-document-preview" src="${escapeHtml(queryDocumentPreview)}" title="Query document preview" loading="lazy"></iframe>`
-                    : `<p class="empty" data-testid="query-document-empty">选择一个本地 PDF 或从结果复用 document_page 后，这里会显示查询文档预览。</p>`
-                }
-                <div class="query-range-card" data-testid="query-document-range-card">
+                <div class="query-range-card query-surface-subcard" data-testid="query-document-range-card">
                   <div class="job-meta">
                     <strong>页范围</strong>
                     <span class="helper" id="query-document-range-summary">${escapeHtml(queryDocumentRangeSummary())}</span>
@@ -3537,35 +7002,35 @@ function renderSearchControls(library) {
                     state.queryDocumentLibraryObject
                       ? `<p class="helper">当前使用库内 document_page；查询范围固定为该页面对应的单页范围。</p>`
                       : `
-                        <div class="range-grid range-grid-pages">
-                          <label>
-                            <span>起始页</span>
-                            <input
-                              id="query-document-range-start"
-                              data-testid="query-document-range-start"
-                              type="number"
-                              inputmode="numeric"
-                              min="1"
-                              step="1"
-                              value="${escapeHtml(currentQueryDocumentStartPage())}"
-                              placeholder="留空表示整份文档"
-                            />
-                          </label>
-                          <label>
-                            <span>结束页</span>
-                            <input
-                              id="query-document-range-end"
-                              data-testid="query-document-range-end"
-                              type="number"
-                              inputmode="numeric"
-                              min="1"
-                              step="1"
-                              value="${escapeHtml(currentQueryDocumentEndPage())}"
-                              placeholder="只填起始页表示单页"
-                            />
-                          </label>
-                        </div>
-                      `
+                          <div class="range-grid range-grid-pages">
+                            <label>
+                              <span>起始页</span>
+                              <input
+                                id="query-document-range-start"
+                                data-testid="query-document-range-start"
+                                type="number"
+                                inputmode="numeric"
+                                min="1"
+                                step="1"
+                                value="${escapeHtml(currentQueryDocumentStartPage())}"
+                                placeholder="留空表示整份文档"
+                              />
+                            </label>
+                            <label>
+                              <span>结束页</span>
+                              <input
+                                id="query-document-range-end"
+                                data-testid="query-document-range-end"
+                                type="number"
+                                inputmode="numeric"
+                                min="1"
+                                step="1"
+                                value="${escapeHtml(currentQueryDocumentEndPage())}"
+                                placeholder="只填起始页表示单页"
+                              />
+                            </label>
+                          </div>
+                        `
                   }
                   <div class="inline-actions">
                     <button
@@ -3579,7 +7044,7 @@ function renderSearchControls(library) {
                     </button>
                   </div>
                 </div>
-                <div class="inline-actions">
+                <div class="inline-actions query-surface-actions">
                   <button
                     type="button"
                     id="clear-query-document-button"
@@ -3598,18 +7063,89 @@ function renderSearchControls(library) {
               </div>
             </div>
           `
-      }
-      <button type="submit" data-testid="search-submit-button" ${library ? "" : "disabled"}>
-        ${
-          state.searchMode === "text"
-            ? "搜索"
-            : state.searchMode === "image"
-              ? "以图片搜索"
-              : state.searchMode === "video"
-                ? "以视频搜索"
-                : "以文档搜索"
         }
-      </button>
+      </div>
+      ${
+        filterPanelOpen
+          ? `
+            <section class="search-filter-panel" data-testid="search-filter-dock">
+              <div class="search-common-filters">
+                <label>
+                  <span>视觉对象类型</span>
+                  <select id="search-filter-kind" data-testid="search-filter-kind" ${library ? "" : "disabled"}>
+                    <option value="">全部</option>
+                    <option value="image" ${state.searchFilters.visualUnitKind === "image" ? "selected" : ""}>图片</option>
+                    <option value="document_page" ${state.searchFilters.visualUnitKind === "document_page" ? "selected" : ""}>文档页</option>
+                    <option value="video_segment" ${state.searchFilters.visualUnitKind === "video_segment" ? "selected" : ""}>视频片段</option>
+                  </select>
+                </label>
+                <label>
+                  <span>来源类型</span>
+                  <select id="search-filter-source-type" data-testid="search-filter-source-type" ${library ? "" : "disabled"}>
+                    <option value="">全部</option>
+                    <option value="image" ${state.searchFilters.sourceType === "image" ? "selected" : ""}>图片</option>
+                    <option value="pdf" ${state.searchFilters.sourceType === "pdf" ? "selected" : ""}>PDF</option>
+                    <option value="video" ${state.searchFilters.sourceType === "video" ? "selected" : ""}>视频</option>
+                  </select>
+                </label>
+              </div>
+              <div class="search-advanced-grid">
+                <label>
+                  <span>路径前缀</span>
+                  <input
+                    id="search-filter-path-prefix"
+                    data-testid="search-filter-path-prefix"
+                    type="text"
+                    value="${escapeHtml(state.searchFilters.pathPrefix)}"
+                    placeholder="/abs/path/prefix"
+                    ${library ? "" : "disabled"}
+                  />
+                </label>
+                <label>
+                  <span>起始时间（ms）</span>
+                  <input
+                    id="search-filter-time-range-start"
+                    data-testid="search-filter-time-range-start"
+                    type="number"
+                    inputmode="numeric"
+                    min="0"
+                    step="1"
+                    value="${escapeHtml(state.searchFilters.timeRangeStartMsDraft)}"
+                    placeholder="仅作用于视频时间命中"
+                    ${library ? "" : "disabled"}
+                  />
+                </label>
+                <label>
+                  <span>结束时间（ms）</span>
+                  <input
+                    id="search-filter-time-range-end"
+                    data-testid="search-filter-time-range-end"
+                    type="number"
+                    inputmode="numeric"
+                    min="0"
+                    step="1"
+                    value="${escapeHtml(state.searchFilters.timeRangeEndMsDraft)}"
+                    placeholder="仅作用于视频时间命中"
+                    ${library ? "" : "disabled"}
+                  />
+                </label>
+                <div class="inline-actions">
+                  <button
+                    type="button"
+                    id="clear-search-filters-button"
+                    data-testid="clear-search-filters-button"
+                    class="secondary-button"
+                    ${library ? "" : "disabled"}
+                  >
+                    清除过滤器
+                  </button>
+                </div>
+              </div>
+            </section>
+          `
+          : ""
+      }
+      ${renderSearchStateStrip(library)}
     </form>
   `;
 }
@@ -3620,15 +7156,19 @@ function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
   }
 
   const currentShell = root.querySelector("main.shell");
-  const currentHero = currentShell?.querySelector(".hero");
-  const currentDesk = currentShell?.querySelector(".workspace-desk");
+  const currentShellBar = currentShell?.querySelector(".shell-bar, .hero");
+  const currentFrame = currentShell?.querySelector(".workspace-frame");
+  const currentSidebar = currentFrame?.querySelector(".app-sidebar");
+  const currentDesk = currentFrame?.querySelector(".workspace-desk");
   const currentLeft = currentDesk?.querySelector(".workspace-left");
-  const currentCenter = currentDesk?.querySelector(".workspace-center");
+  const currentRight = currentDesk?.querySelector(".workspace-right");
   if (
     !(currentShell instanceof HTMLElement) ||
-    !(currentHero instanceof HTMLElement) ||
-    !(currentLeft instanceof HTMLElement) ||
-    !(currentCenter instanceof HTMLElement)
+    !(currentShellBar instanceof HTMLElement) ||
+    !(currentFrame instanceof HTMLElement) ||
+    !(currentSidebar instanceof HTMLElement) ||
+    !(currentDesk instanceof HTMLElement) ||
+    !(currentLeft instanceof HTMLElement)
   ) {
     return false;
   }
@@ -3636,29 +7176,48 @@ function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
   const template = document.createElement("template");
   template.innerHTML = nextMarkup.trim();
   const nextShell = template.content.firstElementChild;
-  const nextHero = nextShell?.querySelector(".hero");
+  const nextShellBar = nextShell?.querySelector(".shell-bar");
   const nextStatusStack = nextShell?.querySelector(".status-stack");
-  const nextDesk = nextShell?.querySelector(".workspace-desk");
+  const nextFrame = nextShell?.querySelector(".workspace-frame");
+  const nextSidebar = nextFrame?.querySelector(".app-sidebar");
+  const nextDesk = nextFrame?.querySelector(".workspace-desk");
   const nextLeft = nextDesk?.querySelector(".workspace-left");
-  const nextCenter = nextDesk?.querySelector(".workspace-center");
+  const nextRight = nextDesk?.querySelector(".workspace-right");
   if (
     !(nextShell instanceof HTMLElement) ||
-    !(nextHero instanceof HTMLElement) ||
-    !(nextLeft instanceof HTMLElement) ||
-    !(nextCenter instanceof HTMLElement)
+    !(nextShellBar instanceof HTMLElement) ||
+    !(nextFrame instanceof HTMLElement) ||
+    !(nextSidebar instanceof HTMLElement) ||
+    !(nextDesk instanceof HTMLElement) ||
+    !(nextLeft instanceof HTMLElement)
   ) {
     return false;
   }
 
-  currentHero.replaceWith(nextHero);
+  const syncOptionalRegion = (parent, selector, nextNode) => {
+    const currentNode = parent.querySelector(selector);
+    if (currentNode instanceof HTMLElement && nextNode instanceof HTMLElement) {
+      currentNode.replaceWith(nextNode);
+      return;
+    }
+    if (currentNode instanceof HTMLElement) {
+      currentNode.remove();
+      return;
+    }
+    if (nextNode instanceof HTMLElement) {
+      parent.append(nextNode);
+    }
+  };
+
+  currentShellBar.replaceWith(nextShellBar);
 
   const currentStatusStack = currentShell.querySelector(".status-stack");
-  const insertedHero = currentShell.querySelector(".hero");
+  const insertedShellBar = currentShell.querySelector(".shell-bar");
   if (nextStatusStack instanceof HTMLElement) {
     if (currentStatusStack instanceof HTMLElement) {
       currentStatusStack.replaceWith(nextStatusStack);
-    } else if (insertedHero instanceof HTMLElement) {
-      insertedHero.after(nextStatusStack);
+    } else if (insertedShellBar instanceof HTMLElement) {
+      insertedShellBar.after(nextStatusStack);
     } else {
       return false;
     }
@@ -3666,8 +7225,21 @@ function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
     currentStatusStack.remove();
   }
 
+  currentFrame.className = nextFrame.className;
+  currentSidebar.replaceWith(nextSidebar);
+  currentDesk.className = nextDesk.className;
   currentLeft.replaceWith(nextLeft);
-  currentCenter.replaceWith(nextCenter);
+  syncOptionalRegion(currentDesk, ".workspace-center", nextDesk.querySelector(".workspace-center"));
+  if (currentRight instanceof HTMLElement && nextRight instanceof HTMLElement) {
+    currentRight.className = nextRight.className;
+  } else if (currentRight instanceof HTMLElement || nextRight instanceof HTMLElement) {
+    return false;
+  }
+  syncOptionalRegion(
+    currentFrame,
+    '[data-testid="utility-drawer"]',
+    nextFrame.querySelector('[data-testid="utility-drawer"]')
+  );
   return true;
 }
 
@@ -3682,193 +7254,141 @@ function bindClickListeners(selector, handler, skipWithin = null) {
 
 function renderWorkspace() {
   const library = selectedLibrary();
-  const workspaceMeta = currentWorkspaceMeta();
+  const searchDetailSheetOpen = searchDetailSheetIsOpen();
   const isSearchWorkspace = state.activeWorkspace === "search";
+  const searchMobileSheetViewport = window.matchMedia("(max-width: 720px)").matches;
+  const searchNextStepDock = isSearchWorkspace ? renderSearchNextStepDock(library) : "";
+  const searchHasResults = Boolean((state.searchOutcome?.results ?? []).length);
+  const shouldShowSearchResultsColumn = isSearchWorkspace && (searchHasResults || state.searchInFlight);
+  const shouldRenderSearchDetailPanel =
+    isSearchWorkspace &&
+    searchHasResults &&
+    (!searchMobileSheetViewport || searchDetailSheetOpen);
+  const searchLayoutClass = shouldShowSearchResultsColumn
+    ? "workspace-desk-search workspace-desk-search-results"
+    : "workspace-desk-search workspace-desk-search-stage-only";
+  const searchStagePanelClass = searchHasResults
+    ? "panel search-stage-panel search-stage-panel-reading"
+    : "panel search-stage-panel";
   const focusedEditableState = captureFocusedEditableState();
-  const detailSignature = selectedVisualUnitDetailSignature();
+  const detailPanelKey = currentDetailPanelRenderKey();
   const previousDetailPanel = root?.querySelector('[data-testid="detail-panel"]') ?? null;
   const shouldPreserveDetailPanel =
     isSearchWorkspace &&
     previousDetailPanel instanceof HTMLElement &&
-    detailSignature !== null &&
-    detailSignature === lastRenderedDetailSignature;
+    detailPanelKey !== null &&
+    detailPanelKey === lastRenderedDetailPanelKey;
 
   const nextMarkup = `
     <main class="shell" data-testid="workspace-shell">
-      <section class="hero">
-        <p class="eyebrow">FauniSearch</p>
-        <h1>${escapeHtml(workspaceMeta.title)}</h1>
-        <p class="summary">
-          ${escapeHtml(workspaceMeta.summary)}
-        </p>
-        ${renderWorkspaceSwitcher()}
-        <div class="service-strip">
-          <a href="${endpoints.uiRoot}" target="_blank" rel="noreferrer">UI</a>
-          <a href="${endpoints.appHealth}" target="_blank" rel="noreferrer">App health</a>
-          <a href="${endpoints.sidecarHealth}" target="_blank" rel="noreferrer">Sidecar health</a>
-          <a href="${endpoints.qdrantCollections}" target="_blank" rel="noreferrer">Qdrant</a>
-        </div>
+      <section class="shell-bar">
+        ${renderContextRail(library)}
       </section>
 
       ${renderStatusNotices()}
 
-      <section class="workspace-desk ${isSearchWorkspace ? "workspace-desk-search" : "workspace-desk-inventory"}">
-        <aside class="workspace-column workspace-left">
-          <section class="panel panel-tight">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Library</p>
-                <h2>库上下文</h2>
-              </div>
-            </div>
-            <form id="create-library-form" class="stack-form" data-testid="create-library-form">
-              <label>
-                <span>显示名称</span>
-                <input
-                  id="library-name"
-                  data-testid="library-name-input"
-                  name="libraryDisplayName"
-                  type="text"
-                  value="${escapeHtml(state.libraryDisplayNameDraft)}"
-                  placeholder="例如：Invoice Demo"
-                  required
-                />
-              </label>
-              <label>
-                <span>自定义 library_id（可选）</span>
-                <input
-                  id="library-id"
-                  data-testid="library-id-input"
-                  name="libraryId"
-                  type="text"
-                  value="${escapeHtml(state.libraryIdDraft)}"
-                  placeholder="例如：invoice-demo"
-                />
-              </label>
-              <button type="submit" data-testid="create-library-button">创建库</button>
-            </form>
-            <label class="stack-form">
-              <span>当前库</span>
-              <select id="library-select" data-testid="library-select" ${state.libraries.length ? "" : "disabled"}>
-                ${
-                  state.libraries.length
-                    ? state.libraries
-                        .map(
-                          (item) => `
-                            <option value="${escapeHtml(item.id)}" ${item.id === state.selectedLibraryId ? "selected" : ""}>
-                              ${escapeHtml(libraryDisplayName(item))} (${escapeHtml(item.id)})
-                            </option>
-                          `
-                        )
-                        .join("")
-                    : `<option value="">还没有库</option>`
-                }
-              </select>
-            </label>
-            <div class="context-card" data-testid="current-library-card">
-              ${
-                library
-                  ? `
-                    <p class="eyebrow">Current</p>
-                    <h3 data-testid="current-library-name">${escapeHtml(libraryDisplayName(library))}</h3>
-                    <p class="helper" data-testid="current-library-id">${escapeHtml(library.id)}</p>
-                    <dl class="stats">
-                      <div><dt>Accepted items</dt><dd>${library.counts.accepted_items}</dd></div>
-                      <div><dt>Pending jobs</dt><dd>${library.counts.pending_jobs}</dd></div>
-                      <div><dt>Latest job</dt><dd>${escapeHtml(library.latest_job_id ?? "none")}</dd></div>
-                    </dl>
-                    ${renderInventoryBridge(library)}
-                    ${renderProviderBridge(library)}
-                  `
-                  : `<p class="empty">先创建一个库，再进入导入和搜索步骤。</p>`
-              }
-            </div>
-          </section>
-
-          ${renderSourceRootsPanel(library)}
-
-          <section class="panel panel-tight">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Import</p>
-                <h2>路径导入</h2>
-              </div>
-            </div>
-            <form id="import-form" class="stack-form" data-testid="import-form">
-              <label>
-                <span>本地路径</span>
-                <textarea
-                  id="import-paths"
-                  data-testid="import-paths-input"
-                  rows="6"
-                  placeholder="/path/to/file.pdf&#10;/path/to/image.png"
-                  ${library ? "" : "disabled"}
-                >${escapeHtml(state.importPathsDraft)}</textarea>
-              </label>
-              <button type="submit" data-testid="import-submit-button" ${library ? "" : "disabled"}>提交导入</button>
-            </form>
-            <div class="quick-card" data-testid="demo-card">
-              <p class="eyebrow">Quick demo</p>
-              <h3>真实索引和检索</h3>
-              <p class="helper">使用仓库内置的 TATDQA 图片 fixture，可直接触发真实 document/image embedding、Qdrant 写入和文本搜索。浏览器文件选择不会暴露服务器可读的绝对路径，所以当前仍以路径输入为主。</p>
-              <code>${escapeHtml(demoFixture.path)}</code>
-              <div class="inline-actions">
-                <button id="fill-demo-button" data-testid="fill-demo-button" type="button" class="secondary-button" ${library ? "" : "disabled"}>填入 demo 路径和查询</button>
-                <button id="run-demo-button" data-testid="run-demo-button" type="button" ${library ? "" : "disabled"}>导入并搜索 demo</button>
-              </div>
-            </div>
-            ${renderImportReceipt()}
-          </section>
-
-          <section class="panel panel-tight">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Tasks</p>
-                <h2>任务面板</h2>
-              </div>
-            </div>
-            ${renderJobs()}
-          </section>
+      <section class="workspace-frame ${state.utilityDrawerOpen ? "workspace-frame-with-drawer" : "workspace-frame-main-only"}">
+        <aside class="panel panel-tight app-sidebar" data-testid="app-sidebar">
+          ${renderWorkspaceSwitcher()}
         </aside>
-
-        <section class="workspace-column workspace-center">
-          ${
-            isSearchWorkspace
-              ? `
-                <section class="panel search-panel" data-testid="search-panel">
-                  <div class="panel-head">
-                    <div>
-                      <p class="eyebrow">Search</p>
-                      <h2>统一搜索入口</h2>
+        <section class="workspace-desk ${
+          isSearchWorkspace
+            ? searchLayoutClass
+            : state.activeWorkspace === "inventory"
+              ? "workspace-desk-inventory"
+              : "workspace-desk-settings"
+        }">
+          <aside class="workspace-column workspace-left">
+            ${
+              isSearchWorkspace
+                ? `
+                  <section class="${searchStagePanelClass}" data-testid="search-panel">
+                    <div class="search-stage-layout ${
+                      searchNextStepDock ? "search-stage-layout-with-dock" : "search-stage-layout-single"
+                    }">
+                      <div class="search-stage-main">
+                        ${
+                          searchHasResults
+                            ? ""
+                            : `
+                              <div class="search-stage-head">
+                                <h2>Search anything you want</h2>
+                              </div>
+                            `
+                        }
+                        ${renderSearchControls(library, searchHasResults)}
+                        ${renderLibraryContextCluster(library, "search")}
+                        ${
+                          searchHasResults || !state.searchOutcome
+                            ? ""
+                            : `
+                              <div class="search-stage-inline-outcome" data-testid="search-inline-outcome">
+                                ${renderSearchOutcome()}
+                              </div>
+                            `
+                        }
+                      </div>
+                      ${searchNextStepDock}
                     </div>
-                  </div>
-                  ${renderSearchControls(library)}
-                  ${renderSearchOutcome()}
-                </section>
-              `
-              : state.activeWorkspace === "inventory"
-                ? renderLibrarySourcesPanel(library)
-                : renderSettingsPanel(library)
-          }
-        </section>
+                  </section>
+                `
+                : state.activeWorkspace === "inventory"
+                  ? renderLibrarySourcesPanel(library)
+                  : renderSettingsPanel(library)
+            }
+          </aside>
 
-        <aside class="workspace-column workspace-right ${isSearchWorkspace ? "" : "workspace-right-hidden"}">
           ${
-            isSearchWorkspace
+            shouldShowSearchResultsColumn
               ? `
-                <section class="panel detail-panel" data-testid="detail-panel">
-                  <div class="panel-head">
-                    <div>
-                      <p class="eyebrow">Detail</p>
-                      <h2>详情侧栏</h2>
-                    </div>
-                  </div>
-                  ${renderVisualUnitDetail()}
+                <section class="workspace-column workspace-center" data-testid="search-results-column">
+                  <section class="panel search-results-panel">
+                    ${renderSearchLoadingNotice()}
+                    ${renderSearchOutcome()}
+                  </section>
                 </section>
               `
               : ""
           }
-        </aside>
+
+          ${
+            shouldRenderSearchDetailPanel
+              ? `
+                <aside class="workspace-column workspace-right">
+                  ${
+                    searchDetailSheetOpen
+                      ? `<button
+                          type="button"
+                          class="mobile-sheet-backdrop"
+                          data-testid="detail-sheet-backdrop"
+                          data-mobile-sheet-close="search"
+                          aria-label="关闭结果详情"
+                        ></button>`
+                      : ""
+                  }
+                  <section
+                    class="panel detail-panel mobile-sheet-panel ${searchDetailSheetOpen ? "mobile-sheet-open" : "mobile-sheet-closed"}"
+                    data-testid="detail-panel"
+                  >
+                    <div class="mobile-sheet-bar">
+                      <span class="mobile-sheet-handle" aria-hidden="true"></span>
+                      <button
+                        type="button"
+                        class="secondary-button mobile-sheet-close"
+                        data-testid="detail-sheet-close-button"
+                        data-mobile-sheet-close="search"
+                      >
+                        关闭
+                      </button>
+                    </div>
+                    ${renderVisualUnitDetail()}
+                  </section>
+                </aside>
+              `
+              : ""
+          }
+        </section>
+        ${renderUtilityDrawer(library)}
       </section>
     </main>
   `;
@@ -3884,10 +7404,52 @@ function renderWorkspace() {
   document.querySelectorAll("[data-workspace]").forEach((button) => {
     button.addEventListener("click", onSelectWorkspace);
   });
+  document.querySelectorAll("[data-settings-section]").forEach((button) => {
+    button.addEventListener("click", onSelectSettingsSection);
+  });
+  document.querySelectorAll("[data-open-settings-section]").forEach((button) => {
+    button.addEventListener("click", onOpenSettingsSection);
+  });
+  document.querySelectorAll("[data-open-hit-library-id]").forEach((button) => {
+    button.addEventListener("click", onOpenHitLibraryContext);
+  });
+  document.querySelectorAll("[data-content-type-scope]").forEach((button) => {
+    button.addEventListener("click", onSelectContentTypeTab);
+  });
+  document.querySelectorAll("[data-library-override-mode]").forEach((button) => {
+    button.addEventListener("click", onLibraryOverrideModeChange);
+  });
   document.querySelector("#create-library-form")?.addEventListener("submit", onCreateLibrary);
+  document.querySelectorAll("[data-library-rename-form]").forEach((form) => {
+    form.addEventListener("submit", onRenameLibrary);
+  });
   document.querySelector("#library-name")?.addEventListener("input", onLibraryNameInput);
   document.querySelector("#library-id")?.addEventListener("input", onLibraryIdInput);
+  document.querySelectorAll("[data-library-management-display-name-input]").forEach((input) => {
+    input.addEventListener("input", onManageLibraryNameInput);
+  });
+  document
+    .querySelector('[data-testid="create-library-popover"]')
+    ?.addEventListener("toggle", onCreateLibraryPopoverToggle);
+  document
+    .querySelector('[data-testid="manage-library-popover"]')
+    ?.addEventListener("toggle", onManageLibraryPopoverToggle);
+  document.querySelectorAll("[data-library-archive-action]").forEach((button) => {
+    button.addEventListener("click", onToggleLibraryArchive);
+  });
+  document.querySelectorAll("[data-library-delete-action]").forEach((button) => {
+    button.addEventListener("click", onDeleteLibrary);
+  });
   document.querySelector("#library-select")?.addEventListener("change", onSelectLibrary);
+  document.querySelectorAll("[data-job-cancel-id]").forEach((button) => {
+    button.addEventListener("click", onCancelJob);
+  });
+  document.querySelectorAll("[data-job-retry-id]").forEach((button) => {
+    button.addEventListener("click", onRetryJob);
+  });
+  document.querySelectorAll("[data-job-resume-id]").forEach((button) => {
+    button.addEventListener("click", onResumeJob);
+  });
   document
     .querySelector("#provider-config-form")
     ?.addEventListener("submit", onSubmitProviderConfig);
@@ -3986,6 +7548,12 @@ function renderWorkspace() {
     ?.addEventListener("change", onLibraryModelTestComparisonFileInput);
   document.querySelector("#source-root-form")?.addEventListener("submit", onSubmitSourceRoot);
   document.querySelector("#source-root-reset-button")?.addEventListener("click", onResetSourceRootEditor);
+  document
+    .querySelector("#search-preparation-disclosure")
+    ?.addEventListener("toggle", onSearchPreparationDisclosureToggle);
+  document
+    .querySelector("#search-jobs-disclosure")
+    ?.addEventListener("toggle", onSearchJobsDisclosureToggle);
   document.querySelector("#source-root-path")?.addEventListener("input", onSourceRootPathInput);
   document
     .querySelector("#source-root-enabled")
@@ -4001,6 +7569,10 @@ function renderWorkspace() {
     ?.addEventListener("input", onSourceRootIncludeExtensionsInput);
   document.querySelector("#library-refresh-button")?.addEventListener("click", onRefreshLibrarySources);
   document.querySelector("#library-rescan-button")?.addEventListener("click", onRescanLibrarySources);
+  document.querySelector("#diagnostics-rebuild-library-button")?.addEventListener("click", onRebuildLibrarySources);
+  document
+    .querySelector("#diagnostics-cleanup-retired-vector-spaces-button")
+    ?.addEventListener("click", onCleanupRetiredVectorSpaces);
   document.querySelector("#source-filter-root")?.addEventListener("change", onSourceFilterRootChange);
   document.querySelector("#source-filter-type")?.addEventListener("change", onSourceFilterTypeChange);
   document
@@ -4024,9 +7596,33 @@ function renderWorkspace() {
   document.querySelectorAll("[data-provider-edit-id]").forEach((button) => {
     button.addEventListener("click", onEditProviderConfig);
   });
+  document.querySelectorAll("[data-utility-drawer-open]").forEach((button) => {
+    button.addEventListener("click", onOpenUtilityDrawer);
+  });
+  document.querySelectorAll("[data-utility-drawer-section]").forEach((button) => {
+    button.addEventListener("click", onSelectUtilityDrawerSection);
+  });
+  document.querySelectorAll("[data-utility-drawer-close]").forEach((button) => {
+    button.addEventListener("click", onCloseUtilityDrawer);
+  });
+  document.querySelectorAll("[data-utilities-action]").forEach((button) => {
+    button.addEventListener("click", onUtilitiesAction);
+  });
+  document.querySelectorAll(".inventory-source-select[data-source-id]").forEach((button) => {
+    button.addEventListener("click", onSelectInventorySource);
+  });
   document.querySelector("#import-form")?.addEventListener("submit", onImportPaths);
   document.querySelector("#import-paths")?.addEventListener("input", onImportPathsInput);
   document.querySelector("#search-form")?.addEventListener("submit", onSearchSubmit);
+  document
+    .querySelector("#search-filter-toggle-button")
+    ?.addEventListener("click", onToggleSearchFiltersPanel);
+  document.querySelectorAll("[data-search-scope]").forEach((button) => {
+    button.addEventListener("click", onSelectSearchScope);
+  });
+  document.querySelectorAll("[data-search-result-library-focus]").forEach((button) => {
+    button.addEventListener("click", onSelectSearchResultLibraryFocus);
+  });
   document.querySelector("#search-text")?.addEventListener("input", onSearchTextInput);
   document.querySelector("#search-filter-kind")?.addEventListener("change", onSearchFilterKindChange);
   document
@@ -4067,8 +7663,6 @@ function renderWorkspace() {
   document
     .querySelector("#query-document-range-end")
     ?.addEventListener("input", onQueryDocumentRangeEndInput);
-  document.querySelector("#fill-demo-button")?.addEventListener("click", onFillDemo);
-  document.querySelector("#run-demo-button")?.addEventListener("click", onRunDemo);
   document.querySelectorAll("[data-search-mode]").forEach((button) => {
     button.addEventListener("click", onSelectSearchMode);
   });
@@ -4082,6 +7676,9 @@ function renderWorkspace() {
     onUseAsQueryDocument,
     preservedDetailPanel
   );
+  document.querySelectorAll("[data-mobile-sheet-close]").forEach((button) => {
+    button.addEventListener("click", onCloseMobileSheet);
+  });
 
   const queryVideoPreview = document.querySelector("#query-video-preview");
   if (queryVideoPreview instanceof HTMLVideoElement) {
@@ -4091,12 +7688,13 @@ function renderWorkspace() {
     }
   }
 
-  const detailVideoPreview = document.querySelector('[data-testid="visual-preview"][data-preview-kind="video"]');
-  if (detailVideoPreview instanceof HTMLVideoElement) {
-    attachBoundedVideoPlayback(detailVideoPreview);
-  }
+  document.querySelectorAll('[data-preview-kind="video"]').forEach((previewElement) => {
+    if (previewElement instanceof HTMLVideoElement) {
+      attachBoundedVideoPlayback(previewElement);
+    }
+  });
 
-  lastRenderedDetailSignature = detailSignature;
+  lastRenderedDetailPanelKey = detailPanelKey;
   restoreFocusedEditableState(focusedEditableState);
 }
 
@@ -4193,6 +7791,15 @@ async function refreshLibraries({ keepSelection = true } = {}) {
   if (!keepSelection || !state.libraries.some((item) => item.id === state.selectedLibraryId)) {
     state.selectedLibraryId = state.libraries[0]?.id ?? "";
   }
+
+  const currentLibrary =
+    state.libraries.find((item) => item.id === state.selectedLibraryId) ?? null;
+  if (!currentLibrary || state.libraryManagementDraftLibraryId !== currentLibrary.id) {
+    state.manageLibraryPopoverOpen = false;
+  }
+  if (!currentLibrary || state.libraryManagementDraftLibraryId !== currentLibrary.id) {
+    hydrateLibraryManagementDraft(currentLibrary);
+  }
 }
 
 async function refreshSourceRoots() {
@@ -4220,6 +7827,7 @@ async function refreshSourceRoots() {
 async function refreshLibrarySources() {
   if (!state.selectedLibraryId) {
     resetInventoryState();
+    state.selectedInventorySourceId = "";
     return;
   }
 
@@ -4250,6 +7858,7 @@ async function refreshLibrarySources() {
     state.inventoryFilters.sourceRootId === "manual"
       ? data.sources.filter((source) => !source.source_root_id)
       : data.sources;
+  ensureSelectedInventorySource();
 }
 
 async function refreshJobs() {
@@ -4364,18 +7973,46 @@ async function refreshWorkspace(options) {
   await refreshSourceRoots();
   await refreshProviderConfigs();
   await refreshLibraryContentSettings();
+  await refreshRuntimeHealth();
   if (state.activeWorkspace === "inventory") {
     await refreshLibrarySources();
   } else if (state.activeWorkspace === "settings") {
-    await refreshRuntimeHealth();
     await refreshModelCatalog();
     await refreshGlobalContentTypes();
-  } else {
-    state.runtimeHealth = null;
   }
   await refreshJobs();
   await refreshVideoSources();
   renderWorkspace();
+}
+
+async function switchCurrentLibrary(libraryId: string) {
+  state.selectedLibraryId = libraryId;
+  resetSourceRootEditor();
+  resetInventoryFilters();
+  resetSearchFilters();
+  resetSearchResultLibraryFocus();
+  resetInventoryState();
+  state.libraryContentTypes = emptyContentTypes();
+  state.resolvedContentModels = null;
+  state.vectorSpaceDiagnostics = null;
+  clearQueryImageState();
+  clearQueryVideoState();
+  clearQueryDocumentState();
+  resetLibraryModelTestState();
+  state.importReceipt = null;
+  state.selectedVisualUnit = null;
+  state.selectedVisualUnitLibraryId = "";
+  state.searchOutcome = null;
+  state.searchInFlight = false;
+  state.lastSearchRequest = null;
+  state.searchPreparationDisclosureOpen = false;
+  state.searchJobsDisclosureOpen = false;
+  state.searchDetailSheetOpen = false;
+  state.createLibraryPopoverOpen = false;
+  state.manageLibraryPopoverOpen = false;
+  state.globalError = null;
+  state.statusMessage = null;
+  await refreshWorkspace({ keepSelection: true });
 }
 
 async function onCreateLibrary(event) {
@@ -4399,6 +8036,7 @@ async function onCreateLibrary(event) {
     resetSourceRootEditor();
     resetInventoryFilters();
     resetSearchFilters();
+    resetSearchResultLibraryFocus();
     resetInventoryState();
     state.libraryContentTypes = emptyContentTypes();
     state.resolvedContentModels = null;
@@ -4411,11 +8049,18 @@ async function onCreateLibrary(event) {
     resetLibraryModelTestState();
     state.importReceipt = null;
     state.selectedVisualUnit = null;
+    state.selectedVisualUnitLibraryId = "";
     state.searchOutcome = null;
+    state.searchInFlight = false;
     state.lastSearchRequest = null;
+    state.searchPreparationDisclosureOpen = false;
+    state.searchJobsDisclosureOpen = false;
+    state.searchDetailSheetOpen = false;
     state.statusMessage = null;
     state.libraryDisplayNameDraft = "";
     state.libraryIdDraft = "";
+    state.createLibraryPopoverOpen = false;
+    state.manageLibraryPopoverOpen = false;
     await refreshWorkspace({ keepSelection: true });
   } catch (error) {
     state.globalError = toApiError(error);
@@ -4431,26 +8076,188 @@ function onLibraryIdInput(event) {
   state.libraryIdDraft = event.target.value;
 }
 
+function onManageLibraryNameInput(event) {
+  state.libraryManagementDisplayNameDraft = event.target.value;
+}
+
+function onCreateLibraryPopoverToggle(event) {
+  const popover = event.currentTarget as HTMLDetailsElement | null;
+  if (!(popover instanceof HTMLDetailsElement)) {
+    return;
+  }
+  state.createLibraryPopoverOpen = popover.open;
+  if (popover.open) {
+    state.manageLibraryPopoverOpen = false;
+  }
+}
+
+function onManageLibraryPopoverToggle(event) {
+  const popover = event.currentTarget as HTMLDetailsElement | null;
+  if (!(popover instanceof HTMLDetailsElement)) {
+    return;
+  }
+  state.manageLibraryPopoverOpen = popover.open;
+  if (popover.open) {
+    state.createLibraryPopoverOpen = false;
+  }
+}
+
+async function onRenameLibrary(event) {
+  event.preventDefault();
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const displayName = state.libraryManagementDisplayNameDraft.trim();
+  const previousLibrary = selectedLibrary();
+  if (!displayName) {
+    state.globalError = {
+      code: "validation_failed",
+      message: "库显示名称不能为空。",
+      details: {
+        field: "display_name",
+      },
+    };
+    renderWorkspace();
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = "正在更新当前库名称...";
+    if (previousLibrary) {
+      upsertLibrarySnapshot({
+        ...previousLibrary,
+        display_name: displayName,
+      });
+    }
+    renderWorkspace();
+    const library = await apiRequest<LibrarySnapshot>(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          display_name: displayName,
+        }),
+      }
+    );
+    const nextLibrary = {
+      ...(selectedLibrary() ?? library),
+      ...library,
+      display_name: displayName,
+    };
+    upsertLibrarySnapshot(nextLibrary);
+    hydrateLibraryManagementDraft(nextLibrary);
+    state.statusMessage = null;
+    renderWorkspace();
+  } catch (error) {
+    if (previousLibrary) {
+      upsertLibrarySnapshot(previousLibrary);
+    }
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onToggleLibraryArchive() {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const library = selectedLibrary();
+  if (!library) {
+    return;
+  }
+
+  const archived = libraryIsArchived(library);
+  const displayName = libraryDisplayName(library);
+  if (
+    !archived &&
+    !window.confirm(`确认归档“${displayName}”吗？归档会保留内容、来源和设置，之后仍可恢复。`)
+  ) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = archived
+      ? `正在恢复 ${displayName}...`
+      : `正在归档 ${displayName}...`;
+    renderWorkspace();
+    const nextLibrary = await apiRequest<LibrarySnapshot>(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/${archived ? "restore" : "archive"}`,
+      {
+        method: "POST",
+      }
+    );
+    upsertLibrarySnapshot(nextLibrary);
+    hydrateLibraryManagementDraft(nextLibrary);
+    state.statusMessage = null;
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onDeleteLibrary() {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  const library = selectedLibrary();
+  const displayName = library ? libraryDisplayName(library) : state.selectedLibraryId;
+  if (
+    !window.confirm(
+      `确认删除“${displayName}”吗？这会移除当前库的本地状态、任务引用和查询资产记录。`
+    )
+  ) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = `正在删除 ${displayName}...`;
+    renderWorkspace();
+    await apiRequest<LibrarySnapshot>(`/libraries/${encodeURIComponent(state.selectedLibraryId)}`, {
+      method: "DELETE",
+    });
+    resetSourceRootEditor();
+    resetInventoryFilters();
+    resetSearchFilters();
+    resetSearchResultLibraryFocus();
+    resetInventoryState();
+    state.libraryContentTypes = emptyContentTypes();
+    state.resolvedContentModels = null;
+    state.vectorSpaceDiagnostics = null;
+    clearQueryImageState();
+    clearQueryVideoState();
+    clearQueryDocumentState();
+    resetLibraryModelTestState();
+    state.importReceipt = null;
+    state.selectedVisualUnit = null;
+    state.selectedVisualUnitLibraryId = "";
+    state.searchOutcome = null;
+    state.searchInFlight = false;
+    state.lastSearchRequest = null;
+    state.searchPreparationDisclosureOpen = false;
+    state.searchJobsDisclosureOpen = false;
+    state.searchDetailSheetOpen = false;
+    state.createLibraryPopoverOpen = false;
+    state.manageLibraryPopoverOpen = false;
+    state.statusMessage = null;
+    await refreshWorkspace({ keepSelection: false });
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
 async function onSelectLibrary(event) {
-  state.selectedLibraryId = event.target.value;
-  resetSourceRootEditor();
-  resetInventoryFilters();
-  resetSearchFilters();
-  resetInventoryState();
-  state.libraryContentTypes = emptyContentTypes();
-  state.resolvedContentModels = null;
-  state.vectorSpaceDiagnostics = null;
-  clearQueryImageState();
-  clearQueryVideoState();
-  clearQueryDocumentState();
-  resetLibraryModelTestState();
-  state.importReceipt = null;
-  state.selectedVisualUnit = null;
-  state.searchOutcome = null;
-  state.lastSearchRequest = null;
-  state.globalError = null;
-  state.statusMessage = null;
-  await refreshWorkspace({ keepSelection: true });
+  await switchCurrentLibrary(event.target.value);
 }
 
 function onProviderConfigSelect(event) {
@@ -4534,6 +8341,23 @@ function onGlobalContentTypeChange(event) {
   renderWorkspace();
 }
 
+function onSelectContentTypeTab(event: Event) {
+  const target = event.currentTarget as HTMLElement | null;
+  const scope = target?.dataset.contentTypeScope;
+  const contentType = target?.dataset.contentType ?? "";
+  if (!contentType) {
+    return;
+  }
+  if (scope === "library") {
+    state.selectedLibraryContentType = contentType;
+    resetLibraryModelTestState();
+  } else {
+    state.selectedGlobalContentType = contentType;
+    resetGlobalModelTestState();
+  }
+  renderWorkspace();
+}
+
 function onGlobalContentTypeEnabledChange(event) {
   updateGlobalContentTypeBinding((binding) => ({
     ...binding,
@@ -4594,6 +8418,32 @@ function onLibraryContentTypeChange(event) {
   state.selectedLibraryContentType = event.target.value;
   resetLibraryModelTestState();
   renderWorkspace();
+}
+
+function onLibraryOverrideModeChange(event: Event) {
+  const mode = (event.currentTarget as HTMLElement | null)?.dataset.libraryOverrideMode;
+  if (!mode) {
+    return;
+  }
+
+  if (mode === "override") {
+    if (!selectedLibraryContentTypeHasOverride()) {
+      updateLibraryContentTypeBinding((binding) => ({ ...binding }));
+      resetLibraryModelTestState();
+      renderWorkspace();
+    }
+    return;
+  }
+
+  if (selectedLibraryContentTypeHasOverride()) {
+    const contentType = selectedLibraryContentTypeKey();
+    if (!contentType) {
+      return;
+    }
+    delete state.libraryContentTypes.content_types[contentType];
+    resetLibraryModelTestState();
+    renderWorkspace();
+  }
 }
 
 function onLibraryContentTypeEnabledChange(event) {
@@ -4662,7 +8512,10 @@ async function onResetLibraryContentTypes() {
 
   try {
     state.globalError = null;
-    state.libraryContentTypes = emptyContentTypes();
+    const contentType = selectedLibraryContentTypeKey();
+    if (contentType) {
+      delete state.libraryContentTypes.content_types[contentType];
+    }
     resetLibraryModelTestState();
     await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types`, {
       method: "PATCH",
@@ -5001,11 +8854,6 @@ function parseImportPaths(value) {
     .filter(Boolean);
 }
 
-function setDemoDrafts() {
-  state.importPathsDraft = demoFixture.path;
-  state.searchTextDraft = demoFixture.query;
-}
-
 async function onSubmitSourceRoot(event) {
   event.preventDefault();
   if (!state.selectedLibraryId) {
@@ -5023,6 +8871,7 @@ async function onSubmitSourceRoot(event) {
   }
 
   try {
+    keepSearchPreparationDisclosureOpen();
     state.globalError = null;
     state.statusMessage = state.editingSourceRootId
       ? "正在保存来源根..."
@@ -5062,17 +8911,26 @@ function onEditSourceRoot(event) {
     return;
   }
   populateSourceRootEditor(sourceRoot);
+  keepSearchPreparationDisclosureOpen();
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
 }
 
-async function triggerSourceAction(path, statusMessage) {
+function onSearchPreparationDisclosureToggle(event) {
+  state.searchPreparationDisclosureOpen = event.currentTarget.open;
+}
+
+async function triggerJobBackedAction<T extends { job?: JobSnapshot | null }>(
+  path,
+  statusMessage,
+  options: RequestInit = { method: "POST" }
+): Promise<T> {
   state.globalError = null;
   state.statusMessage = statusMessage;
   renderWorkspace();
 
-  const receipt = await apiRequest(path, { method: "POST" });
+  const receipt = await apiRequest<T>(path, options);
   await refreshWorkspace({ keepSelection: true });
 
   const job = receipt.job;
@@ -5082,17 +8940,21 @@ async function triggerSourceAction(path, statusMessage) {
 
   state.statusMessage = null;
   await refreshWorkspace({ keepSelection: true });
+  return receipt;
 }
 
-async function onRefreshLibrarySources() {
+async function onRefreshLibrarySources(event?) {
   if (!state.selectedLibraryId) {
     return;
   }
 
   try {
-    await triggerSourceAction(
+    if (event) {
+      keepSearchPreparationDisclosureOpen();
+    }
+    await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/refresh`,
-      "正在执行库级 refresh..."
+      "正在执行库级刷新..."
     );
   } catch (error) {
     state.globalError = toApiError(error);
@@ -5101,16 +8963,141 @@ async function onRefreshLibrarySources() {
   }
 }
 
-async function onRescanLibrarySources() {
+async function onRescanLibrarySources(event?) {
   if (!state.selectedLibraryId) {
     return;
   }
 
   try {
-    await triggerSourceAction(
+    if (event) {
+      keepSearchPreparationDisclosureOpen();
+    }
+    await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/rescan`,
-      "正在执行库级 rescan..."
+      "正在执行库级重扫..."
     );
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onRebuildLibrarySources() {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  try {
+    await triggerJobBackedAction<SourceActionData>(
+      `/libraries/${state.selectedLibraryId}/rebuild`,
+      "正在执行库级重建..."
+    );
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onCleanupRetiredVectorSpaces() {
+  if (!state.selectedLibraryId) {
+    return;
+  }
+
+  try {
+    await triggerJobBackedAction<MaintenanceActionData>(
+      `/libraries/${state.selectedLibraryId}/maintenance`,
+      "正在清理退役执行空间...",
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "cleanup_retired_vector_spaces" }),
+      }
+    );
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onCancelJob(event) {
+  const jobId = event.currentTarget.dataset.jobCancelId;
+  if (!jobId) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = `正在取消任务 ${jobId}...`;
+    renderWorkspace();
+    const snapshot = await apiRequest<JobSnapshot>(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    });
+    await refreshWorkspace({ keepSelection: true });
+
+    if (!isTerminalJobStatus(snapshot.status)) {
+      await waitForJobTerminal(snapshot.job_id);
+    }
+
+    state.statusMessage = null;
+    await refreshWorkspace({ keepSelection: true });
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onRetryJob(event) {
+  const jobId = event.currentTarget.dataset.jobRetryId;
+  if (!jobId) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = `正在重试任务 ${jobId}...`;
+    renderWorkspace();
+    const snapshot = await apiRequest<JobSnapshot>(`/jobs/${encodeURIComponent(jobId)}/retry`, {
+      method: "POST",
+    });
+    await refreshWorkspace({ keepSelection: true });
+
+    if (!isTerminalJobStatus(snapshot.status)) {
+      await waitForJobTerminal(snapshot.job_id);
+    }
+
+    state.statusMessage = null;
+    await refreshWorkspace({ keepSelection: true });
+  } catch (error) {
+    state.globalError = toApiError(error);
+    state.statusMessage = null;
+    renderWorkspace();
+  }
+}
+
+async function onResumeJob(event) {
+  const jobId = event.currentTarget.dataset.jobResumeId;
+  if (!jobId) {
+    return;
+  }
+
+  try {
+    state.globalError = null;
+    state.statusMessage = `正在继续任务 ${jobId}...`;
+    renderWorkspace();
+    const snapshot = await apiRequest<JobSnapshot>(`/jobs/${encodeURIComponent(jobId)}/resume`, {
+      method: "POST",
+    });
+    await refreshWorkspace({ keepSelection: true });
+
+    if (!isTerminalJobStatus(snapshot.status)) {
+      await waitForJobTerminal(snapshot.job_id);
+    }
+
+    state.statusMessage = null;
+    await refreshWorkspace({ keepSelection: true });
   } catch (error) {
     state.globalError = toApiError(error);
     state.statusMessage = null;
@@ -5125,7 +9112,8 @@ async function onRefreshSourceRoot(event) {
 
   const sourceRootId = event.currentTarget.dataset.sourceRootRefreshId;
   try {
-    await triggerSourceAction(
+    keepSearchPreparationDisclosureOpen();
+    await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}/refresh`,
       `正在 refresh ${sourceRootDisplayName(sourceRootId)}...`
     );
@@ -5143,7 +9131,8 @@ async function onRescanSourceRoot(event) {
 
   const sourceRootId = event.currentTarget.dataset.sourceRootRescanId;
   try {
-    await triggerSourceAction(
+    keepSearchPreparationDisclosureOpen();
+    await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}/rescan`,
       `正在 rescan ${sourceRootDisplayName(sourceRootId)}...`
     );
@@ -5166,6 +9155,7 @@ async function onToggleSourceRoot(event) {
   }
 
   try {
+    keepSearchPreparationDisclosureOpen();
     state.globalError = null;
     state.statusMessage = sourceRoot.enabled ? "正在停用来源根..." : "正在启用来源根...";
     renderWorkspace();
@@ -5192,6 +9182,7 @@ async function onDeleteSourceRoot(event) {
 
   const sourceRootId = event.currentTarget.dataset.sourceRootDeleteId;
   try {
+    keepSearchPreparationDisclosureOpen();
     state.globalError = null;
     state.statusMessage = `正在删除 ${sourceRootDisplayName(sourceRootId)}...`;
     renderWorkspace();
@@ -5217,6 +9208,7 @@ async function onImportPaths(event) {
     return;
   }
 
+  keepSearchPreparationDisclosureOpen();
   const textarea = document.querySelector<HTMLTextAreaElement>("#import-paths");
   state.importPathsDraft = textarea?.value ?? "";
   const paths = parseImportPaths(state.importPathsDraft);
@@ -5253,6 +9245,7 @@ async function importPaths(paths: string[]): Promise<ImportPathsData> {
     }
   );
   state.searchOutcome = null;
+  state.searchInFlight = false;
   await refreshWorkspace({ keepSelection: true });
 
   const job = state.importReceipt.job;
@@ -5272,8 +9265,8 @@ async function importPaths(paths: string[]): Promise<ImportPathsData> {
   const firstVisualUnit = state.importReceipt.accepted
     .flatMap((item) => item.visual_units ?? [])
     .at(0);
-  if (firstVisualUnit) {
-    await loadVisualUnit(firstVisualUnit.visual_unit_id);
+  if (firstVisualUnit && state.selectedLibraryId) {
+    await loadVisualUnit(state.selectedLibraryId, firstVisualUnit.visual_unit_id);
   }
   return state.importReceipt;
 }
@@ -5310,6 +9303,7 @@ async function onSearchSubmit(event) {
 
   try {
     state.globalError = null;
+    state.searchInFlight = true;
     renderWorkspace();
     if (state.searchMode === "image") {
       await runImageSearch();
@@ -5320,9 +9314,11 @@ async function onSearchSubmit(event) {
     } else {
       await runTextSearch();
     }
+    state.searchInFlight = false;
     state.statusMessage = null;
     renderWorkspace();
   } catch (error) {
+    state.searchInFlight = false;
     state.searchOutcome = { error: toApiError(error) };
     state.statusMessage = null;
     renderWorkspace();
@@ -5354,7 +9350,7 @@ async function onLoadMoreSearchResults() {
 function sharedSearchRequestFields() {
   const filters = searchFiltersPayload();
   return {
-    library_id: state.selectedLibraryId,
+    search_scope: searchScopeRequestPayload(),
     top_k: SEARCH_PAGE_SIZE,
     debug: true,
     ...(filters ? { filters } : {}),
@@ -5376,6 +9372,9 @@ async function executeSearchRequest(
   const mergedResults = options.append
     ? [...(state.searchOutcome?.results ?? []), ...(data.results ?? [])]
     : data.results;
+  if (!options.append) {
+    resetSearchResultLibraryFocus();
+  }
   state.searchOutcome = {
     ...data,
     results: mergedResults,
@@ -5383,7 +9382,7 @@ async function executeSearchRequest(
   state.lastSearchRequest = request;
   renderWorkspace();
   if (!options.append && data.results?.[0]?.visual_unit_id) {
-    await loadVisualUnit(data.results[0].visual_unit_id);
+    await loadVisualUnit(data.results[0].library_id, data.results[0].visual_unit_id);
   }
   return state.searchOutcome;
 }
@@ -5403,8 +9402,6 @@ async function runTextSearch() {
     return;
   }
 
-  state.statusMessage = "正在执行真实文本搜索...";
-  renderWorkspace();
   await searchText(text);
 }
 
@@ -5421,13 +9418,9 @@ async function runImageSearch() {
   }
 
   if (state.queryImageFile) {
-    state.statusMessage = "正在上传查询图片...";
-    renderWorkspace();
     await uploadQueryImage(state.queryImageFile);
   }
 
-  state.statusMessage = "正在执行真实图片搜索...";
-  renderWorkspace();
   if (state.queryImageAsset) {
     await searchImage({
       kind: "temp_asset",
@@ -5462,13 +9455,9 @@ async function runVideoSearch() {
   }
 
   if (state.queryVideoFile) {
-    state.statusMessage = "正在上传查询视频...";
-    renderWorkspace();
     await uploadQueryVideo(state.queryVideoFile);
   }
 
-  state.statusMessage = "正在执行真实视频搜索...";
-  renderWorkspace();
   const locator = queryVideoLocatorPayload();
   if (state.queryVideoAsset) {
     await searchVideo({
@@ -5509,13 +9498,9 @@ async function runDocumentSearch() {
   }
 
   if (state.queryDocumentFile) {
-    state.statusMessage = "正在上传查询文档...";
-    renderWorkspace();
     await uploadQueryDocument(state.queryDocumentFile);
   }
 
-  state.statusMessage = "正在执行真实文档搜索...";
-  renderWorkspace();
   const locator = queryDocumentLocatorPayload();
   if (state.queryDocumentAsset) {
     await searchDocument({
@@ -5639,39 +9624,6 @@ async function searchDocument(documentInput: Record<string, unknown>): Promise<S
   });
 }
 
-function onFillDemo() {
-  setDemoDrafts();
-  state.activeWorkspace = "search";
-  state.searchMode = "text";
-  state.globalError = null;
-  state.statusMessage = null;
-  renderWorkspace();
-}
-
-async function onRunDemo() {
-  if (!state.selectedLibraryId) {
-    return;
-  }
-
-  try {
-    setDemoDrafts();
-    state.activeWorkspace = "search";
-    state.globalError = null;
-    state.statusMessage = "正在导入 demo fixture，并写入 Qdrant...";
-    renderWorkspace();
-    await importPaths([demoFixture.path]);
-    state.statusMessage = "索引完成，正在执行 demo 查询...";
-    renderWorkspace();
-    await searchText(demoFixture.query);
-    state.statusMessage = null;
-    renderWorkspace();
-  } catch (error) {
-    state.globalError = toApiError(error);
-    state.statusMessage = null;
-    renderWorkspace();
-  }
-}
-
 async function onSelectWorkspace(event) {
   const nextWorkspace = event.currentTarget.dataset.workspace as WorkspaceKind | undefined;
   if (!nextWorkspace || nextWorkspace === state.activeWorkspace) {
@@ -5679,6 +9631,12 @@ async function onSelectWorkspace(event) {
   }
 
   state.activeWorkspace = nextWorkspace;
+  if (nextWorkspace !== "search") {
+    state.searchDetailSheetOpen = false;
+  }
+  if (nextWorkspace !== "inventory") {
+    state.inventoryDetailSheetOpen = false;
+  }
   state.globalError = null;
   state.statusMessage = null;
 
@@ -5695,10 +9653,230 @@ async function onSelectWorkspace(event) {
   }
 }
 
-function onSelectSearchMode(event) {
-  state.searchMode = event.currentTarget.dataset.searchMode;
+async function onOpenHitLibraryContext(event) {
+  const libraryId = event.currentTarget.dataset.openHitLibraryId?.trim();
+  if (!libraryId) {
+    return;
+  }
+
   state.globalError = null;
   state.statusMessage = null;
+  state.activeWorkspace = "inventory";
+  state.searchDetailSheetOpen = false;
+
+  try {
+    if (libraryId === state.selectedLibraryId) {
+      await refreshLibrarySources();
+      renderWorkspace();
+      return;
+    }
+    await switchCurrentLibrary(libraryId);
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+async function onSelectSearchResultLibraryFocus(event) {
+  const nextLibraryId = event.currentTarget.dataset.searchResultLibraryFocus?.trim() ?? "";
+  if (nextLibraryId === state.searchResultLibraryFocusId) {
+    return;
+  }
+
+  state.searchResultLibraryFocusId = nextLibraryId;
+  const results = visibleSearchResults();
+  if (!results.length) {
+    renderWorkspace();
+    return;
+  }
+
+  const currentSelection = selectedVisualUnitId();
+  const currentStillVisible = results.some(
+    (item) => `${item.library_id}:${item.visual_unit_id}` === currentSelection
+  );
+  if (currentStillVisible) {
+    renderWorkspace();
+    return;
+  }
+
+  await loadVisualUnit(results[0].library_id, results[0].visual_unit_id);
+}
+
+function onSelectSettingsSection(event) {
+  const nextSection = event.currentTarget.dataset.settingsSection as SettingsSection | undefined;
+  if (!nextSection || nextSection === state.selectedSettingsSection) {
+    return;
+  }
+  state.selectedSettingsSection = nextSection;
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
+async function onOpenSettingsSection(event) {
+  const nextSection = event.currentTarget.dataset.openSettingsSection as SettingsSection | undefined;
+  if (!nextSection) {
+    return;
+  }
+
+  state.selectedSettingsSection = nextSection;
+  state.activeWorkspace = "settings";
+  state.searchDetailSheetOpen = false;
+  state.inventoryDetailSheetOpen = false;
+  state.globalError = null;
+  state.statusMessage = null;
+
+  try {
+    await refreshProviderSettingsData();
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+function onSelectInventorySource(event) {
+  const nextSourceId = event.currentTarget.dataset.sourceId;
+  if (!nextSourceId) {
+    return;
+  }
+  if (nextSourceId === state.selectedInventorySourceId) {
+    if (!state.inventoryDetailSheetOpen) {
+      state.inventoryDetailSheetOpen = true;
+      renderWorkspace();
+    }
+    return;
+  }
+  state.selectedInventorySourceId = nextSourceId;
+  state.inventoryDetailSheetOpen = true;
+  renderWorkspace();
+}
+
+function onSearchJobsDisclosureToggle(event) {
+  const library = selectedLibrary();
+  if (event.currentTarget.open && (library?.counts.pending_jobs ?? 0) > 0) {
+    return;
+  }
+  state.searchJobsDisclosureOpen = event.currentTarget.open;
+}
+
+function onToggleSearchFiltersPanel() {
+  state.searchFiltersPanelOpen = !state.searchFiltersPanelOpen;
+  renderWorkspace();
+}
+
+function onSelectSearchScope(event) {
+  const nextScope = event.currentTarget.dataset.searchScope as SearchScopeKind | undefined;
+  if (!nextScope || nextScope === state.searchScope) {
+    return;
+  }
+  state.searchScope = nextScope;
+  resetSearchResultLibraryFocus();
+  state.globalError = null;
+  state.statusMessage = null;
+  state.searchInFlight = false;
+  if (nextScope === "all_libraries" && state.searchMode !== "text") {
+    state.searchMode = "text";
+  }
+  renderWorkspace();
+}
+
+function onOpenUtilityDrawer(event) {
+  const section = event.currentTarget.dataset.utilityDrawerOpen as UtilityDrawerSection | undefined;
+  if (!section) {
+    return;
+  }
+
+  state.utilityDrawerOpen = true;
+  state.utilityDrawerSection = section;
+  renderWorkspace();
+}
+
+function onSelectUtilityDrawerSection(event) {
+  const section =
+    event.currentTarget.dataset.utilityDrawerSection as UtilityDrawerSection | undefined;
+  if (!section) {
+    return;
+  }
+
+  state.utilityDrawerOpen = true;
+  state.utilityDrawerSection = section;
+  renderWorkspace();
+}
+
+function onCloseUtilityDrawer() {
+  state.utilityDrawerOpen = false;
+  renderWorkspace();
+}
+
+function onCloseMobileSheet(event) {
+  const sheet = event.currentTarget.dataset.mobileSheetClose;
+  if (sheet === "inventory") {
+    state.inventoryDetailSheetOpen = false;
+  } else {
+    state.searchDetailSheetOpen = false;
+  }
+  renderWorkspace();
+}
+
+async function onUtilitiesAction(event) {
+  const action = event.currentTarget.dataset.utilitiesAction;
+  if (!action) {
+    return;
+  }
+
+  state.globalError = null;
+  state.statusMessage = null;
+
+  if (action === "focus-source-prep") {
+    state.activeWorkspace = "search";
+    state.searchPreparationDisclosureOpen = true;
+    state.utilityDrawerOpen = false;
+    renderWorkspace();
+    return;
+  }
+
+  if (action === "focus-search-jobs") {
+    state.activeWorkspace = "search";
+    state.searchJobsDisclosureOpen = true;
+    state.utilityDrawerOpen = false;
+    renderWorkspace();
+    return;
+  }
+
+  if (action === "refresh-library") {
+    await onRefreshLibrarySources();
+    return;
+  }
+
+  if (action === "rescan-library") {
+    await onRescanLibrarySources();
+    return;
+  }
+
+  if (action === "rebuild-library") {
+    await onRebuildLibrarySources();
+    return;
+  }
+
+  if (action === "cleanup-retired-vector-spaces") {
+    await onCleanupRetiredVectorSpaces();
+  }
+}
+
+function onSelectSearchMode(event) {
+  const nextMode = event.currentTarget.dataset.searchMode as SearchMode | undefined;
+  if (!nextMode) {
+    return;
+  }
+  state.searchMode = nextMode;
+  resetSearchResultLibraryFocus();
+  if (nextMode !== "text" && state.searchScope === "all_libraries") {
+    state.searchScope = "library";
+  }
+  state.globalError = null;
+  state.statusMessage = null;
+  state.searchInFlight = false;
   renderWorkspace();
 }
 
@@ -5891,11 +10069,18 @@ function onQueryDocumentRangeEndInput(event) {
   syncQueryDocumentRangeUi();
 }
 
-function resolveLibraryObjectQueryImage(visualUnitId): LibraryObjectQueryImage | null {
+function resolveLibraryObjectQueryImage(
+  visualUnitId,
+  libraryId: string | null = null
+): LibraryObjectQueryImage | null {
   const resultItem =
-    state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
+    state.searchOutcome?.results?.find(
+      (item) =>
+        item.visual_unit_id === visualUnitId && (!libraryId || item.library_id === libraryId)
+    ) ?? null;
   if (resultItem?.kind === "image") {
     return {
+      library_id: resultItem.library_id,
       visual_unit_id: resultItem.visual_unit_id,
       kind: resultItem.kind,
       source_path: resultItem.source_path,
@@ -5904,6 +10089,7 @@ function resolveLibraryObjectQueryImage(visualUnitId): LibraryObjectQueryImage |
   }
   if (resultItem?.kind === "document_page") {
     return {
+      library_id: resultItem.library_id,
       visual_unit_id: resultItem.visual_unit_id,
       kind: resultItem.kind,
       source_path: resultItem.source_path,
@@ -5917,6 +10103,7 @@ function resolveLibraryObjectQueryImage(visualUnitId): LibraryObjectQueryImage |
     (detailVisualUnit.kind === "image" || detailVisualUnit.kind === "document_page")
   ) {
     return {
+      library_id: selectedVisualUnitOriginLibraryId(),
       visual_unit_id: detailVisualUnit.visual_unit_id,
       kind: detailVisualUnit.kind,
       source_path: detailVisualUnit.source_path,
@@ -5924,14 +10111,38 @@ function resolveLibraryObjectQueryImage(visualUnitId): LibraryObjectQueryImage |
     };
   }
 
+  const inventorySource = selectedInventorySource();
+  const representativeVisual = selectedInventoryRepresentativeVisualUnit(inventorySource);
+  const representativePreview = selectedInventoryRepresentativePreview(inventorySource);
+  if (
+    representativeVisual?.visual_unit_id === visualUnitId &&
+    representativePreview &&
+    (representativeVisual.kind === "image" || representativeVisual.kind === "document_page")
+  ) {
+    return {
+      library_id: state.selectedLibraryId,
+      visual_unit_id: representativeVisual.visual_unit_id,
+      kind: representativeVisual.kind,
+      source_path: inventorySource?.source_path ?? "",
+      preview: representativePreview,
+    };
+  }
+
   return null;
 }
 
-function resolveLibraryObjectQueryVideo(visualUnitId): LibraryObjectQueryVideo | null {
+function resolveLibraryObjectQueryVideo(
+  visualUnitId,
+  libraryId: string | null = null
+): LibraryObjectQueryVideo | null {
   const resultItem =
-    state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
+    state.searchOutcome?.results?.find(
+      (item) =>
+        item.visual_unit_id === visualUnitId && (!libraryId || item.library_id === libraryId)
+    ) ?? null;
   if (resultItem?.kind === "video_segment") {
     return {
+      library_id: resultItem.library_id,
       visual_unit_id: resultItem.visual_unit_id,
       kind: resultItem.kind,
       source_path: resultItem.source_path,
@@ -5943,6 +10154,7 @@ function resolveLibraryObjectQueryVideo(visualUnitId): LibraryObjectQueryVideo |
   const detailVisualUnit = state.selectedVisualUnit?.visual_unit;
   if (detailVisualUnit?.visual_unit_id === visualUnitId && detailVisualUnit.kind === "video_segment") {
     return {
+      library_id: selectedVisualUnitOriginLibraryId(),
       visual_unit_id: detailVisualUnit.visual_unit_id,
       kind: detailVisualUnit.kind,
       source_path: detailVisualUnit.source_path,
@@ -5951,17 +10163,40 @@ function resolveLibraryObjectQueryVideo(visualUnitId): LibraryObjectQueryVideo |
     };
   }
 
+  const inventorySource = selectedInventorySource();
+  const representativeVisual = selectedInventoryRepresentativeVisualUnit(inventorySource);
+  const representativePreview = selectedInventoryRepresentativePreview(inventorySource);
+  if (
+    representativeVisual?.visual_unit_id === visualUnitId &&
+    representativePreview &&
+    representativeVisual.kind === "video_segment"
+  ) {
+    return {
+      library_id: state.selectedLibraryId,
+      visual_unit_id: representativeVisual.visual_unit_id,
+      kind: representativeVisual.kind,
+      source_path: inventorySource?.source_path ?? "",
+      locator: representativeVisual.locator,
+      preview: representativePreview,
+    };
+  }
+
   return null;
 }
 
 function resolveLibraryObjectQueryDocument(
-  visualUnitId
+  visualUnitId,
+  libraryId: string | null = null
 ): LibraryObjectQueryDocument | null {
   const resultItem =
-    state.searchOutcome?.results?.find((item) => item.visual_unit_id === visualUnitId) ?? null;
+    state.searchOutcome?.results?.find(
+      (item) =>
+        item.visual_unit_id === visualUnitId && (!libraryId || item.library_id === libraryId)
+    ) ?? null;
   if (resultItem?.kind === "document_page") {
     const page = Number(resultItem.locator?.page ?? 0);
     return {
+      library_id: resultItem.library_id,
       visual_unit_id: resultItem.visual_unit_id,
       source_id: resultItem.source_id,
       kind: resultItem.kind,
@@ -5981,6 +10216,7 @@ function resolveLibraryObjectQueryDocument(
   if (detailVisualUnit?.visual_unit_id === visualUnitId && detailVisualUnit.kind === "document_page") {
     const page = Number(detailVisualUnit.locator?.page ?? 0);
     return {
+      library_id: selectedVisualUnitOriginLibraryId(),
       visual_unit_id: detailVisualUnit.visual_unit_id,
       source_id: detailVisualUnit.source_id,
       kind: detailVisualUnit.kind,
@@ -5996,12 +10232,39 @@ function resolveLibraryObjectQueryDocument(
     };
   }
 
+  const inventorySource = selectedInventorySource();
+  const representativeVisual = selectedInventoryRepresentativeVisualUnit(inventorySource);
+  const representativePreview = selectedInventoryRepresentativePreview(inventorySource);
+  if (
+    representativeVisual?.visual_unit_id === visualUnitId &&
+    representativePreview &&
+    representativeVisual.kind === "document_page"
+  ) {
+    const page = Number(representativeVisual.locator?.page ?? 0);
+    return {
+      library_id: state.selectedLibraryId,
+      visual_unit_id: representativeVisual.visual_unit_id,
+      source_id: representativeVisual.source_id,
+      kind: representativeVisual.kind,
+      source_path: inventorySource?.source_path ?? "",
+      locator:
+        page > 0
+          ? {
+              start_page: page,
+              end_page: page,
+            }
+          : null,
+      preview: representativePreview,
+    };
+  }
+
   return null;
 }
 
-function onUseAsQueryImage(event) {
+async function onUseAsQueryImage(event) {
   const visualUnitId = event.currentTarget.dataset.useQueryVisualUnitId;
-  const libraryObject = resolveLibraryObjectQueryImage(visualUnitId);
+  const libraryId = event.currentTarget.dataset.useQueryLibraryId ?? null;
+  const libraryObject = resolveLibraryObjectQueryImage(visualUnitId, libraryId);
   if (!libraryObject) {
     state.globalError = {
       code: "not_supported",
@@ -6011,17 +10274,31 @@ function onUseAsQueryImage(event) {
     return;
   }
 
+  if (libraryObject.library_id && libraryObject.library_id !== state.selectedLibraryId) {
+    try {
+      await switchCurrentLibrary(libraryObject.library_id);
+    } catch (error) {
+      state.globalError = toApiError(error);
+      renderWorkspace();
+      return;
+    }
+  }
   clearQueryImageState();
   state.queryImageLibraryObject = libraryObject;
+  state.activeWorkspace = "search";
   state.searchMode = "image";
+  state.searchScope = "library";
+  state.inventoryDetailSheetOpen = false;
+  state.searchDetailSheetOpen = false;
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
 }
 
-function onUseAsQueryVideo(event) {
+async function onUseAsQueryVideo(event) {
   const visualUnitId = event.currentTarget.dataset.useQueryVideoVisualUnitId;
-  const libraryObject = resolveLibraryObjectQueryVideo(visualUnitId);
+  const libraryId = event.currentTarget.dataset.useQueryLibraryId ?? null;
+  const libraryObject = resolveLibraryObjectQueryVideo(visualUnitId, libraryId);
   if (!libraryObject) {
     state.globalError = {
       code: "not_supported",
@@ -6031,16 +10308,30 @@ function onUseAsQueryVideo(event) {
     return;
   }
 
+  if (libraryObject.library_id && libraryObject.library_id !== state.selectedLibraryId) {
+    try {
+      await switchCurrentLibrary(libraryObject.library_id);
+    } catch (error) {
+      state.globalError = toApiError(error);
+      renderWorkspace();
+      return;
+    }
+  }
   setLibraryQueryVideoVisualUnit(libraryObject);
+  state.activeWorkspace = "search";
   state.searchMode = "video";
+  state.searchScope = "library";
+  state.inventoryDetailSheetOpen = false;
+  state.searchDetailSheetOpen = false;
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
 }
 
-function onUseAsQueryDocument(event) {
+async function onUseAsQueryDocument(event) {
   const visualUnitId = event.currentTarget.dataset.useQueryDocumentVisualUnitId;
-  const libraryObject = resolveLibraryObjectQueryDocument(visualUnitId);
+  const libraryId = event.currentTarget.dataset.useQueryLibraryId ?? null;
+  const libraryObject = resolveLibraryObjectQueryDocument(visualUnitId, libraryId);
   if (!libraryObject) {
     state.globalError = {
       code: "not_supported",
@@ -6050,23 +10341,38 @@ function onUseAsQueryDocument(event) {
     return;
   }
 
+  if (libraryObject.library_id && libraryObject.library_id !== state.selectedLibraryId) {
+    try {
+      await switchCurrentLibrary(libraryObject.library_id);
+    } catch (error) {
+      state.globalError = toApiError(error);
+      renderWorkspace();
+      return;
+    }
+  }
   setLibraryQueryDocumentVisualUnit(libraryObject);
+  state.activeWorkspace = "search";
   state.searchMode = "document";
+  state.searchScope = "library";
+  state.inventoryDetailSheetOpen = false;
+  state.searchDetailSheetOpen = false;
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
 }
 
-async function loadVisualUnit(visualUnitId: string): Promise<void> {
-  if (!state.selectedLibraryId) {
+async function loadVisualUnit(libraryId: string, visualUnitId: string): Promise<void> {
+  if (!libraryId) {
     return;
   }
 
   try {
     state.globalError = null;
     state.selectedVisualUnit = await apiRequest<VisualUnitDetailData>(
-      `/libraries/${state.selectedLibraryId}/visual-units/${encodeURIComponent(visualUnitId)}`
+      `/libraries/${libraryId}/visual-units/${encodeURIComponent(visualUnitId)}`
     );
+    state.selectedVisualUnitLibraryId = libraryId;
+    state.searchDetailSheetOpen = true;
     renderWorkspace();
   } catch (error) {
     state.globalError = toApiError(error);
@@ -6076,7 +10382,18 @@ async function loadVisualUnit(visualUnitId: string): Promise<void> {
 
 async function onSelectVisualUnit(event) {
   const visualUnitId = event.currentTarget.dataset.visualUnitId;
-  await loadVisualUnit(visualUnitId);
+  const libraryId =
+    event.currentTarget.dataset.visualUnitLibraryId || state.selectedLibraryId || "";
+  if (
+    visualUnitId &&
+    `${libraryId}:${visualUnitId}` === selectedVisualUnitId() &&
+    !state.searchDetailSheetOpen
+  ) {
+    state.searchDetailSheetOpen = true;
+    renderWorkspace();
+    return;
+  }
+  await loadVisualUnit(libraryId, visualUnitId);
 }
 
 let workspacePollInFlight = false;

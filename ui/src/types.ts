@@ -1,5 +1,13 @@
 export type WorkspaceKind = "search" | "inventory" | "settings";
 export type SearchMode = "text" | "image" | "video" | "document";
+export type SearchScopeKind = "library" | "all_libraries";
+export type UtilityDrawerSection = "status" | "jobs" | "source-prep" | "maintenance";
+export type SettingsSection =
+  | "content-types"
+  | "library-overrides"
+  | "providers"
+  | "model-tests"
+  | "diagnostics";
 export type VisualUnitKind = "image" | "document_page" | "video_segment" | string;
 export type Locator = Record<string, string | number | boolean | null | undefined>;
 
@@ -223,6 +231,8 @@ export interface ModelTestComparisonData {
 export interface LibrarySnapshot {
   id: string;
   display_name: string;
+  lifecycle_state: string;
+  archived_at_ms?: number | null;
   counts: LibraryCounts;
   latest_job_id?: string | null;
 }
@@ -271,6 +281,8 @@ export interface SourceInventoryItem {
   source_root_path?: string | null;
   source_root_label: string;
   visual_unit_count: number;
+  representative_visual_unit?: VisualUnitSummary | null;
+  representative_preview?: PreviewReference | null;
 }
 
 export interface VideoSourceItem {
@@ -301,6 +313,8 @@ export interface JobSnapshot {
   phase: string;
   progress: JobProgress;
   cancelable: boolean;
+  retryable: boolean;
+  retried_from_job_id?: string | null;
   current_attempt: JobAttemptSnapshot;
 }
 
@@ -323,6 +337,7 @@ export interface VisualUnitDetailData {
 }
 
 export interface SearchResultItem extends VisualUnitSnapshot {
+  library_id: string;
   preview: PreviewReference;
   score?: number | null;
   cursor?: string | null;
@@ -398,6 +413,45 @@ export interface ImportRejectedItem {
   message: string;
 }
 
+export interface SourceActionAcceptedItem {
+  source_root_id: string;
+  root_path: string;
+  action: string;
+}
+
+export interface SourceActionRejectedItem {
+  source_root_id?: string | null;
+  root_path?: string | null;
+  reason_code: string;
+  message: string;
+}
+
+export interface SourceActionData {
+  accepted: SourceActionAcceptedItem[];
+  rejected: SourceActionRejectedItem[];
+  job_handle?: string | null;
+  job?: JobSnapshot | null;
+}
+
+export interface MaintenanceActionAcceptedItem {
+  target_kind: string;
+  target_id: string;
+  message: string;
+}
+
+export interface MaintenanceActionRejectedItem {
+  reason_code: string;
+  message: string;
+}
+
+export interface MaintenanceActionData {
+  action: string;
+  accepted: MaintenanceActionAcceptedItem[];
+  rejected: MaintenanceActionRejectedItem[];
+  job_handle?: string | null;
+  job?: JobSnapshot | null;
+}
+
 export interface ImportPathsData {
   accepted: ImportAcceptedItem[];
   rejected: ImportRejectedItem[];
@@ -406,6 +460,7 @@ export interface ImportPathsData {
 }
 
 export interface LibraryObjectQueryImage {
+  library_id: string;
   visual_unit_id: string;
   kind: "image" | "document_page";
   source_path: string;
@@ -413,6 +468,7 @@ export interface LibraryObjectQueryImage {
 }
 
 export interface LibraryObjectQueryVideo {
+  library_id: string;
   visual_unit_id: string;
   kind: "video_segment";
   source_path: string;
@@ -432,6 +488,7 @@ export interface VideoQueryLocator {
 }
 
 export interface LibraryObjectQueryDocument {
+  library_id: string;
   visual_unit_id: string;
   source_id: string;
   kind: "document_page";
@@ -478,13 +535,27 @@ export interface AppState {
   vectorSpaceDiagnostics: VectorSpaceDiagnosticsData | null;
   runtimeHealth: RuntimeHealthData | null;
   activeWorkspace: WorkspaceKind;
+  selectedSettingsSection: SettingsSection;
   inventoryFilters: InventoryFilters;
   searchFilters: SearchFilters;
   inventorySummary: InventorySummary;
   librarySources: SourceInventoryItem[];
+  selectedInventorySourceId: string;
   libraryDisplayNameDraft: string;
+  libraryManagementDisplayNameDraft: string;
+  libraryManagementDraftLibraryId: string;
   libraryIdDraft: string;
   selectedLibraryId: string;
+  searchScope: SearchScopeKind;
+  createLibraryPopoverOpen: boolean;
+  manageLibraryPopoverOpen: boolean;
+  utilityDrawerOpen: boolean;
+  utilityDrawerSection: UtilityDrawerSection;
+  searchFiltersPanelOpen: boolean;
+  searchPreparationDisclosureOpen: boolean;
+  searchJobsDisclosureOpen: boolean;
+  searchDetailSheetOpen: boolean;
+  inventoryDetailSheetOpen: boolean;
   editingSourceRootId: string;
   sourceRootPathDraft: string;
   sourceRootEnabledDraft: boolean;
@@ -514,7 +585,10 @@ export interface AppState {
   queryDocumentEndPageDraft: string;
   importReceipt: ImportPathsData | null;
   selectedVisualUnit: VisualUnitDetailData | null;
+  selectedVisualUnitLibraryId: string;
   searchOutcome: SearchOutcomeState | null;
+  searchInFlight: boolean;
+  searchResultLibraryFocusId: string;
   lastSearchRequest: SearchRequestSnapshot | null;
   editingProviderId: string;
   providerEnabledDraft: boolean;

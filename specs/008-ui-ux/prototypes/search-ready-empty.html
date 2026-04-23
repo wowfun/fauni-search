@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FauniSearch - Search Ready Empty</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f3eee4;
+        --paper-soft: rgba(255, 253, 248, 0.9);
+        --paper-panel: rgba(255, 255, 255, 0.76);
+        --ink: #1f241f;
+        --muted: #64685f;
+        --muted-soft: #8b8f85;
+        --teal: #0f5e52;
+        --teal-soft: rgba(15, 94, 82, 0.12);
+        --teal-line: rgba(15, 94, 82, 0.22);
+        --gold: #9b6c28;
+        --gold-soft: rgba(155, 108, 40, 0.12);
+        --shadow: 0 22px 42px rgba(27, 31, 27, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        font-family: "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(15, 94, 82, 0.06), transparent 28%),
+          radial-gradient(circle at bottom right, rgba(193, 136, 47, 0.08), transparent 24%),
+          linear-gradient(180deg, #f7f2e8 0%, #f0eadf 100%);
+        color: var(--ink);
+      }
+
+      body {
+        padding: 24px;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      button {
+        color: inherit;
+      }
+
+      .shell {
+        max-width: 1480px;
+        margin: 0 auto;
+        padding: 20px;
+        border-radius: 36px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 252, 247, 0.88)),
+          var(--paper);
+        box-shadow: var(--shadow);
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 4px 6px 18px;
+      }
+
+      .brand-lockup {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .brand-mark {
+        font-size: 30px;
+        line-height: 1;
+        font-weight: 760;
+        letter-spacing: -0.05em;
+        color: var(--teal);
+      }
+
+      .brand-sub {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.84);
+        color: var(--teal);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .status-pill::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+
+      .body-grid {
+        display: grid;
+        grid-template-columns: 176px minmax(0, 1fr);
+        gap: 18px;
+        align-items: start;
+      }
+
+      .sidebar {
+        display: grid;
+        align-content: start;
+        padding: 16px;
+        border-radius: 28px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.56);
+      }
+
+      .panel-label,
+      .scope-label {
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--teal);
+      }
+
+      .sidebar-nav {
+        display: grid;
+        justify-items: start;
+        gap: 10px;
+      }
+
+      .sidebar-link {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: auto;
+        padding: 14px 16px;
+        border-radius: 18px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.68);
+        color: var(--muted);
+        text-align: left;
+      }
+
+      .sidebar-link.is-active {
+        border-color: var(--teal-line);
+        background: var(--teal-soft);
+        color: var(--teal);
+        font-weight: 700;
+      }
+
+      .icon {
+        width: 18px;
+        height: 18px;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        flex: none;
+      }
+
+      .workspace {
+        display: grid;
+        gap: 22px;
+      }
+
+      .hero {
+        display: grid;
+        gap: 22px;
+        justify-items: center;
+        padding: 34px 20px 10px;
+      }
+
+      .headline {
+        margin: 0;
+        font-size: clamp(44px, 6vw, 82px);
+        line-height: 0.96;
+        letter-spacing: -0.06em;
+        font-weight: 520;
+        text-align: center;
+      }
+
+      .search-stage {
+        width: min(980px, 100%);
+        padding: 24px;
+        border-radius: 32px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: var(--paper-soft);
+        box-shadow: 0 14px 32px rgba(27, 31, 27, 0.05);
+      }
+
+      .composer {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .input-shell {
+        flex: 1 1 520px;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 18px 20px;
+        border-radius: 22px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: #fffefb;
+      }
+
+      .search-input {
+        width: 100%;
+        border: 0;
+        outline: none;
+        background: transparent;
+        color: var(--ink);
+        font-size: clamp(20px, 2vw, 30px);
+        letter-spacing: -0.03em;
+      }
+
+      .search-input::placeholder {
+        color: #9aa095;
+      }
+
+      .search-lens {
+        width: 22px;
+        height: 22px;
+        border: 3px solid var(--teal);
+        border-radius: 50%;
+        position: relative;
+        flex: none;
+      }
+
+      .search-lens::after {
+        content: "";
+        position: absolute;
+        right: -7px;
+        bottom: -5px;
+        width: 10px;
+        height: 3px;
+        border-radius: 999px;
+        background: var(--teal);
+        transform: rotate(45deg);
+      }
+
+      .composer-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .filter-button,
+      .mode-button {
+        border-radius: 18px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.94);
+        color: var(--ink);
+        min-height: 64px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+      }
+
+      .filter-button {
+        padding: 0 20px;
+      }
+
+      .mode-button {
+        width: 64px;
+        padding: 0;
+      }
+
+      .filter-button .icon {
+        width: 20px;
+        height: 20px;
+      }
+
+      .mode-button .icon {
+        width: 24px;
+        height: 24px;
+        stroke-width: 2.05;
+      }
+
+      .scope-strip {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin-top: 14px;
+        padding: 12px 14px 0;
+        border-top: 1px solid rgba(24, 32, 26, 0.08);
+      }
+
+      .scope-pill,
+      .scope-count {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 36px;
+        padding: 0 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.74);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .scope-pill {
+        border-color: var(--teal-line);
+        background: var(--teal-soft);
+        color: var(--teal);
+        font-weight: 700;
+      }
+
+      .panel {
+        padding: 22px;
+        border-radius: 28px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.58);
+      }
+
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .query-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .query-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 42px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.78);
+        color: var(--ink);
+      }
+
+      .query-pill .icon {
+        width: 16px;
+        height: 16px;
+        color: var(--muted);
+      }
+
+      .query-kind {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 0 8px;
+        border-radius: 999px;
+        background: var(--teal-soft);
+        color: var(--teal);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .query-text {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.4;
+      }
+
+      .recent-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+        margin-top: 16px;
+      }
+
+      .recent-card {
+        overflow: hidden;
+        border-radius: 24px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: var(--paper-panel);
+        box-shadow: 0 12px 24px rgba(31, 33, 28, 0.05);
+      }
+
+      .card-preview {
+        position: relative;
+        height: 190px;
+        overflow: hidden;
+      }
+
+      .card-preview.image-preview {
+        background:
+          radial-gradient(circle at 22% 22%, rgba(255, 255, 255, 0.4), transparent 18%),
+          radial-gradient(circle at 68% 34%, rgba(0, 0, 0, 0.22), transparent 20%),
+          linear-gradient(135deg, #4db2aa 0%, #155b53 42%, #091f22 100%);
+      }
+
+      .card-preview.document-preview {
+        background: linear-gradient(180deg, #ffffff 0%, #f7f1e5 100%);
+      }
+
+      .card-preview.code-preview {
+        background: linear-gradient(180deg, #edf2ea 0%, #dde6dd 100%);
+      }
+
+      .document-sheet,
+      .code-sheet {
+        position: absolute;
+        inset: 18px;
+        border-radius: 18px;
+        border: 1px solid rgba(24, 32, 26, 0.08);
+        background: rgba(255, 255, 255, 0.88);
+      }
+
+      .document-sheet {
+        padding: 18px;
+      }
+
+      .document-sheet::before,
+      .document-sheet::after {
+        content: "";
+        display: block;
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(15, 94, 82, 0.14);
+        margin-bottom: 12px;
+      }
+
+      .document-sheet::after {
+        width: 72%;
+      }
+
+      .document-lines {
+        display: grid;
+        gap: 8px;
+      }
+
+      .document-lines span,
+      .code-sheet span {
+        display: block;
+        height: 7px;
+        border-radius: 999px;
+        background: rgba(24, 32, 26, 0.12);
+      }
+
+      .document-lines span:nth-child(2) {
+        width: 86%;
+      }
+
+      .document-lines span:nth-child(3) {
+        width: 70%;
+      }
+
+      .code-sheet {
+        padding: 20px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .code-sheet span:nth-child(1) {
+        width: 64%;
+        background: rgba(15, 94, 82, 0.2);
+      }
+
+      .code-sheet span:nth-child(2) {
+        width: 82%;
+      }
+
+      .code-sheet span:nth-child(3) {
+        width: 76%;
+      }
+
+      .code-sheet span:nth-child(4) {
+        width: 58%;
+      }
+
+      .card-body {
+        display: grid;
+        gap: 10px;
+        padding: 20px 22px 22px;
+      }
+
+      .card-headline {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 10px;
+      }
+
+      .card-tag {
+        display: inline-flex;
+        align-items: center;
+        align-self: flex-start;
+        gap: 8px;
+        min-height: 34px;
+        padding: 0 12px;
+        border-radius: 999px;
+        background: var(--gold-soft);
+        color: var(--gold);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .card-body h2 {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.08;
+        letter-spacing: -0.04em;
+      }
+
+      .card-path {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+        font-size: 14px;
+      }
+
+      @media (max-width: 1180px) {
+        body {
+          padding: 18px;
+        }
+
+        .body-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar-nav {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 760px) {
+        body {
+          padding: 12px;
+        }
+
+        .shell {
+          padding: 16px;
+          border-radius: 28px;
+        }
+
+        .topbar {
+          flex-wrap: wrap;
+        }
+
+        .sidebar-nav {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          justify-items: stretch;
+        }
+
+        .hero {
+          padding: 18px 0 8px;
+        }
+
+        .headline {
+          font-size: 42px;
+        }
+
+        .search-stage {
+          padding: 18px;
+        }
+
+        .recent-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark">FauniSearch</div>
+          <p class="brand-sub">Unified · Native · Powerful</p>
+        </div>
+        <span class="status-pill">Ready</span>
+      </header>
+
+      <div class="body-grid">
+        <aside class="sidebar" aria-label="主导航">
+          <nav class="sidebar-nav">
+            <button class="sidebar-link is-active" type="button">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="6"></circle>
+                <path d="M20 20L16.6 16.6"></path>
+              </svg>
+              <span>Search</span>
+            </button>
+            <button class="sidebar-link" type="button">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7.5H20"></path>
+                <path d="M4 12H20"></path>
+                <path d="M4 16.5H14"></path>
+              </svg>
+              <span>库管理</span>
+            </button>
+            <button class="sidebar-link" type="button">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3V7"></path>
+                <path d="M12 17V21"></path>
+                <path d="M4.6 6.1L7.4 8.3"></path>
+                <path d="M16.6 15.7L19.4 17.9"></path>
+                <path d="M3 12H7"></path>
+                <path d="M17 12H21"></path>
+                <path d="M4.6 17.9L7.4 15.7"></path>
+                <path d="M16.6 8.3L19.4 6.1"></path>
+                <circle cx="12" cy="12" r="3.2"></circle>
+              </svg>
+              <span>工具</span>
+            </button>
+            <button class="sidebar-link" type="button">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.4"></circle>
+                <path d="M19.4 15A1.7 1.7 0 0 0 20 16.9L20.1 17A2 2 0 0 1 18 20.1L17.9 20A1.7 1.7 0 0 0 16 19.4 1.7 1.7 0 0 0 15 21V21.1A2 2 0 0 1 9 21.1V21A1.7 1.7 0 0 0 8 19.4 1.7 1.7 0 0 0 6.1 20L6 20.1A2 2 0 0 1 3.9 17L4 16.9A1.7 1.7 0 0 0 4.6 15 1.7 1.7 0 0 0 3 14H2.9A2 2 0 0 1 2.9 10H3A1.7 1.7 0 0 0 4.6 9 1.7 1.7 0 0 0 4 7.1L3.9 7A2 2 0 0 1 6 3.9L6.1 4A1.7 1.7 0 0 0 8 4.6 1.7 1.7 0 0 0 9 3H9.1A2 2 0 0 1 15 3V3A1.7 1.7 0 0 0 16 4.6 1.7 1.7 0 0 0 17.9 4L18 3.9A2 2 0 0 1 20.1 7L20 7.1A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 21 10H21.1A2 2 0 0 1 21.1 14H21A1.7 1.7 0 0 0 19.4 15Z"></path>
+              </svg>
+              <span>设置</span>
+            </button>
+          </nav>
+        </aside>
+
+        <main class="workspace">
+          <section class="hero">
+            <h1 class="headline">What are you looking for?</h1>
+
+            <div class="search-stage">
+              <div class="composer">
+                <div class="input-shell">
+                  <span class="search-lens" aria-hidden="true"></span>
+                  <input class="search-input" type="text" aria-label="搜索输入" placeholder="描述场景、对象或文本内容" />
+                </div>
+                <div class="composer-actions" aria-label="搜索模式与过滤">
+                  <button class="filter-button" type="button">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 7H20"></path>
+                      <path d="M7 12H17"></path>
+                      <path d="M10 17H14"></path>
+                    </svg>
+                    <span>过滤</span>
+                  </button>
+                  <button class="mode-button" type="button" aria-label="图片">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="4" y="5" width="16" height="14" rx="2"></rect>
+                      <circle cx="9" cy="10" r="1.6"></circle>
+                      <path d="M6.5 17L11 12.5L14.2 15.7L16 13.9L18.5 17"></path>
+                    </svg>
+                  </button>
+                  <button class="mode-button" type="button" aria-label="视频">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="4" y="6" width="16" height="12" rx="2"></rect>
+                      <path d="M11 10L15 12L11 14V10Z" fill="currentColor" stroke="none"></path>
+                    </svg>
+                  </button>
+                  <button class="mode-button" type="button" aria-label="文档">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M8 3H14L19 8V20H8A2 2 0 0 1 6 18V5A2 2 0 0 1 8 3Z"></path>
+                      <path d="M14 3V8H19"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <div class="scope-strip" aria-label="搜索范围">
+                <span class="scope-label">搜索范围</span>
+                <span class="scope-pill">demo-lib</span>
+                <span class="scope-count">1 个库</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <span class="panel-label">最近查询</span>
+            </div>
+            <div class="query-list" aria-label="最近查询">
+              <span class="query-pill">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6"></circle>
+                  <path d="M20 20L16.6 16.6"></path>
+                </svg>
+                <span class="query-kind">文本</span>
+                <span class="query-text">Q3 财务报告</span>
+              </span>
+              <span class="query-pill">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="4" y="5" width="16" height="14" rx="2"></rect>
+                  <circle cx="9" cy="10" r="1.6"></circle>
+                  <path d="M6.5 17L11 12.5L14.2 15.7L16 13.9L18.5 17"></path>
+                </svg>
+                <span class="query-kind">图片</span>
+                <span class="query-text">terminal_frame_reference.png</span>
+              </span>
+              <span class="query-pill">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="4" y="6" width="16" height="12" rx="2"></rect>
+                  <path d="M11 10L15 12L11 14V10Z" fill="currentColor" stroke="none"></path>
+                </svg>
+                <span class="query-kind">视频</span>
+                <span class="query-text">会议录屏 · 00:42-00:50</span>
+              </span>
+              <span class="query-pill">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 3H14L19 8V20H8A2 2 0 0 1 6 18V5A2 2 0 0 1 8 3Z"></path>
+                  <path d="M14 3V8H19"></path>
+                </svg>
+                <span class="query-kind">文档</span>
+                <span class="query-text">Q3_Strategy_Doc.pdf · p.14</span>
+              </span>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <span class="panel-label">最近对象</span>
+            </div>
+            <div class="recent-grid">
+              <article class="recent-card">
+                <div class="card-preview image-preview"></div>
+                <div class="card-body">
+                  <div class="card-headline">
+                    <span class="card-tag">图片</span>
+                    <h2>Brand_Assets_V2.png</h2>
+                  </div>
+                  <p class="card-path">/Design/2024</p>
+                </div>
+              </article>
+
+              <article class="recent-card">
+                <div class="card-preview document-preview">
+                  <div class="document-sheet">
+                    <div class="document-lines">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </div>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="card-headline">
+                    <span class="card-tag">文档页</span>
+                    <h2>Q3_Strategy_Doc.pdf</h2>
+                  </div>
+                  <p class="card-path">/Reports/2024</p>
+                </div>
+              </article>
+
+              <article class="recent-card">
+                <div class="card-preview code-preview">
+                  <div class="code-sheet">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="card-headline">
+                    <span class="card-tag">代码</span>
+                    <h2>search_algorithm.py</h2>
+                  </div>
+                  <p class="card-path">/src/experiments</p>
+                </div>
+              </article>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

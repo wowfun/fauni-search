@@ -1,0 +1,88 @@
+# 008 共享产品语言 (Shared Product Language)
+
+定义 FauniSearch 在 `Search`、`Inventory`、`Settings` 三类主工作区之间共享的产品级视觉语言、文案语气与术语策略。
+
+## 关键术语 (Terminology)
+
+- 产品语言（Product Language）
+- 编辑性工作台（Editorial Workspace）
+- 任务语言（Task Language）
+- 技术后置（Technical Facts Behind The Fold）
+
+## 范围
+
+- 产品级视觉方向与信息层级原则
+- 主界面文案语气与术语映射
+- 共享组件在产品层面的表达语气
+- 明确不采用的视觉与文案方向
+
+范围外：
+- 设计 token、字号表、间距表、颜色值与具体字体资源
+- 像素级样式、动画曲线与实现细节
+- 各工作区内部的字段清单与具体行为契约
+
+## 设计原则
+
+- 编辑性工作台（Editorial Workspace）：整体气质应更接近成熟产品工作台，而不是开发控制台
+- 搜索主路径可见（Search Path First）：视觉层级必须服务“建库 / 导入 / 搜索 / 看结果 / 复用对象”主路径
+- 克制强调（Restrained Emphasis）：强调色与强视觉手段只用于关键交互和关键状态
+- 中文任务语言优先（Chinese Task Language First）：主界面优先使用中文任务表达，工程术语后置
+- 技术事实后置（Technical Facts Behind The Fold）：复杂工程字段、诊断指标与内部术语应进入次级说明、折叠区或诊断面
+
+## 视觉方向
+
+- 总体气质定义为：编辑性工作台
+- 共享视觉方向至少应满足：
+  - 暖纸感底色
+  - 深墨色正文
+  - 深青绿或等价稳重强调色
+  - 细边框 + 轻阴影分层
+  - 中等圆角
+- 页面 / 章节标题可以使用更具识别度的排版风格，但功能正文与表单信息应保持稳定、可读、克制
+- 详情面应更像阅读纸面，而不是工具侧栏
+- 下列方向不应成为正式产品语言：
+  - 强玻璃感
+  - 重渐变
+  - 重阴影
+  - 告警中心式高噪声 UI
+
+## 信息层级
+
+- 搜索、来源浏览、设置三类主工作区必须共享同一种壳层感与层级语言
+- 搜索主舞台应在视觉上重于次级管理区
+- 管理信息、诊断信息与维护入口默认后置，不得主导首屏
+- 结果列表应优先可扫读，详情面应优先可阅读
+
+## 文案语气
+
+- 主界面语言：中文
+- 文案语气：专业但人话
+- 按钮语气：直接、动作导向
+- 状态文案应避免把“准备中”“部分受限”与“错误”混写为同一种紧张语气
+- 工程术语、英文正式名与内部结构字段可以存在，但默认只能退居次级说明、折叠区或诊断面
+
+## 推荐术语映射
+
+- `Search` -> `搜索`
+- `Inventory` -> `来源浏览`
+- `Settings` -> `设置`
+- `Diagnostics` -> `诊断`
+- `resolved content model` -> `当前生效模型`
+- `vector_space` -> `执行空间`
+- `source_id` -> `来源编号`
+
+## 共享组件的产品语气
+
+- tabs 应被理解为模式或章节切换，而不是后台 segmented control
+- 主按钮应被理解为当前主动作，而不是系统告警按钮
+- 输入控件应服务编辑与搜索，不应呈现浏览器默认控件堆叠感
+- 标签、状态 pill 与 badge 应优先服务信息识别，而不是增加装饰噪声
+
+## 关联主题
+
+- [spec.md](./spec.md) 定义共享产品语言在 `008` 专题中的边界
+- [app-shell-and-navigation.md](./app-shell-and-navigation.md) 定义上下文条与状态胶囊的壳层语义
+- [search-workspace.md](./search-workspace.md) 定义搜索工作区中的信息层级与共享状态
+- [source-inventory-workspace.md](./source-inventory-workspace.md) 定义来源浏览工作区的浏览式语法
+- [settings-workspace.md](./settings-workspace.md) 定义设置工作区中的配置前置 / 诊断后置原则
+- [current-targets.md](./current-targets.md) 记录当前阶段卡面层级、响应式与组件目标
