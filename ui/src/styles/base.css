@@ -1,0 +1,85 @@
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.shell {
+  display: grid;
+  gap: 1.5rem;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 4rem;
+}
+
+.shell-bar,
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  padding: 1.5rem;
+  backdrop-filter: blur(10px);
+}
+
+.eyebrow {
+  margin: 0 0 0.5rem;
+  color: #005d5d;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+h1,
+h2 {
+  margin: 0 0 0.75rem;
+}
+
+.summary {
+  margin: 0;
+  max-width: 48rem;
+  line-height: 1.6;
+}
+
+.service-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.workspace-switch {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.35rem;
+}
+
+.service-strip a {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(0, 71, 204, 0.15);
+  box-shadow: 0 10px 24px rgba(0, 71, 204, 0.08);
+  border-radius: 999px;
+  padding: 0.75rem 1.1rem;
+  font-weight: 700;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+a {
+  color: #0047cc;
+  text-decoration: none;
+}
+
+.service-strip a:hover {
+  transform: translateY(-1px);
+}
+
+code {
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+}
+
+.grid-two {
+  display: grid;
+  gap: 1.2rem;
+  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.9fr);
+}

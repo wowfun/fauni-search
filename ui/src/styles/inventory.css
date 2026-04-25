@@ -1,0 +1,180 @@
+.search-results-panel {
+  padding: 1.15rem;
+}
+
+.detail-panel {
+  position: sticky;
+  top: 1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 254, 250, 0.98), rgba(248, 244, 236, 0.96)),
+    rgba(255, 252, 247, 0.96);
+}
+
+.detail-head {
+  gap: 0.45rem;
+}
+
+.detail-head h4 {
+  font-size: 1.35rem;
+  line-height: 1.25;
+}
+
+.preview-image,
+.preview-frame,
+.preview-video,
+.preview-placeholder {
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(242, 236, 226, 0.92));
+  border: 1px solid rgba(30, 42, 38, 0.08);
+}
+
+.detail-kicker,
+.detail-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.detail-path {
+  max-width: 100%;
+  text-align: left;
+}
+
+.notice {
+  border-radius: 18px;
+  border: 1px solid transparent;
+}
+
+.notice.warning {
+  background: var(--sun-soft);
+  border-color: rgba(197, 139, 51, 0.16);
+  color: #7b5926;
+}
+
+.settings-workspace,
+.inventory-workspace {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-workspace-head,
+.inventory-workspace-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: start;
+}
+
+.settings-workspace-head {
+  padding-inline: 0.15rem;
+}
+
+.settings-workspace-head h2 {
+  margin: 0;
+  font-size: clamp(1.7rem, 2vw, 2.25rem);
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.settings-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(250px, 290px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.settings-nav-rail {
+  display: grid;
+  gap: 0.7rem;
+  align-content: start;
+  padding: 0.9rem;
+  border-radius: 24px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255, 252, 247, 0.94), rgba(244, 239, 230, 0.9));
+  position: sticky;
+  top: 1rem;
+}
+
+.settings-nav-rail-head {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.2rem 0.15rem 0.35rem;
+}
+
+.settings-nav-button {
+  text-align: left;
+  display: grid;
+  grid-template-columns: 2.35rem minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  min-height: 3.35rem;
+  padding: 0.68rem 0.75rem;
+}
+
+.settings-nav-icon {
+  width: 2.35rem;
+  height: 2.35rem;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: rgba(236, 244, 240, 0.9);
+  color: var(--teal);
+}
+
+.settings-nav-copy {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.settings-nav-copy strong {
+  font-size: 0.98rem;
+}
+
+.settings-nav-copy .helper {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+.settings-nav-tag {
+  align-self: start;
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .settings-nav-button:hover {
+    transform: translateY(-1px);
+  }
+}
+
+.settings-active-surface {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.settings-stage,
+.settings-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-stage-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-inline: 0.15rem;
+}
+
+.settings-stage-head h2 {
+  margin: 0;
+  font-size: clamp(1.5rem, 1.7vw, 2rem);
+  letter-spacing: -0.018em;
+  text-wrap: balance;
+}

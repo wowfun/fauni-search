@@ -1,0 +1,279 @@
+@media (max-width: 1280px) {
+  .context-rail-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .context-rail-status {
+    justify-items: start;
+    justify-content: start;
+  }
+
+  .workspace-frame-main-only {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+
+  .search-composer-shell,
+  .search-stage-layout,
+  .inventory-layout,
+  .settings-layout,
+  .settings-dual-surface,
+  .provider-configs-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav-rail {
+    position: static;
+  }
+
+  .settings-stage-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .inventory-detail-panel {
+    position: static;
+  }
+
+  .inventory-detail-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .inventory-library-config-list {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-desk.workspace-desk-search-results {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 0.88fr);
+  }
+
+  .workspace-desk.workspace-desk-search-results .workspace-right {
+    grid-column: auto;
+    position: sticky;
+  }
+
+  .search-stage-head {
+    flex-direction: column;
+    align-items: start;
+  }
+}
+
+@media (max-width: 900px) {
+  .shell {
+    padding: 1.25rem 0.9rem 2.3rem;
+  }
+
+  .context-rail-status {
+    width: 100%;
+  }
+
+  .create-library-popover[open] .compact-form {
+    position: static;
+    width: 100%;
+    max-width: none;
+    margin-top: 0.7rem;
+  }
+
+  .workspace-desk,
+  .workspace-desk.workspace-desk-search-results,
+  .workspace-desk.workspace-desk-search-stage-only,
+  .workspace-desk.workspace-desk-inventory,
+  .workspace-desk.workspace-desk-settings,
+  .workspace-frame,
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .app-sidebar {
+    position: static;
+  }
+
+  .sidebar-sections {
+    min-height: auto;
+  }
+
+  .workspace-switch {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .search-scope-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-scope-actions,
+  .search-scope-toggle-group,
+  .search-scope-quick-actions {
+    justify-items: stretch;
+    justify-content: flex-start;
+  }
+
+  .search-scope-actions {
+    flex-wrap: wrap;
+  }
+
+  .search-scope-selector {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .workspace-center,
+  .workspace-right {
+    position: static;
+  }
+
+  .workspace-desk.workspace-desk-search-results .workspace-left,
+  .workspace-right {
+    grid-column: auto;
+  }
+
+  .settings-stage-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .inventory-library-root-head,
+  .inventory-library-root-strip-head,
+  .inventory-library-config-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .inventory-detail-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav-button {
+    grid-template-columns: 2.6rem minmax(0, 1fr);
+  }
+
+  .settings-nav-tag {
+    display: none;
+  }
+
+  .result-select,
+  .inventory-source-select,
+  .provider-profile-row,
+  .provider-resolution-row,
+  .settings-grid,
+  .settings-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .inventory-source-select {
+    grid-template-areas:
+      "visual"
+      "main"
+      "meta";
+  }
+
+  .inventory-source-meta {
+    justify-items: start;
+  }
+
+  .inventory-action-row {
+    justify-content: stretch;
+  }
+
+  .inventory-source-management-summary,
+  .inventory-source-management-head,
+  .inventory-library-maintenance-head,
+  .source-root-form-head,
+  .source-root-advanced-toggle {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .source-root-advanced-toggle .helper {
+    text-align: left;
+  }
+
+  .inventory-library-root-head .helper {
+    text-align: left;
+  }
+}
+
+@media (max-width: 720px) {
+  .shell-bar,
+  .panel,
+  .panel-tight {
+    padding: 1rem;
+    border-radius: 20px;
+  }
+
+  .search-action-row,
+  .search-common-filters,
+  .workspace-library-toolbar-row,
+  .workspace-library-name-form,
+  .dock-actions,
+  .detail-action-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-switch {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .context-rail-status {
+    display: grid;
+  }
+
+  .search-composer-actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .context-rail-status > *,
+  .search-scope-actions > *,
+  .workspace-library-actions > * {
+    width: 100%;
+  }
+
+  .mobile-sheet-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 18;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    background: rgba(26, 30, 28, 0.34);
+    box-shadow: none;
+  }
+
+  .mobile-sheet-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 19;
+    margin: 0;
+    max-height: min(82vh, 48rem);
+    overflow: auto;
+    border-radius: 24px 24px 0 0;
+    border-bottom: 0;
+    box-shadow: 0 -20px 48px rgba(30, 42, 38, 0.24);
+  }
+
+  .mobile-sheet-panel.mobile-sheet-closed {
+    display: none;
+  }
+
+  .mobile-sheet-bar {
+    display: grid;
+    gap: 0.65rem;
+    margin-bottom: 0.85rem;
+  }
+
+  .mobile-sheet-handle {
+    width: 4rem;
+    height: 0.32rem;
+    justify-self: center;
+    border-radius: 999px;
+    background: rgba(87, 72, 48, 0.22);
+  }
+
+  .mobile-sheet-close {
+    width: 100%;
+  }
+}
