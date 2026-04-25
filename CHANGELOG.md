@@ -1,7 +1,24 @@
 # CHANGELOG
 
+## 2026-04-25
+### Changed
+- Removed the `工具` drawer from the shell: the sidebar now keeps `Search / 库管理 / 设置`, the status capsule opens `Settings > 诊断`, and Inventory owns folded library maintenance beside refresh and rescan.
+- Unified the shared workspace UI across Search, Inventory, and Settings: current-library headers now use one toolbar shell, object rows use shared list and detail primitives, and local button, tag, and detail variants were removed.
+- Consolidated Inventory source management into one control surface with one library-level `刷新当前库 / 重扫当前库` pair, folded source-root management, folded advanced rules, and cleaner source rows.
+- Improved Inventory readability and stability: long paths get more room, counts no longer crowd the path, normal status no longer repeats on each row, and unchanged detail previews stay mounted across polling.
+- Unified selected-state styling and shell status semantics, restored green `Ready` text, bounded `.env.dev` Playwright Qdrant cleanup, and moved the remaining frontend `legacy.ts` code into `ui/src/app/*`.
+
+## 2026-04-24
+### Changed
+- Added `008` UI/UX reduction rules for minimal working surfaces and less repeated explanation.
+- Applied those rules to the non-search workspaces: Inventory moved to a compact current-library toolbar with cleaner source rows, Settings dropped chapter-level filler, and the old utility drawer lost duplicate status cards.
+- Updated the closest Playwright workspace coverage to match that ownership model, including library creation in `库管理`, Settings-owned overrides, and maintenance flows through the old utility drawer.
+
 ## 2026-04-23
 ### Changed
+- Split the shipped frontend monolith onto a dedicated module layout without changing product IA: `ui/src/main.ts` is now a thin bootstrap over `ui/src/app/*`, frontend types moved behind `ui/src/types/*`, the old `ui/src/style.css` monolith was replaced by `ui/src/styles/index.css` plus domain partials, and the Playwright helper monolith was broken into domain-specific `ui/tests/e2e/helpers/*` modules with a stable barrel entry.
+- Continued the `020` frontend architecture split by downgrading `ui/src/app/core.ts` and `ui/src/app/events.ts` into thin compatibility/barrel layers over domain modules, lifting shared preview/library-context/jobs/bridge rendering into `ui/src/app/render/shared/*`, and finishing the second-round Playwright helper split so `search` and `workspace` scenarios now live in real subdomain files instead of hidden legacy monoliths.
+- Preserved current single-library multimedia search compatibility during that refactor by continuing to send the legacy top-level `library_id` expected by the current `/search/image`, `/search/video`, and `/search/document` handlers, and by normalizing missing `library_id` fields on single-library search results so detail loading and “reuse as query” actions still work after the module split.
 - Refined the shipped `008` Search shell to match the new prototype direction: the top status capsule now uses `Ready`, the empty-state headline is centered, the text composer is a true single-line strip with the lens aligned to the input, the formal `Search` action sits beside the library scope selector, and active search feedback is reduced to a simple `搜索中...` line above the results surface.
 - Simplified the shipped `008` Search reading surface: redundant result/detail headings and helper copy were removed, `document_page` result rows now use a lightweight static `PDF` placeholder instead of live PDF iframe thumbnails, duplicate document/page cues were dropped from the thumbnail area, and preview/reuse actions now live only on result items instead of being repeated in the detail panel.
 
