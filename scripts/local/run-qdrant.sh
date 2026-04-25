@@ -25,6 +25,7 @@ fi
 
 require_repo_env
 PROBE_PY="$ROOT_DIR/tools/python/probe.py"
+READY_ATTEMPTS=60
 
 command -v qdrant >/dev/null 2>&1 || {
   echo "[error] qdrant is not installed or not on PATH"
@@ -47,7 +48,7 @@ setsid nohup qdrant >"$DEV_LOG_DIR/qdrant.log" 2>&1 < /dev/null &
 QDRANT_PID=$!
 echo "$QDRANT_PID" >"$DEV_LOG_DIR/qdrant.pid"
 
-for _ in $(seq 1 20); do
+for _ in $(seq 1 "$READY_ATTEMPTS"); do
   if python3 "$PROBE_PY" http-ok "${QDRANT_URL%/}/collections" --timeout 1.0; then
     echo "[info] Config: ${FAUNI_CONFIG_SOURCE#$ROOT_DIR/}"
     echo "[ok] Qdrant is ready at $QDRANT_URL"
@@ -56,5 +57,5 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 
-echo "[error] Qdrant did not become ready; see $DEV_LOG_DIR/qdrant.log"
+echo "[error] Qdrant did not become ready after ${READY_ATTEMPTS}s; see $DEV_LOG_DIR/qdrant.log"
 exit 1

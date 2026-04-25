@@ -110,12 +110,11 @@ function hasPid(service?: DevServiceStatus | null) {
   return Boolean(service?.pid || (service?.pids ?? []).length);
 }
 
-function hasPartialAppRuntime(status: DevRuntimeStatus) {
+function hasAnyDevRuntime(status: DevRuntimeStatus) {
   const services = status?.services ?? {};
-  const names = ["app", "sidecar", "ui"];
-  const anyPresent = names.some((name) => isReady(services[name]) || hasPid(services[name]));
-  const allReady = names.every((name) => isReady(services[name]));
-  return anyPresent && !allReady;
+  return ["app", "sidecar", "ui", "qdrant"].some(
+    (name) => isReady(services[name]) || hasPid(services[name])
+  );
 }
 
 function allDevServicesReady(status: DevRuntimeStatus) {
@@ -137,12 +136,16 @@ export async function ensureDevRuntime() {
     };
   }
 
-  if (hasPartialAppRuntime(status)) {
-    throw new Error(
-      "The --dev runtime is partially running. Stop it with `bash scripts/local/stop.sh --dev --all` and rerun the Playwright test."
-    );
+  if (hasAnyDevRuntime(status)) {
+    await stopDevRuntime();
   }
 
+  await runLocalScript("prune-dev-qdrant-collections.sh", [
+    "--max-count",
+    "500",
+    "--keep-count",
+    "100",
+  ]);
   await runLocalScript("run.sh", ["--detach"]);
 
   const nextStatus = await getDevStatus();

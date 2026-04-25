@@ -7,6 +7,7 @@
 - 本地操作脚本 (Local Operation Script)
 - 本地配置文件 (Local Env File)
 - 开发隔离配置 (Development Isolated Env)
+- E2E 有界运行面 (E2E Bounded Runtime)
 - 前台运行 (Foreground Run)
 - 分离运行 (Detached Run)
 - 服务状态快照 (Service Status Snapshot)
@@ -32,6 +33,7 @@
 - 选中配置即事实源：同一次本地脚本运行只应有一个 env 文件作为端口、URL、日志目录与运行时目录的事实源
 - 用户默认优先：不传额外 flag 时默认使用 `.env`，服务当前使用者的日常本地运行
 - 开发隔离显式：开发或代理会话需要避开默认服务时，必须通过显式 `--dev` 选择 `.env.dev`
+- E2E 数据有界：`.env.dev` 是 Playwright / E2E 专用运行面，测试启动流程应在 Qdrant collections 过量时修剪旧测试索引，而不是每次清空全部数据
 - 自动化输出稳定：面向脚本消费的状态与 smoke 摘要必须提供稳定 JSON 输出，不依赖人类日志解析
 - 快速检查不启动长驻服务：默认快速检查不加载真实 GPU 模型、不启动 Qdrant / app / sidecar / UI 长驻进程
 
@@ -39,6 +41,7 @@
 
 - 本地脚本默认使用根 `.env` 作为用户 / 默认运行配置
 - 本地脚本通过显式 `--dev` 选择开发隔离配置 `.env.dev`
+- `.env.dev` 是 Playwright / E2E 专用的有界运行面，不承载长期人工调试数据；需要长期保留状态的人工调试应使用默认 `.env` 或另行复制 env 文件
 - provider/model 的项目级基线事实源是仓库根 `fauni.config.json`
 - provider/model 的实例级覆盖事实源是 `${APP_RUNTIME_DIR}/runtime-config.json`
 - 本地脚本应先选中 `.env` 或 `.env.dev`，再由其中的 `${APP_RUNTIME_DIR}` 解析实例级覆盖配置路径
@@ -57,12 +60,15 @@
 - `run.sh` 承接 app、sidecar 与 UI 的启动；默认前台运行，`--detach` 时进入分离运行
 - `cutover-runtime.sh` 承接 runtime 世代切换；它按当前环境单独归档旧 `app/` 与 `qdrant/`，并初始化新的 `${APP_RUNTIME_DIR}/runtime-config.json`
 - `cleanup-legacy-runtime.sh` 承接旧世代 runtime 清理；默认只扫描并报告当前环境的 legacy 归档与旧 Qdrant collections，只有显式 `--execute` 才执行删除
+- `prune-dev-qdrant-collections.sh` 承接 E2E Qdrant collections 上限控制；它只允许显式 `--dev`，在 Qdrant 启动前扫描 `${QDRANT_STORAGE_DIR}/collections`，超过阈值时按时间顺序只保留最新的 Playwright stage collections
+- `reset-dev-runtime.sh` 可以作为人工兜底重置工具；它只允许显式 `--dev`，先停止 `.env.dev` 下的 app、sidecar、UI 与 Qdrant，再清空并重建 `${APP_RUNTIME_DIR}` 与 `${QDRANT_STORAGE_DIR}`
 - `run.sh` 启动 app、sidecar 与 UI 前应先确认 Qdrant 可访问；若不可访问，应自动调用同一配置上下文下的 `run-qdrant.sh` 启动或复用 Qdrant，并在 Qdrant 仍不可访问时失败
 - `run.sh` 启动前必须解析合并后的 provider/model 配置，并为本地 sidecar 与本地 app 导出所需的运行时模型环境变量
 - `run.sh` 若检测到当前环境下仍存在未 cutover 的旧世代 runtime 数据，必须拒绝启动并明确提示先执行 `cutover-runtime.sh`
 - `run.sh` 必须复用选中 env 下同一个 `APP_RUNTIME_DIR`；重启 app 不得隐式改写持久状态路径，也不得在启动时自动清理旧的 durable store
 - `stop.sh` 承接 app、sidecar、UI 与 Qdrant 的停止；必须支持选中配置下的服务发现
 - `stop.sh --all` 只承接停进程语义，不承接数据清空、runtime wipe 或旧 collection 自动清理
+- E2E Qdrant 数据修剪必须通过 `prune-dev-qdrant-collections.sh --dev` 这类显式 prune 入口完成；全量清空必须通过 `reset-dev-runtime.sh --dev` 这类显式 reset 入口完成，不得隐式塞进 `stop.sh --all`
 - `status.sh` 承接服务状态查询；必须支持 `--json` 输出机器可读状态快照
 - `check.sh` 承接无 GPU 快速检查
 - `smoke-text-search.sh` 承接真实 ColQwen + Qdrant 文本搜索 smoke；必须支持 `--json` 输出机器可读验证摘要
@@ -87,6 +93,10 @@
 - `cleanup-legacy-runtime.sh` 不得删除 alias 当前 target，也不得把当前命名方案中的 `vector_space_stage_*` collections 当成 legacy collection 误删
 - 如需兼容切换，操作员应先执行 `cutover-runtime.sh` 归档旧世代 runtime，再按需执行 `cleanup-legacy-runtime.sh --execute` 清理旧归档与旧 collections
 - `cutover-runtime.sh` 只归档旧 `${APP_RUNTIME_DIR}/state.sqlite` 所在 `app/` 目录与 `QDRANT_STORAGE_DIR` 所在 `qdrant/` 目录；它不归档下载缓存、模型缓存、日志或其他工具缓存
+- `prune-dev-qdrant-collections.sh --dev` 默认在 collections 总数大于 500 时触发，按 collection 名称中的 Playwright 时间戳或文件时间排序，只保留最新 100 个 `vector_space_stage_playwright-*` collection，并同步删除指向被删 collection 的 alias
+- `prune-dev-qdrant-collections.sh` 不得在 Qdrant 运行时直接删除 storage 文件；如需删除，调用方必须先停止 `.env.dev` 下的相关服务
+- `reset-dev-runtime.sh --dev` 删除并重建 `.env.dev` 指向的 `${APP_RUNTIME_DIR}` 与 `${QDRANT_STORAGE_DIR}`，保留 `${DEV_LOG_DIR}` 目录但清理 stale pid 文件，并重新初始化 `${APP_RUNTIME_DIR}/runtime-config.json`
+- `reset-dev-runtime.sh` 不得作用于默认 `.env`，也不得把被清理数据归档为 legacy；它的语义是 E2E 手动全量 reset，不是 operator cutover
 
 ## 快速检查与 smoke
 
@@ -101,7 +111,8 @@
   - `runtime_health`
   - `vector_space_ids`
   - 可选 `unsupported_content_types`
-- Playwright UI smoke 默认使用 `--dev` 隔离配置，优先复用现有 `--dev` 服务；仅在 `--dev` 服务未运行时才自行启动，并且只清理由自身启动的服务
+- Playwright UI smoke 默认使用 `--dev` 隔离配置；启动前应先执行 `.env.dev` Qdrant collection prune，避免历史 `playwright-*` stage collection 与 alias 无限增长并拖慢 Qdrant 冷启动
+- Playwright UI smoke 结束时只停止由自身启动的 `.env.dev` 服务，不在 teardown 阶段删除数据，以便失败后保留现场；下一次 E2E 启动前只在超过阈值时修剪旧 collection
 - Playwright UI smoke 不应依赖默认 `.env` profile，也不应在结束时误停默认 profile 的服务
 - UI 侧 Vite、Playwright 配置与 `tests/e2e` 源文件应统一使用 TypeScript；本地 `typecheck` 必须覆盖这些 Node / Playwright 入口，而不只覆盖浏览器端 `src/**/*.ts`
 
