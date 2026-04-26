@@ -206,8 +206,7 @@ def main() -> int:
         "POST",
         f"{APP_URL}/libraries",
         {
-            "name": "smoke-source-management",
-            "config": {"enabled_index_lines": ["multivector"]},
+            "display_name": "smoke-source-management",
         },
     )
     library = assert_success(create_status, created, "create library")

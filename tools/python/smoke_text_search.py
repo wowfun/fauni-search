@@ -117,8 +117,7 @@ def main() -> int:
     create_status, created = post_json(
         f"{APP_URL}/libraries",
         {
-            "name": "smoke-text-search",
-            "config": {"enabled_index_lines": ["multivector"]},
+            "display_name": "smoke-text-search",
         },
     )
     library = assert_success(create_status, created, "create library")

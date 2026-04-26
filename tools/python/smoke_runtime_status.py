@@ -84,7 +84,6 @@ def main() -> int:
         {
             "display_name": "smoke-runtime-status",
             "library_id": f"smoke-runtime-status-{int(time.time())}",
-            "config": {},
         },
     )
     library = assert_success(create_status, created_payload, "create library")

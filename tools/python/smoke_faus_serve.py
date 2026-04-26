@@ -198,7 +198,6 @@ def wait_for_ports_released(ports: dict[str, tuple[str, int]]) -> dict[str, bool
 def output_contains_required_lines(lines: list[str]) -> dict[str, bool]:
     required = {
         "app": "[info] App:",
-        "web": "[info] Web:",
         "openapi": "[info] OpenAPI:",
         "sidecar": "[info] Sidecar:",
         "qdrant": "[info] Qdrant:",
@@ -207,6 +206,16 @@ def output_contains_required_lines(lines: list[str]) -> dict[str, bool]:
     return {
         name: any(marker in line for line in lines)
         for name, marker in required.items()
+    }
+
+
+def output_excludes_forbidden_lines(lines: list[str]) -> dict[str, bool]:
+    forbidden = {
+        "web": "[info] Web:",
+    }
+    return {
+        name: not any(marker in line for line in lines)
+        for name, marker in forbidden.items()
     }
 
 
@@ -250,6 +259,9 @@ def run_smoke(*, json_mode: bool) -> dict[str, object]:
     required_output = output_contains_required_lines(output_lines)
     if not all(required_output.values()):
         raise RuntimeError(f"faus serve output missed expected route lines: {required_output}")
+    forbidden_output = output_excludes_forbidden_lines(output_lines)
+    if not all(forbidden_output.values()):
+        raise RuntimeError(f"faus serve output included forbidden Web lines: {forbidden_output}")
 
     runtime_status = payloads["runtime_status"].get("data") or {}
     sidecar_health = payloads["sidecar_health"]
@@ -271,6 +283,7 @@ def run_smoke(*, json_mode: bool) -> dict[str, object]:
         "process_exit_code": exit_code,
         "ports_released": released,
         "output_contains": required_output,
+        "output_excludes": forbidden_output,
     }
 
 
