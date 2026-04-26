@@ -84,6 +84,58 @@ wait_http_ok() {
   return 1
 }
 
+wait_app_http_ok() {
+  local url="$1"
+
+  for _ in $(seq 1 30); do
+    if python3 "$PROBE_PY" http-ok "$url" --timeout 1.0; then
+      return 0
+    fi
+    if [[ -n "$APP_PID" ]] && ! kill -0 "$APP_PID" >/dev/null 2>&1; then
+      echo "[error] app process exited before becoming ready at $url"
+      return 1
+    fi
+    sleep 1
+  done
+
+  echo "[error] app did not become ready at $url"
+  return 1
+}
+
+print_app_start_failure() {
+  local log_file="$1"
+  local legacy_line=""
+  local last_error=""
+
+  if [[ ! -f "$log_file" ]]; then
+    echo "[error] app failed to start; log file was not created at $log_file"
+    return 0
+  fi
+
+  legacy_line="$(grep -F "Unsupported legacy durable snapshot store" "$log_file" | tail -n 1 || true)"
+  if [[ -n "$legacy_line" ]]; then
+    echo "[error] app cannot start with the existing legacy durable state store"
+    echo "[error] ${legacy_line#\[error\] }"
+    if [[ "${FAUNI_CONFIG_MODE:-}" == "dev" ]]; then
+      echo "[hint] This is the disposable .env.dev runtime; reset it with: bash scripts/local/reset-dev-runtime.sh --dev"
+    else
+      echo "[hint] This is the default .env runtime; archive the old app/qdrant data with: bash scripts/local/cutover-runtime.sh"
+      echo "[hint] Inspect the selected runtime first with: bash scripts/local/status.sh"
+    fi
+    echo "[info] Log: $log_file"
+    return 0
+  fi
+
+  last_error="$(grep -E '^\[error\]' "$log_file" | tail -n 1 || true)"
+  if [[ -n "$last_error" ]]; then
+    echo "[error] app startup error: ${last_error#\[error\] }"
+    echo "[info] Log: $log_file"
+    return 0
+  fi
+
+  return 1
+}
+
 ensure_port_free() {
   local label="$1"
   local host="$2"
@@ -149,10 +201,12 @@ fi
 APP_PID=$!
 echo "$APP_PID" >"$APP_PID_FILE"
 
-wait_http_ok "app" "http://$APP_HOST:$APP_PORT/health" || {
-  echo "[error] app failed to start; see $DEV_LOG_DIR/app.log"
+if ! wait_app_http_ok "http://$APP_HOST:$APP_PORT/health"; then
+  if ! print_app_start_failure "$DEV_LOG_DIR/app.log"; then
+    echo "[error] app failed to start; see $DEV_LOG_DIR/app.log"
+  fi
   exit 1
-}
+fi
 
 wait_http_ok "sidecar" "http://$SIDECAR_HOST:$SIDECAR_PORT/health" || {
   echo "[error] sidecar failed to start; see $DEV_LOG_DIR/sidecar.log"

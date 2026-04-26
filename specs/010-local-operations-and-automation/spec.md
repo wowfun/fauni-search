@@ -66,6 +66,8 @@
 - `run.sh` 启动后端 runtime 时必须调用同一配置上下文下的 `faus serve`；Qdrant、Python sidecar、Rust server、provider/model 解析与 runtime 世代检查由 `faus serve` 承接
 - `run.sh` 不得再直接启动 `cargo run`、`.venv/bin/python -m fauni_sidecar` 或调用 `run-qdrant.sh` 来形成第二套后端编排路径
 - `run.sh` 必须复用选中 env 下同一个 `APP_RUNTIME_DIR`；重启 app 不得隐式改写持久状态路径，也不得在启动时自动清理旧的 durable store
+- 若选中 env 下的 `${APP_RUNTIME_DIR}/state.sqlite` 仍是旧的单行 snapshot store，`run.sh` / `faus serve` 必须让 App 以清晰错误拒绝启动；本地脚本不得隐式迁移、归档或清空该 store
+- 当 `run.sh` 等待 app ready 失败或发现 app 进程提前退出时，应从 `app.log` 暴露明确启动失败原因；遇到旧 snapshot store 时，`.env.dev` 应提示 `reset-dev-runtime.sh --dev`，默认 `.env` 应提示显式 `cutover-runtime.sh`，不得只输出泛化超时信息
 - `run.sh` 必须先等待后端 runtime 的 app、sidecar 与 Qdrant ready，再启动 Vite UI，避免开发服务器在后端未就绪时代理 `/api/*` 请求并写入误导性的连接失败日志
 - `stop.sh` 承接 app、sidecar、UI 与 Qdrant 的停止；必须支持选中配置下的服务发现
 - `stop.sh --all` 只承接停进程语义，不承接数据清空、runtime wipe 或旧 collection 自动清理
@@ -97,6 +99,7 @@
 - `prune-dev-qdrant-collections.sh --dev` 默认在 collections 总数大于 500 时触发，按 collection 名称中的 Playwright 时间戳或文件时间排序，只保留最新 100 个 `vector_space_stage_playwright-*` collection，并同步删除指向被删 collection 的 alias
 - `prune-dev-qdrant-collections.sh` 不得在 Qdrant 运行时直接删除 storage 文件；如需删除，调用方必须先停止 `.env.dev` 下的相关服务
 - `reset-dev-runtime.sh --dev` 删除并重建 `.env.dev` 指向的 `${APP_RUNTIME_DIR}` 与 `${QDRANT_STORAGE_DIR}`，保留 `${DEV_LOG_DIR}` 目录但清理 stale pid 文件，并重新初始化 `${APP_RUNTIME_DIR}/runtime-config.json`
+- `.env.dev` 遇到旧 snapshot `state.sqlite` 时，推荐使用 `reset-dev-runtime.sh --dev` 明确重建 dev 运行面；默认 `.env` 运行面应由用户手动 cutover 或 reset，不自动处理
 - `reset-dev-runtime.sh` 不得作用于默认 `.env`，也不得把被清理数据归档为 legacy；它的语义是 E2E 手动全量 reset，不是 operator cutover
 
 ## 快速检查与 smoke

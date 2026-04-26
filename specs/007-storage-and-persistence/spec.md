@@ -65,7 +65,10 @@
   - `visual_units`
   - `active_index_references`
   - `retired_vector_space_inventory`
-- 当前 v1 采用“单个 durable snapshot + 事务性整份重写”的写入方式，而不是 row-by-row live sync
+- 当前结构化存储使用 SQLite 多表记录承载 durable truth，schema version 由 `state_meta` 单行记录
+- 当前写入策略仍采用单事务整表重写结构化表，而不是 row-by-row live sync；这只是写入实现策略，不再把全部 durable truth 放入单个 JSON snapshot
+- 旧的 `durable_state_snapshots.payload_json` 单行 snapshot store 不自动迁移；启动时遇到旧 store 必须拒绝启动并提示 operator 通过 reset / cutover 显式处理
+- 复杂叶子字段可以用 JSON 文本列保存，例如 source-root rules、visual-unit locator 与 neighbor context；高基数实体与实体顺序必须行化
 - 为承接 [002-state-and-data-model](../002-state-and-data-model/spec.md) 中的稳定关系，可以存在必要的关联记录族；但这些记录不得改变上游定义的事实源归属
 - `jobs`、`job_attempts`、`search_history` 与 `favorites` 不属于当前 v1 的 restart-durable subset；它们在重启后清空或缺失，不构成持久恢复失败
 - 主结构化存储中的记录可以引用文件载荷与检索命名空间，但文件载荷与检索后端不得反向承担结构化真相职责
@@ -112,6 +115,7 @@
   - 应用数据根的 layout version
   - 检索命名空间的兼容代际或命名代际
 - 主结构化存储的 schema version 必须持久记录，并作为结构化迁移的唯一基准
+- 当前结构化 SQLite store 的 schema version 为 `3`；低于该版本且仍使用单行 snapshot 的 store 不自动迁移
 - 应用数据根的 layout version 必须能表达派生资产存储区、临时资产存储区与运行时工作区的布局兼容性
 - 当检索命名空间的物理命名或后端兼容要求发生变化时，应通过显式兼容代际或重建路径处理，而不是直接改写结构化真相含义
 - 当前 active index reference 在应用启动时必须重新对照 stable active namespace naming 探测可用性；若 active alias 缺失、alias target 缺失，或只剩同名旧物理 collection，该引用应失活并让搜索返回 `not_ready`

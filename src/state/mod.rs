@@ -144,7 +144,7 @@ impl AppState {
 
     fn durable_snapshot(&self) -> DurableAppStateSnapshot {
         DurableAppStateSnapshot {
-            version: 2,
+            version: 3,
             library_order: self.library_order.clone(),
             libraries: self
                 .libraries

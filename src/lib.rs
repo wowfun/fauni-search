@@ -57,4 +57,3 @@ pub(crate) const VIDEO_SEGMENT_OVERLAP_MS: u64 = 2_000;
 pub(crate) const APP_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const SOURCE_WATCHER_POLL_INTERVAL_SECS: u64 = 2;
 pub(crate) const SOURCE_WATCHER_DEBOUNCE_MS: u128 = 1_500;
-pub(crate) const STATE_SNAPSHOT_ROW_ID: i64 = 1;
