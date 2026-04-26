@@ -12,6 +12,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
@@ -36,6 +37,7 @@ fn top_help_describes_cli_and_examples() {
     assert!(stdout.contains("Examples:"));
     assert!(stdout.contains("faus serve"));
     assert!(stdout.contains("faus library list"));
+    assert!(stdout.contains("faus import --library-id demo"));
 }
 
 #[test]
@@ -143,6 +145,50 @@ fn library_create_help_describes_inputs() {
     assert!(stdout.contains("Optional stable library id"));
 }
 
+#[test]
+fn jobs_help_exposes_workflows() {
+    let output = faus()
+        .args(["jobs", "--help"])
+        .output()
+        .expect("faus jobs help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    for command in ["list", "show", "cancel", "resume", "retry"] {
+        assert!(stdout.contains(command), "missing {command} in help");
+    }
+    assert!(stdout.contains("Manage runtime jobs through the App API"));
+    assert!(stdout.contains("faus jobs list --library-id"));
+}
+
+#[test]
+fn jobs_list_help_describes_library_filter() {
+    let output = faus()
+        .args(["jobs", "list", "--help"])
+        .output()
+        .expect("faus jobs list help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    assert!(stdout.contains("--library-id"));
+    assert!(stdout.contains("Filter jobs by library id"));
+}
+
+#[test]
+fn import_help_describes_inputs() {
+    let output = faus()
+        .args(["import", "--help"])
+        .output()
+        .expect("faus import help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    assert!(stdout.contains("--library-id"));
+    assert!(stdout.contains("Target library id"));
+    assert!(stdout.contains("<PATH>"));
+    assert!(stdout.contains("does not start local processes"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_uses_faus_base_url_and_outputs_json() {
     let server = StatusServer::start(RuntimeMode::Ok).await;
@@ -207,6 +253,49 @@ async fn library_list_uses_faus_base_url_and_outputs_json() {
     assert_eq!(payload["data"]["base_url"], server.base_url);
     assert_eq!(payload["data"]["libraries"][0]["id"], "demo");
     assert_eq!(server.requests(), vec!["/libraries"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_list_uses_faus_base_url_and_outputs_json() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args(["--json", "jobs", "list"])
+        .output()
+        .expect("faus jobs list should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["data"]["base_url"], server.base_url);
+    assert_eq!(payload["data"]["jobs"][0]["job_id"], "job_1");
+    assert_eq!(server.requests(), vec!["/jobs"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_uses_faus_base_url_and_outputs_json() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let cwd = temp_test_dir("import-env-base-url");
+    let expected_path = cwd.join("report.pdf").to_string_lossy().to_string();
+
+    let output = faus()
+        .current_dir(&cwd)
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args(["--json", "import", "--library-id", "demo", "report.pdf"])
+        .output()
+        .expect("faus import should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["data"]["base_url"], server.base_url);
+    assert_eq!(
+        payload["data"]["import"]["accepted"][0]["original_path"],
+        expected_path
+    );
+    assert_eq!(payload["data"]["import"]["job_handle"], "job_1");
+    assert_eq!(server.requests(), vec!["/libraries/demo/imports"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -337,6 +426,61 @@ async fn library_base_url_flag_overrides_env_and_trims_trailing_slash() {
     assert_eq!(payload["data"]["library"]["id"], "demo");
     assert_eq!(env_server.requests(), Vec::<String>::new());
     assert_eq!(flag_server.requests(), vec!["/libraries/demo"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_base_url_flag_overrides_env_and_trims_trailing_slash() {
+    let env_server = StatusServer::start(RuntimeMode::Ok).await;
+    let flag_server = StatusServer::start(RuntimeMode::Ok).await;
+    let base_url_with_slash = format!("{}/", flag_server.base_url);
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &env_server.base_url)
+        .args([
+            "--base-url",
+            &base_url_with_slash,
+            "--json",
+            "jobs",
+            "show",
+            "job_1",
+        ])
+        .output()
+        .expect("faus jobs show should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["base_url"], flag_server.base_url);
+    assert_eq!(payload["data"]["job"]["job_id"], "job_1");
+    assert_eq!(env_server.requests(), Vec::<String>::new());
+    assert_eq!(flag_server.requests(), vec!["/jobs/job_1"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_base_url_flag_overrides_env_and_trims_trailing_slash() {
+    let env_server = StatusServer::start(RuntimeMode::Ok).await;
+    let flag_server = StatusServer::start(RuntimeMode::Ok).await;
+    let base_url_with_slash = format!("{}/", flag_server.base_url);
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &env_server.base_url)
+        .args([
+            "--base-url",
+            &base_url_with_slash,
+            "--json",
+            "import",
+            "--library-id",
+            "demo",
+            "/tmp/report.pdf",
+        ])
+        .output()
+        .expect("faus import should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["base_url"], flag_server.base_url);
+    assert_eq!(payload["data"]["import"]["job"]["job_id"], "job_1");
+    assert_eq!(env_server.requests(), Vec::<String>::new());
+    assert_eq!(flag_server.requests(), vec!["/libraries/demo/imports"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -545,6 +689,187 @@ async fn library_archive_and_restore_use_action_paths() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_list_filters_by_library_id() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "jobs",
+            "list",
+            "--library-id",
+            "demo",
+        ])
+        .output()
+        .expect("faus jobs list should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["jobs"][0]["library_id"], "demo");
+    assert_eq!(server.requests(), vec!["/jobs?library_id=demo"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_actions_use_action_paths() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let cancel = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "jobs",
+            "cancel",
+            "job_1",
+        ])
+        .output()
+        .expect("faus jobs cancel should run");
+    assert_success(&cancel);
+    let cancel_payload = stdout_json(&cancel);
+    assert_eq!(cancel_payload["data"]["job"]["phase"], "cancel_requested");
+
+    let resume = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "jobs",
+            "resume",
+            "job_1",
+        ])
+        .output()
+        .expect("faus jobs resume should run");
+    assert_success(&resume);
+    let resume_payload = stdout_json(&resume);
+    assert_eq!(resume_payload["data"]["job"]["status"], "queued");
+
+    let retry = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--debug",
+            "--json",
+            "jobs",
+            "retry",
+            "job_1",
+        ])
+        .output()
+        .expect("faus jobs retry should run");
+    assert_success(&retry);
+    let retry_payload = stdout_json(&retry);
+    assert_eq!(retry_payload["data"]["job"]["job_id"], "job_2");
+    assert_eq!(retry_payload["data"]["job"]["retried_from_job_id"], "job_1");
+    assert_eq!(
+        retry_payload["debug"]["request_url"],
+        format!("{}/jobs/job_1/retry", server.base_url)
+    );
+
+    let records = server.records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].method, "POST");
+    assert_eq!(records[0].path, "/jobs/job_1/cancel");
+    assert_eq!(records[1].method, "POST");
+    assert_eq!(records[1].path, "/jobs/job_1/resume");
+    assert_eq!(records[2].method, "POST");
+    assert_eq!(records[2].path, "/jobs/job_1/retry");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_sends_paths_in_order_and_outputs_import() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let cwd = temp_test_dir("import-path-order");
+    let relative = cwd.join("relative.pdf").to_string_lossy().to_string();
+    let absolute = "/tmp/faus-absolute.pdf";
+    let rejected = cwd.join("reject.txt").to_string_lossy().to_string();
+
+    let output = faus()
+        .current_dir(&cwd)
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--debug",
+            "--json",
+            "import",
+            "--library-id",
+            "demo",
+            "relative.pdf",
+            absolute,
+            "reject.txt",
+        ])
+        .output()
+        .expect("faus import should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(
+        payload["data"]["import"]["accepted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        payload["data"]["import"]["rejected"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        payload["debug"]["request_url"],
+        format!("{}/libraries/demo/imports", server.base_url)
+    );
+    assert_eq!(payload["debug"]["http_status"], 200);
+
+    let records = server.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].method, "POST");
+    assert_eq!(records[0].path, "/libraries/demo/imports");
+    assert_eq!(
+        records[0].body,
+        Some(json!({
+            "paths": [
+                relative,
+                absolute,
+                rejected,
+            ]
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_human_output_summarizes_rejections_and_job() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let cwd = temp_test_dir("import-human");
+    let rejected = cwd.join("reject.txt").to_string_lossy().to_string();
+
+    let output = faus()
+        .current_dir(&cwd)
+        .args([
+            "--base-url",
+            &server.base_url,
+            "import",
+            "--library-id",
+            "demo",
+            "ok.pdf",
+            "reject.txt",
+        ])
+        .output()
+        .expect("faus import should run");
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("accepted=1"));
+    assert!(stdout.contains("rejected=1"));
+    assert!(stdout.contains("job=job_1"));
+    assert!(stdout.contains("status=queued"));
+    assert!(stdout.contains(&rejected));
+    assert!(stdout.contains("unsupported_type"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_human_output_is_short_summary() {
     let server = StatusServer::start(RuntimeMode::Ok).await;
 
@@ -717,6 +1042,52 @@ async fn library_preserves_server_error_envelope() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_preserves_server_error_envelope() {
+    let server = StatusServer::start(RuntimeMode::ErrorEnvelope).await;
+
+    let output = faus()
+        .args(["--base-url", &server.base_url, "--json", "jobs", "list"])
+        .output()
+        .expect("faus jobs list should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["error"]["code"], "runtime_unavailable");
+    assert_eq!(payload["error"]["message"], "Qdrant is offline");
+    assert_eq!(payload["error"]["details"]["component"], "qdrant");
+    assert_eq!(payload["error"]["retryable"], true);
+    assert!(payload["error"].get("hint").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_preserves_server_error_envelope() {
+    let server = StatusServer::start(RuntimeMode::ErrorEnvelope).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "import",
+            "--library-id",
+            "demo",
+            "/tmp/report.pdf",
+        ])
+        .output()
+        .expect("faus import should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["error"]["code"], "runtime_unavailable");
+    assert_eq!(payload["error"]["message"], "Qdrant is offline");
+    assert_eq!(payload["error"]["details"]["component"], "qdrant");
+    assert_eq!(payload["error"]["retryable"], true);
+    assert!(payload["error"].get("hint").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_reports_occupied_web_port() {
     let server = StatusServer::start(RuntimeMode::Ok).await;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("web port should bind");
@@ -782,6 +1153,112 @@ async fn library_rejects_missing_list_data_envelope() {
         payload["error"]["details"]["request_url"],
         format!("{}/libraries", server.base_url)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_rejects_missing_list_data_envelope() {
+    let server = StatusServer::start(RuntimeMode::MissingData).await;
+
+    let output = faus()
+        .args(["--base-url", &server.base_url, "--json", "jobs", "list"])
+        .output()
+        .expect("faus jobs list should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("App API contract"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/jobs", server.base_url)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_rejects_missing_data_envelope() {
+    let server = StatusServer::start(RuntimeMode::MissingData).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "import",
+            "--library-id",
+            "demo",
+            "/tmp/report.pdf",
+        ])
+        .output()
+        .expect("faus import should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("App API contract"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/libraries/demo/imports", server.base_url)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jobs_rejects_non_json_response() {
+    let server = StatusServer::start(RuntimeMode::NotJson).await;
+
+    let output = faus()
+        .args(["--base-url", &server.base_url, "--json", "jobs", "list"])
+        .output()
+        .expect("faus jobs list should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("FauniSearch App API server"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/jobs", server.base_url)
+    );
+    assert_eq!(payload["error"]["details"]["http_status"], 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_rejects_non_json_response() {
+    let server = StatusServer::start(RuntimeMode::NotJson).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "import",
+            "--library-id",
+            "demo",
+            "/tmp/report.pdf",
+        ])
+        .output()
+        .expect("faus import should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("FauniSearch App API server"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/libraries/demo/imports", server.base_url)
+    );
+    assert_eq!(payload["error"]["details"]["http_status"], 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -857,6 +1334,16 @@ fn write_web_env(web_port: u16) -> PathBuf {
     path
 }
 
+fn temp_test_dir(name: &str) -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("faus-cli-{name}-{}-{now}", std::process::id()));
+    fs::create_dir_all(&path).expect("test temp dir should be created");
+    path
+}
+
 #[derive(Clone, Copy)]
 enum RuntimeMode {
     Ok,
@@ -891,6 +1378,11 @@ impl StatusServer {
             .route("/health", get(health))
             .route("/", get(web_root))
             .route("/runtime/status", get(runtime_status))
+            .route("/jobs", get(list_jobs))
+            .route("/jobs/{job_id}", get(show_job))
+            .route("/jobs/{job_id}/cancel", post(cancel_job))
+            .route("/jobs/{job_id}/resume", post(resume_job))
+            .route("/jobs/{job_id}/retry", post(retry_job))
             .route("/libraries", get(list_libraries).post(create_library))
             .route(
                 "/libraries/{library_id}",
@@ -898,6 +1390,7 @@ impl StatusServer {
             )
             .route("/libraries/{library_id}/archive", post(archive_library))
             .route("/libraries/{library_id}/restore", post(restore_library))
+            .route("/libraries/{library_id}/imports", post(import_paths))
             .with_state(state);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
@@ -1058,6 +1551,70 @@ async fn list_libraries(State(state): State<StatusServerState>) -> Response {
     }
 }
 
+async fn list_jobs(State(state): State<StatusServerState>, uri: axum::http::Uri) -> Response {
+    let path = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/jobs")
+        .to_string();
+    state.record_http("GET", &path, None);
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "meta": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => Json(json!({
+            "data": {
+                "jobs": [
+                    job_snapshot("job_1", "demo", "import", "running", "indexing", None)
+                ]
+            }
+        }))
+        .into_response(),
+    }
+}
+
+async fn show_job(Path(job_id): Path<String>, State(state): State<StatusServerState>) -> Response {
+    let path = format!("/jobs/{job_id}");
+    state.record_http("GET", &path, None);
+    Json(json!({
+        "data": job_snapshot(&job_id, "demo", "import", "running", "indexing", None)
+    }))
+    .into_response()
+}
+
+async fn cancel_job(
+    Path(job_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    let path = format!("/jobs/{job_id}/cancel");
+    state.record_http("POST", &path, None);
+    Json(json!({
+        "data": job_snapshot(&job_id, "demo", "import", "running", "cancel_requested", None)
+    }))
+    .into_response()
+}
+
+async fn resume_job(
+    Path(job_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    let path = format!("/jobs/{job_id}/resume");
+    state.record_http("POST", &path, None);
+    Json(json!({
+        "data": job_snapshot(&job_id, "demo", "import", "queued", "queued", None)
+    }))
+    .into_response()
+}
+
+async fn retry_job(Path(job_id): Path<String>, State(state): State<StatusServerState>) -> Response {
+    let path = format!("/jobs/{job_id}/retry");
+    state.record_http("POST", &path, None);
+    Json(json!({
+        "data": job_snapshot("job_2", "demo", "import", "queued", "queued", Some(&job_id))
+    }))
+    .into_response()
+}
+
 async fn create_library(
     State(state): State<StatusServerState>,
     Json(body): Json<Value>,
@@ -1133,6 +1690,24 @@ async fn restore_library(
     .into_response()
 }
 
+async fn import_paths(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let path = format!("/libraries/{library_id}/imports");
+    state.record_http("POST", &path, Some(body.clone()));
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "meta": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => Json(json!({
+            "data": import_snapshot(&library_id, &body)
+        }))
+        .into_response(),
+    }
+}
+
 fn library_snapshot(library_id: &str, display_name: &str, lifecycle_state: &str) -> Value {
     json!({
         "id": library_id,
@@ -1144,6 +1719,79 @@ fn library_snapshot(library_id: &str, display_name: &str, lifecycle_state: &str)
         },
         "latest_job_id": null,
     })
+}
+
+fn import_snapshot(library_id: &str, body: &Value) -> Value {
+    let paths = body
+        .get("paths")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+
+    for path in paths {
+        let original_path = path.as_str().unwrap_or("unknown").to_string();
+        if original_path.contains("reject") {
+            rejected.push(json!({
+                "original_path": original_path,
+                "normalized_path": original_path,
+                "reason_code": "unsupported_type",
+                "message": "Only supported media files are accepted.",
+            }));
+        } else {
+            accepted.push(json!({
+                "original_path": original_path,
+                "normalized_path": original_path,
+                "reason_code": "accepted",
+                "message": "Accepted as document input for the library.",
+                "source_id": "src_1",
+                "source_type": "document",
+                "kind": "document_page",
+                "visual_units": [],
+            }));
+        }
+    }
+
+    json!({
+        "accepted": accepted,
+        "rejected": rejected,
+        "job_handle": "job_1",
+        "job": job_snapshot("job_1", library_id, "import", "queued", "intake", None),
+    })
+}
+
+fn job_snapshot(
+    job_id: &str,
+    library_id: &str,
+    kind: &str,
+    status: &str,
+    phase: &str,
+    retried_from_job_id: Option<&str>,
+) -> Value {
+    let mut job = json!({
+        "job_id": job_id,
+        "library_id": library_id,
+        "kind": kind,
+        "status": status,
+        "phase": phase,
+        "progress": {
+            "completed": 1,
+            "total": 3,
+            "unit": "items"
+        },
+        "cancelable": status == "running" || status == "queued",
+        "retryable": true,
+        "current_attempt": {
+            "attempt": 2,
+            "status": status,
+            "summary": "Indexing demo content"
+        }
+    });
+    if let Some(retried_from_job_id) = retried_from_job_id {
+        job["retried_from_job_id"] = json!(retried_from_job_id);
+    }
+    job
 }
 
 fn server_error_envelope() -> Response {

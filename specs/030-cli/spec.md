@@ -135,11 +135,10 @@
 ### `faus import`
 
 - `faus import` 用于把本地路径提交给指定库的导入接口
-- 输入至少应支持：
-  - 目标 `library_id`
-  - 一个或多个本地路径
+- 基础命令形态固定为 `faus import --library-id <library_id> <path>...`
+- 输入路径可以是相对路径或绝对路径；相对路径由 CLI 按当前 shell cwd 转为绝对路径后提交
 - `faus import` 只负责提交导入请求并返回任务摘要，不负责直接扫描文件、生成 embedding 或等待全量索引完成
-- 是否等待任务完成可以作为扩展能力；基础命令不要求默认阻塞到索引完成
+- 等待、轮询、watch、tail 或 job log 属于扩展能力；基础命令不默认阻塞到索引完成，任务观察交给 `faus jobs`
 
 ### `faus search`
 
@@ -153,6 +152,7 @@
 ### `faus jobs`
 
 - `faus jobs` 用于观察和处理后台任务
+- `faus jobs` 是 top-level runtime resource group，不作为 `library`、`import` 或 `search` 的参数或子资源命令
 - 至少应规划以下能力：
   - 列出任务
   - 查看单个任务

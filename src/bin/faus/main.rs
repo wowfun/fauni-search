@@ -1,5 +1,7 @@
 mod client;
 mod error;
+mod import;
+mod jobs;
 mod library;
 mod serve;
 mod status;
@@ -7,6 +9,8 @@ mod web;
 
 use clap::{Parser, Subcommand};
 use error::{invalid_input, CliFailure};
+use import::{run_import, ImportArgs};
+use jobs::{run_jobs, JobsArgs};
 use library::{run_library, LibraryArgs};
 use serve::{run_serve, ServeArgs};
 use status::run_status;
@@ -17,7 +21,7 @@ use web::run_web;
     name = "faus",
     about = "FauniSearch product CLI",
     long_about = "FauniSearch product CLI for starting the local runtime and using the App API.",
-    after_help = "Examples:\n  faus serve\n  faus status\n  faus library list\n  faus web"
+    after_help = "Examples:\n  faus serve\n  faus status\n  faus library list\n  faus import --library-id demo report.pdf\n  faus jobs list\n  faus web"
 )]
 struct Cli {
     #[arg(
@@ -47,6 +51,10 @@ enum Commands {
     Status,
     #[command(about = "Manage libraries through the App API")]
     Library(LibraryArgs),
+    #[command(about = "Submit local paths for import through the App API")]
+    Import(ImportArgs),
+    #[command(about = "Manage runtime jobs through the App API")]
+    Jobs(JobsArgs),
     #[command(
         about = "Open the Web experience for a local or existing runtime",
         long_about = "Open the FauniSearch Web experience. With an explicit base URL it connects to that App API; without one it may start the default local runtime. It uses built Web assets and does not start Vite.",
@@ -83,6 +91,8 @@ async fn run(cli: Cli) -> Result<(), CliFailure> {
         }
         Commands::Status => run_status(cli.base_url, cli.json, cli.debug).await,
         Commands::Library(args) => run_library(args, cli.base_url, cli.json, cli.debug).await,
+        Commands::Import(args) => run_import(args, cli.base_url, cli.json, cli.debug).await,
+        Commands::Jobs(args) => run_jobs(args, cli.base_url, cli.json, cli.debug).await,
         Commands::Web => run_web(cli.base_url, cli.json, cli.debug).await,
     }
 }
