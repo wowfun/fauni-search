@@ -1,6 +1,6 @@
 # 009 接口与协议契约 (Interfaces and Protocol Contracts)
 
-定义 FauniSearch 的接口与协议契约，明确应用公开接口如何编码，以及 Rust 主服务与 Python sidecar 之间的稳定 HTTP/JSON 协议如何构成统一事实源。
+定义 FauniSearch 的接口与协议契约，明确 Rust server 公开 App API 如何编码、如何以 OpenAPI contract 暴露给客户端，以及 Rust 主服务与 Python sidecar 之间的稳定 HTTP/JSON 协议如何保持窄边界。
 
 ## 关键术语 (Terminology)
 
@@ -9,6 +9,10 @@
 - 错误载荷（Error Payload）
 - 资源引用对象（Resource Reference）
 - 游标令牌（Cursor Token）
+- App 公开 API（App Public API）
+- RESTful 资源导向接口（RESTful Resource-oriented API）
+- OpenAPI 契约（OpenAPI Contract）
+- schema component（Schema Component）
 - 搜索请求载荷（Search Request Payload）
 - 搜索范围载荷（Search Scope Payload）
 - 搜索响应载荷（Search Response Payload）
@@ -19,34 +23,65 @@
 
 ## 范围
 
-- 应用公开接口的稳定请求 / 响应契约
+- Rust server 公开 App API 的稳定请求 / 响应契约
+- 公开 App API 的 OpenAPI contract 暴露方式、覆盖范围与 schema 事实源
 - 搜索接口与非搜索控制面接口的请求 / 响应形状
 - 公共错误载荷、分页 / 游标、资源句柄、时间戳与诊断字段的最小编码约定
-- Rust 主服务与 Python sidecar 的稳定 HTTP/JSON 协议边界
+- Rust 主服务与 Python sidecar 的内部稳定 HTTP/JSON 协议边界
 
 范围外：
 - 搜索排序、过滤规则、结果语义与默认搜索行为
 - 任务状态机、恢复算法、调度策略与健康判定算法
 - 提供方私有远端 API、凭据字段与第三方产品协议
-- SQLite/Qdrant schema、目录布局、前端路由与视觉样式
+- SQLite/Qdrant schema、目录布局、前端路由、视觉样式与前端实现组织
+- Web 产品体验、产品 CLI 交互体验、`scripts/local/*` 运维自动化与 Vite 开发代理语义
+- Python sidecar、Qdrant、Web 静态资产托管实现细节或本地脚本的 OpenAPI 暴露
 
 ## 设计原则
 
 - 语义与编码分离（Semantics Before Encoding）：领域语义由各自专题承接，本专题只定义这些语义如何被稳定编码
 - 公开契约统一（Unified Public Contract）：公开接口应复用统一的请求封套、响应封套、错误载荷与分页约定，而不是每个接口族各自发明编码模型
+- RESTful 资源导向（RESTful Resource Orientation）：Rust server 公开 App API 默认使用资源名词、层级资源、标准 HTTP 方法与稳定资源标识来表达公开能力
+- OpenAPI 优先（OpenAPI-first）：Rust server 公开 App API 必须能以机器可读 OpenAPI contract 表达，CLI、Web 与后续 SDK 不应依赖手写漂移的请求形状
+- schema 源自实现契约（Schema From Handler Contract）：OpenAPI schema 应从 Rust API DTO 与 handler contract 派生，避免独立手写规范文件与实现长期分叉
 - 窄协议边界（Narrow Protocol Boundary）：跨进程协议只传递稳定输入、输出与诊断信息，不泄露内部对象或实现细节
 - 显式错误（Explicit Errors）：验证失败、不可用、超时与不支持场景必须通过稳定错误载荷表达，而不是依赖隐式约定
 - 游标不透明（Opaque Cursor）：游标令牌只作为后续分页输入使用，不承诺客户端可解析其内部编码
 
 ## 统一公开契约
 
-- 应用公开接口固定以结构化 JSON 对象承载请求与响应；若通过 HTTP 暴露，其 body 应直接复用本专题定义的请求 / 响应载荷
+- Rust server 公开 App API 固定以结构化 JSON 对象承载主要请求与响应；若通过 HTTP 暴露，其 body 应直接复用本专题定义的请求 / 响应载荷
+- 公开 HTTP 路径默认以资源为中心命名，优先采用复数资源名与层级关系，例如库、来源根、任务、查询资产、运行时状态与设置资源
+- 公开 HTTP 方法默认遵循资源操作语义：`GET` 读取，`POST` 创建或提交工作流请求，`PATCH` 局部变更，`DELETE` 删除或撤销资源
+- 搜索、上传、任务动作和诊断测试这类工作流可以使用清晰的动作子资源或工作流端点；这些例外应服务产品语义，不为形式上的 CRUD 重建模牺牲可理解性
 - 请求封套是顶层请求对象；操作字段直接位于顶层，并可按需携带 `request_id`、`debug`、`cursor` 等通用字段
-- 响应封套是顶层响应对象；成功响应必须包含 `data`，失败响应必须包含 `error`，两者不得同时出现
+- 响应封套是顶层响应对象；JSON 成功响应默认使用 `SuccessEnvelope<T>` 并包含 `data`，失败响应使用 `ErrorEnvelope` 并包含 `error`，两者不得同时出现
+- `GET /health` 是轻量 liveness JSON 例外，可以直接返回健康摘要而不套 `SuccessEnvelope<T>`
+- `GET /` 是 Rust server-hosted Web 的 HTML 入口，不套 `SuccessEnvelope<T>`，也不是客户端机器契约事实源
+- `GET /routes` 是人工路由发现入口；机器可读契约必须以 `GET /openapi.json` 为准
+- Web 静态资产、`/assets/*` 与 SPA fallback 路径不属于 App 公开 API，不纳入 OpenAPI contract
+- preview 与其他 binary/media 响应不套 `SuccessEnvelope<T>`；OpenAPI 中应表达其 media type、状态码和统一错误响应
+- multipart 请求应以公开字段、`multipart/form-data` media type 与成功 / 错误响应描述，不把内部 multipart parser struct 暴露为公开 schema component
 - 列表或分页响应可以在 `data` 内承载结果数组，并在顶层响应中返回 `next_cursor`
 - 调试或诊断字段只应在显式请求调试信息、或协议约定必须返回诊断摘要时出现
 - 公开时间戳应采用 RFC 3339 / ISO 8601 字符串表达
 - 公开资源标识、任务句柄、运行时句柄与引用句柄应采用稳定字符串表示，不暴露底层数据库主键或后端私有命名细节
+
+## OpenAPI 契约
+
+- Rust server 必须暴露 `GET /openapi.json`，返回机器可读 OpenAPI contract
+- OpenAPI contract 是 `faus`、Web 与后续 SDK 消费公开 App API 的机器契约；Markdown specs 仍负责定义产品语义、能力边界与跨专题约束
+- OpenAPI contract 的 schema component 应从 Rust API DTO 与 handler contract 派生；不得长期依赖与实现并行维护的手写 JSON/YAML 作为事实源
+- OpenAPI contract 必须覆盖 Rust server 公开 App API，包括：
+  - JSON envelope 路由
+  - `multipart/form-data` 上传路由
+  - preview / binary media 响应路由
+  - `GET /health` 轻量健康入口
+  - `GET /routes` 人工路由发现入口
+- OpenAPI contract 不覆盖 Python sidecar 内部协议、Qdrant 接口、`scripts/local/*`、Vite proxy、Web 静态资产托管细节或客户端本地工作流
+- `GET /openapi.json` 应纳入公开 App API 路由清单；`GET /routes` 返回的人工路由列表不得作为客户端生成或兼容性判断的事实源
+- schema component 命名应面向客户端稳定含义，不泄露 Rust 模块组织、数据库表名、内部 parser 类型或 provider 私有结构
+- 公开 App API 的新增、删除或不兼容变更必须先更新本专题或对应语义专题，再更新 OpenAPI contract；客户端生成物只能视为契约消费结果
 
 ### 错误载荷与错误码族
 
@@ -77,10 +112,10 @@
   - 单库：`{ "kind": "library", "library_id": "..." }`
   - 所有库：`{ "kind": "all_libraries" }`
   - 预留多库子集：`{ "kind": "library_set", "library_ids": ["...", "..."] }`
-- 当前第一阶段公开切片中：
+- 端点支持范围必须显式记录：
   - `/search/text` 必须接受 `library` 与 `all_libraries`
-  - `/search/image`、`/search/video` 与 `/search/document` 当前只接受 `library`
-  - 当请求给出当前端点尚不支持的 `search_scope.kind` 时，服务端必须通过统一错误载荷返回 `not_supported`
+  - `/search/image`、`/search/video` 与 `/search/document` 的最低稳定支持范围是 `library`
+  - 当请求给出端点尚未支持的 `search_scope.kind` 时，服务端必须通过统一错误载荷返回 `not_supported`
 - `/search/text` 的请求载荷必须携带 `text`
 - `/search/image` 的请求载荷必须携带 `image_input`
 - `/search/video` 的请求载荷必须携带 `video_input`
@@ -101,31 +136,31 @@
 - 当视频查询使用库内对象引用时，能力专题可以选择：
   - 通过 `source_id` 表示“整段视频或显式时间范围”
   - 通过 `visual_unit_id` 表示“直接复用某个库内 `video_segment` 作为查询输入”
-- 各能力专题可以在当前阶段先只启用其中一个正式输入变体；未启用变体应通过统一错误载荷返回 `not_supported`
+- 各能力专题可以只启用其中一个正式输入变体；未启用变体应通过统一错误载荷返回 `not_supported`
 - 搜索响应载荷通过响应封套中的 `data` 返回，至少包含：
   - 有序 `results`
   - 可选 `next_cursor`
   - 可选 `unsupported_content_types`
   - 可选 `debug`
-- 当前切片中，`cursor` 必须编码为来自上一页 `next_cursor` 或上一页最后一个结果项 `cursor` 的不透明字符串；客户端不得依赖其内部格式
-- 当前切片中，若启用了 `filters`，正式稳定编码至少包括：
+- `cursor` 必须编码为来自上一页 `next_cursor` 或上一页最后一个结果项 `cursor` 的不透明字符串；客户端不得依赖其内部格式
+- 若启用了 `filters`，正式稳定编码至少包括：
   - `filters.visual_unit.kind`：单字符串或字符串数组
   - `filters.source_type`：单字符串或字符串数组
   - `filters.path_prefix`：单字符串或字符串数组
   - `filters.time_range`：`{ "start_ms": number, "end_ms": number }`
 - `filters.time_range` 若出现，必须同时包含可解析的 `start_ms` 与 `end_ms`；否则应通过统一错误载荷返回 `validation_failed`
 - 每个搜索结果项的稳定字段至少包括：`library_id`、`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选 `score`
-- 当前切片中，结果项上的 `cursor` 与响应级 `next_cursor` 共享同一续页令牌语义；若当前页后仍有更多结果，`next_cursor` 应可直接复用最后一个结果项上的 `cursor`
+- 结果项上的 `cursor` 与响应级 `next_cursor` 共享同一续页令牌语义；若本页后仍有更多结果，`next_cursor` 应可直接复用最后一个结果项上的 `cursor`
 - `preview` 必须编码为结构化资源引用对象；该对象至少包含一个可直接取用、对客户端保持不透明的 `url`，并可按需附带 `handle`
 - `neighbor_context` 不在搜索结果列表中默认内联返回；对象详情与展开接口负责承接该信息
-- 若搜索结果返回 `score`，该字段必须编码为数值，并且只表达当前查询 / 当前后端返回的相对排序强弱；客户端不得将其视为跨查询、跨索引线或跨后端可直接比较的统一分值
+- 若搜索结果返回 `score`，该字段必须编码为数值，并且只表达本次查询 / 本次后端返回的相对排序强弱；客户端不得将其视为跨查询、跨索引线或跨后端可直接比较的统一分值
 - `debug` 载荷继续承接更细粒度的后端原始分数与技术诊断；公开 `score` 不能替代这些调试字段
-- 当前切片中，`debug` 载荷的稳定最小结构至少应支持：
+- `debug` 载荷的稳定最小结构至少应支持：
   - `backend`
   - `vector_type`
   - `content_types`
   - `vector_spaces`
-- 当前切片中，`debug.vector_type` 的正式公开值固定为 `multi_vector_late_interaction`
+- `debug.vector_type` 的正式公开值固定为 `multi_vector_late_interaction`
 - 搜索请求若同时携带多种查询输入、显式请求未启用内容类型，或命中已启用但未就绪的目标内容类型，应通过统一错误载荷返回失败
 - `unsupported_content_types` 的稳定最小编码应为对象数组；每项至少应支持：
   - `content_type`
@@ -148,6 +183,11 @@
 ## 非搜索控制面接口契约
 
 - 非搜索控制面接口族由 [008-ui-ux](../008-ui-ux/spec.md) 定义其存在与职责；本专题固定这些接口族的公开编码
+- Rust server 公开 App 基础入口包括：
+  - `GET /openapi.json`
+  - `GET /health`
+  - `GET /routes`
+- Rust server Web 基础入口包括 `GET /`；该入口返回 Web HTML，不作为 JSON envelope API，也不替代 `GET /openapi.json`
 - 若通过 HTTP 暴露，库创建接口的稳定入口应包括 `POST /libraries`
 - 若通过 HTTP 暴露，库管理接口的稳定入口还应包括：
   - `PATCH /libraries/{library_id}`
@@ -157,7 +197,7 @@
 - `POST /libraries` 的请求载荷至少应支持：
   - 可选 `library_id`
   - 可选 `display_name`
-- `PATCH /libraries/{library_id}` 的当前稳定变更载荷至少应支持：
+- `PATCH /libraries/{library_id}` 的稳定变更载荷至少应支持：
   - `display_name`
 - `PATCH /libraries/{library_id}` 不得允许客户端重写稳定 `library_id`
 - `POST /libraries` 不再承接旧 `name` 输入字段；若请求仍携带该字段，应通过统一错误载荷返回 `validation_failed`
@@ -166,7 +206,7 @@
   - 稳定 `id`
   - `display_name`
   - `lifecycle_state`
-- `lifecycle_state` 的当前稳定公开值至少包括：
+- `lifecycle_state` 的稳定公开值至少包括：
   - `active`
   - `archived`
 - 当 `lifecycle_state = archived` 时，库快照还应提供可选 `archived_at_ms`
@@ -179,7 +219,7 @@
   - `DELETE /libraries/{library_id}/source-roots/{source_root_id}`
 - 来源根资源的创建 / 变更载荷至少应支持：`root_path`、`enabled` 与 `rules`
 - 来源根资源快照至少应支持：`source_root_id`、`root_path`、`enabled`、`status`、`watch_state`、`coverage_summary` 与 `rules`
-- 当前阶段来源根的 `rules` 应至少能承接：
+- 来源根的 `rules` 应至少能承接：
   - `include_globs`
   - `exclude_globs`
   - `include_extensions`
@@ -191,7 +231,7 @@
   - `GET /settings/content-types`
   - `PATCH /settings/content-types`
   - `POST /settings/model-tests`
-  - `GET /runtime-health`
+  - `GET /runtime/status`
 - 若通过 HTTP 暴露，库级 model 接口的稳定入口应包括：
   - `GET /libraries/{library_id}/content-types`
   - `PATCH /libraries/{library_id}/content-types`
@@ -205,7 +245,7 @@
   - 可选 `base_url`
   - 可选 `readonly_reason`
   - 可选 `probe`
-- `GET /runtime-health` 的稳定最小返回应支持：
+- `GET /runtime/status` 的稳定最小返回应支持：
   - `app`
   - `qdrant`
   - `providers`
@@ -236,7 +276,7 @@
   - `content_types.{content_type}.model`
   - `content_types.{content_type}.vector_type`
 - `GET /settings/providers`、`PATCH /settings/providers/{provider_id}`、`GET /settings/content-types`、`PATCH /settings/content-types`、`GET /libraries/{library_id}/content-types` 与 `PATCH /libraries/{library_id}/content-types` 的 durable truth 固定为 merged config，而不是 `state.sqlite`
-- 这些 settings 接口在当前切片中默认只写 `${APP_RUNTIME_DIR}/runtime-config.json`；若写入后的 merged config 无效，接口必须整体拒绝而不是留下部分更新
+- 这些 settings 接口默认只写 `${APP_RUNTIME_DIR}/runtime-config.json`；若写入后的 merged config 无效，接口必须整体拒绝而不是留下部分更新
 - model catalog 条目至少应支持：
   - `provider_id`
   - `provider_kind`
@@ -247,7 +287,7 @@
   - `editable`
   - `status`
   - `message`
-- `resolved-content-models` 的稳定最小返回至少应覆盖当前全部正式内容类型
+- `resolved-content-models` 的稳定最小返回至少应覆盖全部正式内容类型
 - 每个 resolved content model 条目至少应支持：
   - `binding_source`
   - `content_type`
@@ -262,7 +302,7 @@
   - `status`
   - `message`
   - `last_probed_at`
-- 当前切片中，`resolved-content-models` 与 `POST /settings/model-tests` 返回中的 `binding_source` 正式公开值固定为：
+- `resolved-content-models` 与 `POST /settings/model-tests` 返回中的 `binding_source` 正式公开值固定为：
   - `global_content_type`
   - `library_content_type`
   - `settings_model_test`
@@ -277,8 +317,8 @@
   - 可选 `model_version`
   - 可选 `vector_type`
   - 可选 `retired_at_ms`
-- 当前切片中：
-  - active `vector_space` 应返回当前仍受配置与结构化真相共同承认的执行空间摘要
+- vector-space diagnostics 的稳定 lifecycle 摘要规则为：
+  - active `vector_space` 应返回仍受配置与结构化真相共同承认的执行空间摘要
   - retired `vector_space` 应返回仍处于延迟清理窗口内、尚未被后台维护循环成功清理的空间摘要
   - retired 条目若无法安全反推出旧绑定细节，可以只返回 `vector_space_id`、`lifecycle_state` 与 `retired_at_ms`
 - `POST /settings/model-tests` 的稳定输入应采用 `multipart/form-data`，至少支持：
@@ -293,8 +333,8 @@
   - `comparison_input_modality`
   - 文本比较输入时的 `comparison_text`
   - 文件比较输入时的单个 `comparison_file`
-- `provider_base_url` 仅适用于当前允许编辑连接信息的 provider；`local_sidecar` 这类 runtime-derived provider 不得把展示用连接地址重新回传为测试草稿
-- `input_modality` 必须受目标模型的 `embedding_capabilities.input_types` 约束；当前切片只要求承接 `text` 与 `image`
+- `provider_base_url` 仅适用于允许编辑连接信息的 provider；`local_sidecar` 这类 runtime-derived provider 不得把展示用连接地址重新回传为测试草稿
+- `input_modality` 必须受目标模型的 `embedding_capabilities.input_types` 约束；最低稳定支持范围要求承接 `text` 与 `image`
 - `POST /settings/model-tests` 的成功响应至少应支持：
   - `resolved_model`
   - `input_modality`
@@ -312,17 +352,23 @@
   - `input_summary`
   - `similarity_to_primary`
 - `POST /settings/model-tests` 是纯诊断接口，不创建 job，不修改已持久化的 provider config、全局 `content_types` 或库级内容类型覆盖
-- `GET /libraries/{library_id}/sources` 当前阶段至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
-- 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与当前路径或等价来源定位摘要
+- `GET /libraries/{library_id}/sources` 至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
+- 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与路径或等价来源定位摘要
 - 来源清单项可以按需附带代表性视觉对象摘要与稳定 `preview` 资源引用对象，用于来源浏览工作区中的预览优先详情面；这些附加字段不得把来源清单提升为独立 source detail 协议
+- 若通过 HTTP 暴露，库级视频来源清单接口的稳定入口应包括 `GET /libraries/{library_id}/video-sources`
+- 若通过 HTTP 暴露，视频来源预览资源的稳定入口应包括 `GET /libraries/{library_id}/video-sources/{source_id}/preview`
 - 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
 - 若通过 HTTP 暴露，视觉对象预览资源的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}/preview`
 - 视觉对象详情响应至少应返回目标对象的稳定详情快照、稳定 `preview` 资源引用对象，并可附带 `neighbor_context`
 - 导入、刷新、重扫、重建、清理、维护，以及任务取消 / 重试 / 恢复等动作型接口，应采用显式动作载荷，而不是通过隐式读写触发后台执行
-- 若通过 HTTP 暴露，当前切片的正式任务动作入口应至少包括：
+- 若通过 HTTP 暴露，任务读取入口至少应包括：
+  - `GET /jobs`
+  - `GET /jobs/{job_id}`
+- 若通过 HTTP 暴露，正式任务动作入口至少应包括：
   - `POST /jobs/{job_id}/cancel`
   - `POST /jobs/{job_id}/resume`
-- 若通过 HTTP 暴露，当前正式导入动作入口应包括 `POST /libraries/{library_id}/imports`
+  - `POST /jobs/{job_id}/retry`
+- 若通过 HTTP 暴露，正式导入动作入口应包括 `POST /libraries/{library_id}/imports`
 - 若通过 HTTP 暴露，库级来源管理动作入口的稳定入口应包括：
   - `POST /libraries/{library_id}/refresh`
   - `POST /libraries/{library_id}/rescan`
@@ -331,9 +377,9 @@
 - 若通过 HTTP 暴露，来源根级来源管理动作入口的稳定入口应包括：
   - `POST /libraries/{library_id}/source-roots/{source_root_id}/refresh`
   - `POST /libraries/{library_id}/source-roots/{source_root_id}/rescan`
-- 若通过 HTTP 暴露，库级维护动作入口可以采用显式动作载荷；当前切片的稳定入口应包括：
+- 若通过 HTTP 暴露，库级维护动作入口可以采用显式动作载荷；稳定入口应包括：
   - `POST /libraries/{library_id}/maintenance`
-- `POST /libraries/{library_id}/maintenance` 当前切片至少应支持：
+- `POST /libraries/{library_id}/maintenance` 至少应支持：
   - `cleanup_retired_vector_spaces`
 - `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
 - 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/images`
@@ -342,6 +388,10 @@
 - `POST /libraries/{library_id}/query-assets/images` 的首个稳定输入变体是单图片上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
 - `POST /libraries/{library_id}/query-assets/videos` 的首个稳定输入变体是单视频上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
 - `POST /libraries/{library_id}/query-assets/documents` 的首个稳定输入变体是单文档上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
+- 若通过 HTTP 暴露，临时查询资产预览资源的稳定入口应包括：
+  - `GET /libraries/{library_id}/query-assets/images/{temp_asset_id}/preview`
+  - `GET /libraries/{library_id}/query-assets/videos/{temp_asset_id}/preview`
+  - `GET /libraries/{library_id}/query-assets/documents/{temp_asset_id}/preview`
 - 临时查询图片上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
 - 临时查询视频上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
 - 临时查询文档上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
@@ -356,28 +406,28 @@
   - `reason_code`
   - `message`
 - 任务快照载荷至少应包含：`job_id`、`kind`、`status`、`phase`、`progress`、`cancelable`、`retryable`、`current_attempt`
-- 当任务由显式 retry 重新排队时，任务快照还应能表达其 retry lineage；当前切片中至少应暴露可选 `retried_from_job_id`
+- 当任务由显式 retry 重新排队时，任务快照还应能表达其 retry lineage；至少应暴露可选 `retried_from_job_id`
 - `POST /jobs/{job_id}/cancel` 的成功响应可以直接返回更新后的任务快照
 - `POST /jobs/{job_id}/resume` 的成功响应可以直接返回被重新打开的同一 job 快照
 - `POST /jobs/{job_id}/retry` 的成功响应可以直接返回新排队任务的快照
-- 当前切片中，`POST /jobs/{job_id}/cancel` 至少应支持：
+- `POST /jobs/{job_id}/cancel` 至少应支持：
   - 对 queued 任务立即转入终态 `canceled`
   - 对 running 任务记录 cancel request，并在下一个安全边界进入终态 `canceled`
-- 当前切片中，已进入终态或本身不可取消的任务，`POST /jobs/{job_id}/cancel` 应通过统一错误载荷返回 `conflict`
-- 当前切片中，`POST /jobs/{job_id}/retry` 至少应支持：
+- 已进入终态或本身不可取消的任务，`POST /jobs/{job_id}/cancel` 应通过统一错误载荷返回 `conflict`
+- `POST /jobs/{job_id}/retry` 至少应支持：
   - 对 terminal `failed` / `canceled` 且 `retryable = true` 的任务，显式重新排队一个新任务
   - 原任务保持历史终态，不因为 retry 被重新打开
-- 当前切片中，`POST /jobs/{job_id}/resume` 至少应支持：
+- `POST /jobs/{job_id}/resume` 至少应支持：
   - 对 terminal `failed` / `canceled` 且仍保留 replayable request 的任务，复用同一 `job_id` 进入新的 attempt
   - resume 成功后，返回快照中的 `job_id` 必须保持不变，而 `current_attempt.attempt` 必须递增
-- 当前切片中的 retry 成功响应至少应让调用方知道：
+- retry 成功响应至少应让调用方知道：
   - 新任务是一次显式 retry 产物
-  - 新任务当前 attempt 序号已经相对原任务递增
+  - 新任务的 attempt 序号已经相对原任务递增
   - 新任务来源于哪个历史 job
-- 当前切片中，`POST /jobs/{job_id}/retry` 不要求覆盖所有任务种类；至少应覆盖具有稳定重放语义的手动 import、手动来源管理与维护任务
-- 当前切片中，`POST /jobs/{job_id}/resume` 不要求覆盖所有任务种类；至少应覆盖具有稳定重放语义且仍保留 replayable request 的手动 import、手动来源管理与维护任务
-- 当前切片中，非终态任务、`completed` 任务、当前无法继续的任务，或已失去 replayable request 的 resume 请求，`POST /jobs/{job_id}/resume` 应通过统一错误载荷返回 `conflict`
-- 当前切片中，非终态任务、`completed` 任务、`retryable = false` 的任务，或当前已无法重放的 retry 请求，`POST /jobs/{job_id}/retry` 应通过统一错误载荷返回 `conflict`
+- `POST /jobs/{job_id}/retry` 不要求覆盖所有任务种类；至少应覆盖具有稳定重放语义的手动 import、手动来源管理与维护任务
+- `POST /jobs/{job_id}/resume` 不要求覆盖所有任务种类；至少应覆盖具有稳定重放语义且仍保留 replayable request 的手动 import、手动来源管理与维护任务
+- 非终态任务、`completed` 任务、无法继续的任务，或已失去 replayable request 的 resume 请求，`POST /jobs/{job_id}/resume` 应通过统一错误载荷返回 `conflict`
+- 非终态任务、`completed` 任务、`retryable = false` 的任务，或已无法重放的 retry 请求，`POST /jobs/{job_id}/retry` 应通过统一错误载荷返回 `conflict`
 - 运行时健康快照载荷至少应包含：`runtime_kind`、`status`、`last_probe_at`、`diagnostics`
 - 管理列表型响应与搜索分页一样复用 `next_cursor` 语义，但不要求与搜索结果使用相同的列表字段名称
 - 本专题不强制控制面接口必须采用 HTTP 路由；若经由 IPC 或其他公开边界暴露，其请求 / 响应 payload 仍应复用本专题定义的稳定形状
@@ -385,20 +435,22 @@
 ## Rust 主服务与 Python sidecar 的稳定协议
 
 - Rust 主服务与 Python sidecar 之间的稳定跨进程协议固定为 HTTP/JSON
+- sidecar HTTP 契约是 Rust 主服务内部消费的跨进程协议，不纳入 Rust server 公开 App API 的 OpenAPI contract
+- 若未来需要 sidecar machine contract，应通过单独规格明确，而不是默认混入 `GET /openapi.json`
 - sidecar HTTP 契约至少覆盖以下协议面：
   - 健康探测
   - 能力 / 可用性探测
   - 推理 / 编码请求
   - 失败、超时与不可用返回
-- 当前阶段 sidecar 的稳定入口至少包括：
+- sidecar 的稳定入口至少包括：
   - `GET /health`
   - `GET /capabilities`
   - `POST /embed`
 - 健康探测响应必须返回健康快照载荷，至少表达：可用 / 降级 / 不可用状态、最近一次探测结果与诊断摘要
-- 能力 / 可用性探测响应必须能表达：声明能力、当前可用能力裁剪结果，以及是否可服务目标操作
+- 能力 / 可用性探测响应必须能表达：声明能力、运行时可用能力裁剪结果，以及是否可服务目标操作
 - 能力 / 可用性探测响应必须显式区分：
   - `embedding_capabilities`：模型原生向量能力事实
-  - `execution_input_types`：当前执行面可承接的查询输入
+  - `execution_input_types`：执行面可承接的查询输入
   - `runtime_adapters`：工程增强后的输入适配能力
 - `execution_input_types` 必须由 `operations + runtime_adapters` 派生，而不是由 `embedding_capabilities` 反推
 - `GET /capabilities` 中的 `operations` 应返回结构化操作数组；每项至少应支持：
@@ -406,7 +458,7 @@
   - `supported`
   - `input_kind`
   - `model`
-- `operations` 条目不得再暴露旧 `target_index_lines` 字段；调用方应通过 `operation_kind` 与顶层 `embedding_capabilities.vector_types` 理解当前执行面
+- `operations` 条目不得再暴露旧 `target_index_lines` 字段；调用方应通过 `operation_kind` 与顶层 `embedding_capabilities.vector_types` 理解执行面
 - 若某个能力响应项可用于 Settings 模型测试，其可测试模态必须由 `embedding_capabilities.input_types` 推导，而不是由工程增强操作列表反推
 - 推理 / 编码请求至少应显式携带：
   - `operation_kind`
@@ -414,25 +466,25 @@
   - 已解析提供方选择摘要或等价执行上下文
   - 与目标索引线或目标输出相关的最小上下文
   - 可选 `debug`
-- 当前阶段 `POST /embed` 至少应支持以下 `operation_kind`：
+- `POST /embed` 至少应支持以下 `operation_kind`：
   - `query_embedding`，用于承接文本查询编码；其输入至少应能表达一个或多个查询文本，以及与目标索引线相关的最小上下文
   - `image_query_embedding`，用于承接图片查询编码；其输入至少应能表达一个或多个本地图片引用，且在需要时能够携带视觉单元级 `locator`
   - `video_query_embedding`，用于承接视频查询编码；其输入至少应能表达一个或多个本地视频引用，并在需要时能够携带视频时间范围 `locator`
   - `document_query_embedding`，用于承接文档查询编码；其输入至少应能表达一个或多个本地文档引用，并在需要时能够携带文档页范围 `locator`
-  - `document_embedding`，用于承接当前阶段 PDF 页图或图片对象的编码；其输入至少应能表达一个或多个本地文件引用，以及与目标索引线相关的最小上下文
-- `image_query_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达库内 `document_page` 作为查询图片的路径
-- `video_query_embedding` 的单项输入在需要时必须能够携带视频时间范围 `locator`；当前阶段至少应支持用 `start_ms` / `end_ms` 表达整段视频中的目标片段
-- `document_query_embedding` 的单项输入在需要时必须能够携带文档页范围 `locator`；当前阶段至少应支持用 `start_page` / `end_page` 表达整份 PDF 中的目标片段
-- `document_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；当前阶段至少应支持用页定位符表达 PDF 的目标页
-- 当前实现允许 `document_embedding` 承接批量输入，但服务端可以基于运行时批大小上限拒绝过大的 `inputs.documents`
+  - `document_embedding`，用于承接 PDF 页图或图片对象的编码；其输入至少应能表达一个或多个本地文件引用，以及与目标索引线相关的最小上下文
+- `image_query_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；至少应支持用页定位符表达库内 `document_page` 作为查询图片的路径
+- `video_query_embedding` 的单项输入在需要时必须能够携带视频时间范围 `locator`；至少应支持用 `start_ms` / `end_ms` 表达整段视频中的目标片段
+- `document_query_embedding` 的单项输入在需要时必须能够携带文档页范围 `locator`；至少应支持用 `start_page` / `end_page` 表达整份 PDF 中的目标片段
+- `document_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；至少应支持用页定位符表达 PDF 的目标页
+- `document_embedding` 可以承接批量输入，但服务端可以基于运行时批大小上限拒绝过大的 `inputs.documents`
 - 若 `document_embedding` 因批大小上限拒绝请求，应继续复用统一错误载荷并返回 `validation_failed`
 - `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了视觉单元级 `locator`，响应应能返回与该输入对应的定位摘要
 - `document_embedding` 的批大小限制属于实现配置而不是稳定协议契约；无论是否触发该限制，`POST /embed` 的成功响应 shape 都不应改变
-- `video_query_embedding` 与 `document_query_embedding` 在当前切片中属于 runtime adapter operation；它们不应被上游误判为模型原生输入类型
+- `video_query_embedding` 与 `document_query_embedding` 属于 runtime adapter operation；它们不应被上游误判为模型原生输入类型
 - `GET /capabilities` 中的 `runtime_adapters` 应使用命名 adapter 列表，例如：
   - `document_query_via_page_images`
   - `video_query_via_frame_images`
-- 当前切片中的批处理、staging 与 active 切换属于内部执行实现；app 对外公开 API shape 不应因此改变
+- 批处理、staging 与 active 切换属于内部执行实现；app 对外公开 API shape 不应因此改变
 - 推理 / 编码成功响应必须返回与 `operation_kind` 对应的结构化 `data`，例如向量输出、派生结果描述或媒体处理摘要；不得依赖未文档化的 sidecar 私有字段
 - sidecar 的超时、不可达、能力不满足与内部失败，必须复用稳定错误载荷与错误码族表达，而不是只依赖传输层异常
 - sidecar 协议只承接公开输入 / 输出 / 诊断契约；模型加载、驻留、容量逐出与运行时托管语义由 [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义
@@ -448,4 +500,7 @@
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务执行、任务恢复、运行时健康与 sidecar 托管语义
 - [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义结构化记录、任务记录、检索命名空间与文件载荷的物理落点
 - [008-ui-ux](../008-ui-ux/spec.md) 定义搜索工作区、管理工作区、控制面入口与应用级体验边界
-- [140-library-source-management](../140-library-source-management/spec.md) 定义来源根生命周期、来源规则、来源清单与当前阶段来源管理能力域
+- [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md) 定义 `scripts/local/*` 的本地运维自动化边界，它们不属于公开 App API 或产品 CLI surface
+- [020-frontend-architecture](../020-frontend-architecture/spec.md) 定义前端实现组织、Vite 开发代理与 UI 构建约束，不承接公开 API payload 事实源
+- [030-cli](../030-cli/spec.md) 定义 `faus` 产品 CLI 体验与输出规则；CLI 消费本专题和 OpenAPI contract，不复制 HTTP payload 定义
+- [140-library-source-management](../140-library-source-management/spec.md) 定义来源根生命周期、来源规则、来源清单与来源管理能力域
