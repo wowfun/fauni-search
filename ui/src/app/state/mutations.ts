@@ -112,6 +112,7 @@ export function resetInventoryState() {
   state.inventorySummary = emptyInventorySummary();
   state.selectedInventorySourceId = "";
   state.inventoryDetailSheetOpen = false;
+  state.inventoryImportOpen = false;
   state.inventorySourceManagementOpen = false;
   state.inventoryLibraryMaintenanceOpen = false;
 }
@@ -128,7 +129,11 @@ export function resetSourceRootEditor() {
 }
 
 export function keepSearchPreparationDisclosureOpen() {
-  state.searchPreparationDisclosureOpen = true;
+  state.inventoryImportOpen = true;
+}
+
+export function setInventoryImportOpen(open: boolean) {
+  state.inventoryImportOpen = open;
 }
 
 export function setInventorySourceManagementOpen(open: boolean) {

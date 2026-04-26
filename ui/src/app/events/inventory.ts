@@ -17,7 +17,6 @@ import {
   isTerminalJobStatus,
   JOB_POLL_INTERVAL_MS,
   JOB_POLL_TIMEOUT_MS,
-  keepSearchPreparationDisclosureOpen,
   libraryDisplayName,
   libraryIsArchived,
   normalizeContentTypeBindingForProvider,
@@ -39,6 +38,7 @@ import {
   resetSearchFilters,
   resetSearchResultLibraryFocus,
   resetSourceRootEditor,
+  setInventoryImportOpen,
   setInventoryLibraryMaintenanceOpen,
   setInventorySourceManagementOpen,
   setSourceRootAdvancedRulesOpen,
@@ -129,6 +129,13 @@ export function onToggleInventorySourceManagement() {
   renderWorkspace();
 }
 
+export function onToggleInventoryImport() {
+  setInventoryImportOpen(!state.inventoryImportOpen);
+  state.globalError = null;
+  state.statusMessage = null;
+  renderWorkspace();
+}
+
 export function onToggleInventoryLibraryMaintenance() {
   setInventoryLibraryMaintenanceOpen(!state.inventoryLibraryMaintenanceOpen);
   state.globalError = null;
@@ -196,7 +203,7 @@ export async function onSubmitSourceRoot(event) {
   }
 
   try {
-    keepSearchPreparationDisclosureOpen();
+    setInventorySourceManagementOpen(true);
     state.globalError = null;
     state.statusMessage = state.editingSourceRootId
       ? "正在保存来源根..."
@@ -236,14 +243,9 @@ export function onEditSourceRoot(event) {
     return;
   }
   populateSourceRootEditor(sourceRoot);
-  keepSearchPreparationDisclosureOpen();
   state.globalError = null;
   state.statusMessage = null;
   renderWorkspace();
-}
-
-export function onSearchPreparationDisclosureToggle(event) {
-  state.searchPreparationDisclosureOpen = event.currentTarget.open;
 }
 
 export async function onRefreshLibrarySources(event?) {
@@ -252,9 +254,6 @@ export async function onRefreshLibrarySources(event?) {
   }
 
   try {
-    if (event) {
-      keepSearchPreparationDisclosureOpen();
-    }
     await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/refresh`,
       "正在执行库级刷新..."
@@ -272,9 +271,6 @@ export async function onRescanLibrarySources(event?) {
   }
 
   try {
-    if (event) {
-      keepSearchPreparationDisclosureOpen();
-    }
     await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/rescan`,
       "正在执行库级重扫..."
@@ -310,7 +306,7 @@ export async function onRefreshSourceRoot(event) {
 
   const sourceRootId = event.currentTarget.dataset.sourceRootRefreshId;
   try {
-    keepSearchPreparationDisclosureOpen();
+    setInventorySourceManagementOpen(true);
     await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}/refresh`,
       `正在 refresh ${sourceRootDisplayName(sourceRootId)}...`
@@ -329,7 +325,7 @@ export async function onRescanSourceRoot(event) {
 
   const sourceRootId = event.currentTarget.dataset.sourceRootRescanId;
   try {
-    keepSearchPreparationDisclosureOpen();
+    setInventorySourceManagementOpen(true);
     await triggerJobBackedAction<SourceActionData>(
       `/libraries/${state.selectedLibraryId}/source-roots/${encodeURIComponent(sourceRootId)}/rescan`,
       `正在 rescan ${sourceRootDisplayName(sourceRootId)}...`
@@ -353,7 +349,7 @@ export async function onToggleSourceRoot(event) {
   }
 
   try {
-    keepSearchPreparationDisclosureOpen();
+    setInventorySourceManagementOpen(true);
     state.globalError = null;
     state.statusMessage = sourceRoot.enabled ? "正在停用来源根..." : "正在启用来源根...";
     renderWorkspace();
@@ -380,7 +376,7 @@ export async function onDeleteSourceRoot(event) {
 
   const sourceRootId = event.currentTarget.dataset.sourceRootDeleteId;
   try {
-    keepSearchPreparationDisclosureOpen();
+    setInventorySourceManagementOpen(true);
     state.globalError = null;
     state.statusMessage = `正在删除 ${sourceRootDisplayName(sourceRootId)}...`;
     renderWorkspace();
@@ -406,7 +402,7 @@ export async function onImportPaths(event) {
     return;
   }
 
-  keepSearchPreparationDisclosureOpen();
+  setInventoryImportOpen(true);
   const textarea = document.querySelector<HTMLTextAreaElement>("#import-paths");
   state.importPathsDraft = textarea?.value ?? "";
   const paths = parseImportPaths(state.importPathsDraft);

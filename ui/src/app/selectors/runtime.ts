@@ -99,14 +99,52 @@ export function shellRuntimeStatusLabel(status: string) {
   return "待确认";
 }
 
+export function globalJobsProgressSummary() {
+  const activeJobs = state.globalJobs.filter(
+    (job) => job.status === "queued" || job.status === "running"
+  );
+  if (!activeJobs.length) {
+    return null;
+  }
+
+  let completed = 0;
+  let total = 0;
+  const units = new Set<string>();
+
+  activeJobs.forEach((job) => {
+    if (job.progress.total > 0) {
+      total += job.progress.total;
+      completed += Math.min(Math.max(job.progress.completed, 0), job.progress.total);
+      if (job.progress.unit) {
+        units.add(job.progress.unit);
+      }
+    }
+  });
+
+  const percent = total > 0 ? Math.round((completed / total) * 100) : null;
+  const unit = units.size === 1 ? Array.from(units)[0] : "";
+
+  return {
+    count: activeJobs.length,
+    completed,
+    total,
+    percent,
+    unit,
+    label: total > 0 ? (unit ? `${completed}/${total} ${unit}` : `${percent}%`) : "等待开始",
+    summary: `所有库有 ${activeJobs.length} 个后台任务正在进行。`,
+  };
+}
+
 export function currentStatusCapsule(library: LibrarySnapshot | null) {
   const runtimeOverview = runtimeHealthOverview();
+  const jobsProgress = globalJobsProgressSummary();
 
   if (state.globalError) {
     return {
       label: "部分受限",
       pillClass: "error",
       summary: state.globalError.message,
+      ...(jobsProgress ? { progress: jobsProgress } : {}),
     };
   }
   if (runtimeOverview && (runtimeOverview.processIssues.length || runtimeOverview.providerIssues.length)) {
@@ -114,6 +152,15 @@ export function currentStatusCapsule(library: LibrarySnapshot | null) {
       label: "部分受限",
       pillClass: "error",
       summary: runtimeOverview.summary,
+      ...(jobsProgress ? { progress: jobsProgress } : {}),
+    };
+  }
+  if (jobsProgress) {
+    return {
+      label: `准备中 · ${jobsProgress.count}`,
+      pillClass: "pending",
+      summary: jobsProgress.summary,
+      progress: jobsProgress,
     };
   }
   if (!library) {

@@ -294,10 +294,5 @@ export function shouldRenderSearchNextStepDock(library: LibrarySnapshot | null) 
     return true;
   }
 
-  return (
-    libraryNeedsPreparation(library) ||
-    currentSearchScopeStageState(library).nextAction === "jobs" ||
-    state.searchPreparationDisclosureOpen ||
-    Boolean(state.editingSourceRootId)
-  );
+  return libraryNeedsPreparation(library) || currentSearchScopeStageState(library).nextAction === "jobs";
 }

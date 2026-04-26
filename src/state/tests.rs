@@ -887,6 +887,61 @@ fn finalize_import_job_failed_with_activations_keeps_structured_state_and_active
 }
 
 #[test]
+fn finalize_import_job_preserves_visual_unit_progress_granularity() {
+    let mut state = test_state();
+    let library = state
+        .create_library(CreateLibraryRequest {
+            library_id: None,
+            display_name: None,
+            name: "import-progress-granularity".to_string(),
+        })
+        .unwrap();
+
+    let image_path = unique_test_file_path("import-progress-granularity.png");
+    fs::write(&image_path, b"png").unwrap();
+
+    let prepared = state
+        .prepare_import(
+            &library.id,
+            ImportPathsRequest {
+                paths: vec![image_path.to_string_lossy().to_string()],
+            },
+        )
+        .unwrap();
+    let queued = state.queue_import(&prepared).unwrap();
+    let job_id = queued.job_handle.clone().unwrap();
+
+    state.update_job_progress_snapshot(
+        &job_id,
+        "running",
+        "stage_write",
+        13,
+        57,
+        "visual_unit",
+        "Writing batch 13/57 into staged vector-space storage.",
+    );
+    state
+        .finalize_import_job(
+            &job_id,
+            prepared,
+            ImportJobOutcome::completed(
+                "Accepted path; indexed visual units.".to_string(),
+                1,
+                BTreeSet::new(),
+            ),
+        )
+        .unwrap();
+
+    let job = state.jobs.get(&job_id).unwrap();
+    assert_eq!(job.snapshot.status, "completed");
+    assert_eq!(job.snapshot.progress.completed, 57);
+    assert_eq!(job.snapshot.progress.total, 57);
+    assert_eq!(job.snapshot.progress.unit, "visual_unit");
+
+    let _ = fs::remove_file(image_path);
+}
+
+#[test]
 fn request_job_cancellation_marks_queued_import_job_as_canceled() {
     let mut state = test_state();
     let library = state

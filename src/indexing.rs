@@ -21,12 +21,14 @@ pub(crate) async fn index_visual_units(
     resolved_model: &ResolvedExecutionModelSelection,
     state: SharedState,
     job_id: &str,
-) -> Result<(), IndexingError> {
+) -> Result<usize, IndexingError> {
     if prepared.visual_units.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let batch_items = index_embed_batch_items();
     let total_batches = batch_count(prepared.visual_units.len(), batch_items);
+    let progress_total = prepared.visual_units.len();
+    let mut completed_visual_units = 0_usize;
     let stage_collection_name =
         staging_vector_space_collection_name(library_id, &resolved_model.vector_space_id, job_id);
     let write_plan = resolve_qdrant_namespace_write_plan(
@@ -57,11 +59,13 @@ pub(crate) async fn index_visual_units(
     if stage_initialized && !prepared.stale_point_ids.is_empty() {
         {
             let mut state = state.write().await;
-            state.update_job_snapshot(
+            state.update_job_progress_snapshot(
                 job_id,
                 "running",
                 "stage_write",
                 0,
+                progress_total,
+                "visual_unit",
                 format!(
                     "Deleting {} stale point(s) from staged vector-space storage.",
                     prepared.stale_point_ids.len()
@@ -83,11 +87,13 @@ pub(crate) async fn index_visual_units(
     for (batch_index, visual_unit_batch) in prepared.visual_units.chunks(batch_items).enumerate() {
         {
             let mut state = state.write().await;
-            state.update_job_snapshot(
+            state.update_job_progress_snapshot(
                 job_id,
                 "running",
                 "encode",
-                0,
+                completed_visual_units,
+                progress_total,
+                "visual_unit",
                 format!(
                     "Encoding batch {}/{} ({} visual unit(s)) for staged vector-space indexing.",
                     batch_index + 1,
@@ -114,11 +120,13 @@ pub(crate) async fn index_visual_units(
 
         {
             let mut state = state.write().await;
-            state.update_job_snapshot(
+            state.update_job_progress_snapshot(
                 job_id,
                 "running",
                 "stage_write",
-                0,
+                completed_visual_units,
+                progress_total,
+                "visual_unit",
                 format!(
                     "Writing batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
                     batch_index + 1,
@@ -154,6 +162,25 @@ pub(crate) async fn index_visual_units(
                 message,
             });
         }
+
+        completed_visual_units += visual_unit_batch.len();
+        {
+            let mut state = state.write().await;
+            state.update_job_progress_snapshot(
+                job_id,
+                "running",
+                "stage_write",
+                completed_visual_units,
+                progress_total,
+                "visual_unit",
+                format!(
+                    "Wrote batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
+                    batch_index + 1,
+                    total_batches,
+                    visual_unit_batch.len()
+                ),
+            );
+        }
     }
 
     if !stage_initialized {
@@ -171,6 +198,19 @@ pub(crate) async fn index_visual_units(
         });
     }
 
+    {
+        let mut state = state.write().await;
+        state.update_job_progress_snapshot(
+            job_id,
+            "running",
+            "activated",
+            completed_visual_units,
+            progress_total,
+            "visual_unit",
+            "Activating staged vector-space storage.",
+        );
+    }
+
     if let Err(message) = switch_qdrant_active_alias(&write_plan).await {
         best_effort_delete_qdrant_collection(&stage_collection_name).await;
         return Err(IndexingError {
@@ -179,7 +219,7 @@ pub(crate) async fn index_visual_units(
         });
     }
     best_effort_cleanup_retired_stage_collections(&write_plan).await;
-    Ok(())
+    Ok(completed_visual_units)
 }
 
 pub(crate) async fn index_source_action_visual_units(
@@ -189,9 +229,11 @@ pub(crate) async fn index_source_action_visual_units(
     resolved_model: &ResolvedExecutionModelSelection,
     state: SharedState,
     job_id: &str,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let batch_items = index_embed_batch_items();
     let total_batches = batch_count(prepared.visual_units_to_index.len(), batch_items);
+    let progress_total = prepared.visual_units_to_index.len();
+    let mut completed_visual_units = 0_usize;
     let stage_collection_name =
         staging_vector_space_collection_name(library_id, &resolved_model.vector_space_id, job_id);
     let write_plan = resolve_qdrant_namespace_write_plan(
@@ -213,11 +255,13 @@ pub(crate) async fn index_source_action_visual_units(
     if stage_initialized && !prepared.stale_point_ids.is_empty() {
         {
             let mut state = state.write().await;
-            state.update_job_snapshot(
+            state.update_job_progress_snapshot(
                 job_id,
                 "running",
                 "stage_write",
                 0,
+                progress_total,
+                "visual_unit",
                 format!(
                     "Deleting {} stale point(s) from staged vector-space storage.",
                     prepared.stale_point_ids.len()
@@ -239,11 +283,13 @@ pub(crate) async fn index_source_action_visual_units(
     {
         {
             let mut state = state.write().await;
-            state.update_job_snapshot(
+            state.update_job_progress_snapshot(
                 job_id,
                 "running",
                 "encode",
-                0,
+                completed_visual_units,
+                progress_total,
+                "visual_unit",
                 format!(
                     "Encoding batch {}/{} ({} visual unit(s)) for {}.",
                     batch_index + 1,
@@ -271,11 +317,13 @@ pub(crate) async fn index_source_action_visual_units(
 
         {
             let mut state = state.write().await;
-            state.update_job_snapshot(
+            state.update_job_progress_snapshot(
                 job_id,
                 "running",
                 "stage_write",
-                0,
+                completed_visual_units,
+                progress_total,
+                "visual_unit",
                 format!(
                     "Writing batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
                     batch_index + 1,
@@ -301,19 +349,50 @@ pub(crate) async fn index_source_action_visual_units(
             best_effort_delete_qdrant_collection(&stage_collection_name).await;
             return Err(message);
         }
+
+        completed_visual_units += visual_unit_batch.len();
+        {
+            let mut state = state.write().await;
+            state.update_job_progress_snapshot(
+                job_id,
+                "running",
+                "stage_write",
+                completed_visual_units,
+                progress_total,
+                "visual_unit",
+                format!(
+                    "Wrote batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
+                    batch_index + 1,
+                    total_batches,
+                    visual_unit_batch.len()
+                ),
+            );
+        }
     }
 
     if !stage_initialized {
-        return Ok(());
+        return Ok(0);
     }
 
     validate_qdrant_collection(&stage_collection_name).await?;
+    {
+        let mut state = state.write().await;
+        state.update_job_progress_snapshot(
+            job_id,
+            "running",
+            "activated",
+            completed_visual_units,
+            progress_total,
+            "visual_unit",
+            "Activating staged vector-space storage.",
+        );
+    }
     if let Err(message) = switch_qdrant_active_alias(&write_plan).await {
         best_effort_delete_qdrant_collection(&stage_collection_name).await;
         return Err(message);
     }
     best_effort_cleanup_retired_stage_collections(&write_plan).await;
-    Ok(())
+    Ok(completed_visual_units)
 }
 
 pub(crate) fn index_embed_batch_items() -> usize {

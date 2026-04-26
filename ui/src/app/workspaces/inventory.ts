@@ -30,6 +30,7 @@ import {
   renderUiTag,
 } from "../render/shared/primitives";
 import { renderInventoryActionRow } from "../render/shared/inventory";
+import { renderImportReceipt } from "../render/shared/status";
 import {
   renderSourceRootEditorForm,
   renderSourceRootList,
@@ -87,6 +88,37 @@ export function inventoryFilterSummaryItems() {
     items.push(sourceStatusDisplayName(state.inventoryFilters.sourceStatus));
   }
   return items;
+}
+
+export function renderInventoryImportPanel(library: LibrarySnapshot | null) {
+  if (!state.inventoryImportOpen) {
+    return "";
+  }
+
+  return `
+    <section class="inventory-import-panel" data-testid="inventory-import-panel">
+      <div class="inventory-import-head">
+        <div>
+          <p class="eyebrow">导入</p>
+          <h3>导入路径</h3>
+        </div>
+      </div>
+      <form id="import-form" class="stack-form inventory-import-form" data-testid="import-form">
+        <label>
+          <span>本地路径</span>
+          <textarea
+            id="import-paths"
+            data-testid="import-paths-input"
+            rows="5"
+            placeholder="/path/to/file.pdf&#10;/path/to/image.png"
+            ${library ? "" : "disabled"}
+          >${escapeHtml(state.importPathsDraft)}</textarea>
+        </label>
+        ${renderUiButton("提交导入", { type: "submit", testId: "import-submit-button", disabled: !library })}
+      </form>
+      ${renderImportReceipt()}
+    </section>
+  `;
 }
 
 export function inventoryRepresentativeKind(source: SourceInventoryItem) {
@@ -438,6 +470,7 @@ export function renderInventoryWorkspace(library: LibrarySnapshot | null) {
                   : renderUiTag("当前显示全部来源", "ready")
               }
             </div>
+            ${renderInventoryImportPanel(library)}
             <section class="inventory-source-management-strip" data-testid="inventory-source-management-strip">
               <div class="inventory-source-management-summary" data-testid="inventory-source-management-summary">
                 <div>

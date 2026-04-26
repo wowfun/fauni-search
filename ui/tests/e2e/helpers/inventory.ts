@@ -194,7 +194,7 @@ export function registerSourceManagementScenarios() {
     }
   });
 
-  test("search source preparation keeps its disclosure shell and folds advanced rules by default", async ({
+  test("inventory source preparation keeps its folded editor and advanced rules by default", async ({
     page,
   }) => {
     const fixtures = createTempSourceManagementFixtures();
@@ -203,8 +203,8 @@ export function registerSourceManagementScenarios() {
       const libraryId = await currentLibraryId(page);
 
       await openSourcePreparationPanel(page);
-      await expect(page.getByTestId("source-root-management")).toBeVisible();
-      await expect(page.getByTestId("inventory-source-controls")).toHaveCount(0);
+      await expect(page.getByTestId("inventory-source-management-panel")).toBeVisible();
+      await expect(page.getByTestId("inventory-source-controls")).toBeVisible();
       await expect(page.getByTestId("source-root-advanced-rules-panel")).toHaveCount(0);
       await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
       await openSourceRootAdvancedRules(page);
@@ -219,7 +219,6 @@ export function registerSourceManagementScenarios() {
       await rootCard.locator("[data-source-root-refresh-id]").click();
       await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
 
-      await expect(page.getByTestId("source-root-form")).toBeVisible();
       await expect(rootCard).toContainText("最近动作：refresh");
       await rootCard.locator("[data-source-root-edit-id]").click();
       await expect(page.getByTestId("source-root-advanced-rules-panel")).toBeVisible();

@@ -76,6 +76,7 @@ export function emptyContentTypes(): ContentTypesPayload {
 
 export const state: AppState = {
   libraries: [],
+  globalJobs: [],
   jobs: [],
   videoSources: [],
   sourceRoots: [],
@@ -117,10 +118,10 @@ export const state: AppState = {
   createLibraryPopoverOpen: false,
   manageLibraryPopoverOpen: false,
   searchFiltersPanelOpen: false,
-  searchPreparationDisclosureOpen: false,
   settingsDiagnosticsJobsOpen: false,
   searchDetailSheetOpen: false,
   inventoryDetailSheetOpen: false,
+  inventoryImportOpen: false,
   inventorySourceManagementOpen: false,
   inventoryLibraryMaintenanceOpen: false,
   inventorySourceRootEditorOpen: false,

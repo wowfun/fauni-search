@@ -35,6 +35,7 @@ import type {
 
 export interface AppState {
   libraries: LibrarySnapshot[];
+  globalJobs: JobSnapshot[];
   jobs: JobSnapshot[];
   videoSources: VideoSourceItem[];
   sourceRoots: SourceRootSnapshot[];
@@ -61,10 +62,10 @@ export interface AppState {
   createLibraryPopoverOpen: boolean;
   manageLibraryPopoverOpen: boolean;
   searchFiltersPanelOpen: boolean;
-  searchPreparationDisclosureOpen: boolean;
   settingsDiagnosticsJobsOpen: boolean;
   searchDetailSheetOpen: boolean;
   inventoryDetailSheetOpen: boolean;
+  inventoryImportOpen: boolean;
   inventorySourceManagementOpen: boolean;
   inventoryLibraryMaintenanceOpen: boolean;
   inventorySourceRootEditorOpen: boolean;

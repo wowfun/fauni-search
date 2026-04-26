@@ -20,6 +20,16 @@ export function renderInventoryActionRow(library: LibrarySnapshot | null) {
         <button
           type="button"
           class="ui-button ui-button-secondary"
+          data-testid="inventory-action-import-paths"
+          data-inventory-import-toggle
+          aria-expanded="${state.inventoryImportOpen ? "true" : "false"}"
+          ${library ? "" : "disabled"}
+        >
+          ${state.inventoryImportOpen ? "收起导入" : "导入路径"}
+        </button>
+        <button
+          type="button"
+          class="ui-button ui-button-secondary"
           data-testid="inventory-action-refresh-library"
           data-utilities-action="refresh-library"
           ${library ? "" : "disabled"}

@@ -1,13 +1,38 @@
 import {
   currentStatusCapsule,
+  escapeHtml,
   renderUiIcon,
   state,
   type LibrarySnapshot,
 } from "../core";
 import { renderStatusButton } from "./shared/primitives";
 
+function renderStatusCapsuleProgress(status: ReturnType<typeof currentStatusCapsule>) {
+  if (!("progress" in status) || !status.progress) {
+    return "";
+  }
+
+  const progress = status.progress;
+  const indeterminate = progress.percent === null;
+  const width = indeterminate ? 100 : progress.percent;
+  return `
+    <span
+      class="status-capsule-progress ${indeterminate ? "status-capsule-progress-indeterminate" : ""}"
+      data-testid="status-capsule-progress"
+      data-progress-kind="${indeterminate ? "indeterminate" : "determinate"}"
+      aria-hidden="true"
+    >
+      <span class="status-capsule-progress-fill" style="width: ${width}%"></span>
+    </span>
+    <span class="status-capsule-progress-label" data-testid="status-capsule-progress-label">
+      ${escapeHtml(progress.label)}
+    </span>
+  `;
+}
+
 export function renderContextRail(library: LibrarySnapshot | null) {
   const status = currentStatusCapsule(library);
+  const hasProgress = "progress" in status && Boolean(status.progress);
   return `
     <div class="context-rail-shell context-rail-shell-product" data-testid="context-rail">
       <div class="context-rail-brand">
@@ -18,11 +43,13 @@ export function renderContextRail(library: LibrarySnapshot | null) {
       </div>
       <div class="context-rail-status">
         ${renderStatusButton(status.label, status.pillClass as any, {
-          className: "utility-trigger-pill",
+          className: `utility-trigger-pill${hasProgress ? " status-capsule-with-progress" : ""}`,
           testId: "status-capsule-button",
           prefixHtml: '<span class="status-dot"></span>',
+          childrenHtml: renderStatusCapsuleProgress(status),
           attrs: {
             "data-open-settings-section": "diagnostics",
+            "aria-label": status.summary,
           },
         })}
       </div>

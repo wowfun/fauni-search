@@ -286,6 +286,27 @@ impl AppState {
         }
     }
 
+    pub(crate) fn update_job_progress_snapshot(
+        &mut self,
+        job_id: &str,
+        status: &str,
+        phase: &str,
+        completed: usize,
+        total: usize,
+        unit: &str,
+        summary: impl Into<String>,
+    ) {
+        if let Some(job) = self.jobs.get_mut(job_id) {
+            job.snapshot.status = status.to_string();
+            job.snapshot.phase = phase.to_string();
+            job.snapshot.progress.total = total;
+            job.snapshot.progress.unit = unit.to_string();
+            job.snapshot.progress.completed = completed.min(total);
+            job.snapshot.current_attempt.status = status.to_string();
+            job.snapshot.current_attempt.summary = summary.into();
+        }
+    }
+
     pub(crate) fn request_job_cancellation(
         &mut self,
         job_id: &str,
@@ -747,7 +768,13 @@ impl AppState {
         job.snapshot.cancelable = false;
         job.snapshot.status = outcome.status.to_string();
         job.snapshot.phase = outcome.phase.to_string();
-        job.snapshot.progress.completed = outcome.completed.min(job.snapshot.progress.total);
+        job.snapshot.progress.completed = if outcome.status == "completed" {
+            job.snapshot.progress.total
+        } else if job.snapshot.progress.unit == "visual_unit" {
+            job.snapshot.progress.completed.min(job.snapshot.progress.total)
+        } else {
+            outcome.completed.min(job.snapshot.progress.total)
+        };
         job.snapshot.current_attempt.status = outcome.status.to_string();
         job.snapshot.current_attempt.summary = outcome.summary;
 
@@ -1162,7 +1189,13 @@ impl AppState {
         job.snapshot.cancelable = false;
         job.snapshot.status = outcome.status.to_string();
         job.snapshot.phase = outcome.phase.to_string();
-        job.snapshot.progress.completed = outcome.completed.min(job.snapshot.progress.total);
+        job.snapshot.progress.completed = if outcome.status == "completed" {
+            job.snapshot.progress.total
+        } else if job.snapshot.progress.unit == "visual_unit" {
+            job.snapshot.progress.completed.min(job.snapshot.progress.total)
+        } else {
+            outcome.completed.min(job.snapshot.progress.total)
+        };
         job.snapshot.current_attempt.status = outcome.status.to_string();
         job.snapshot.current_attempt.summary = outcome.summary;
 

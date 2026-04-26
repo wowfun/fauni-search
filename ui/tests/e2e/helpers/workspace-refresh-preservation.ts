@@ -7,6 +7,7 @@ import {
   importFixturesIntoCurrentLibrary,
   librarySourceCard,
   mockDocumentSearchResults,
+  openInventoryImportPanel,
   openInventoryWorkspace,
   openSearchWorkspace,
   waitForFirstJobCompleted,
@@ -62,9 +63,11 @@ export function registerWorkspaceRefreshPreservationScenarios() {
     try {
       await createLibrary(page, "detail-preview-pdf-stability");
 
+      await openInventoryImportPanel(page);
       await page.getByTestId("import-paths-input").fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
       await page.getByTestId("import-submit-button").click();
       await waitForFirstJobCompleted(page);
+      await openSearchWorkspace(page);
 
       await page.getByTestId("search-mode-document").click();
       await page.getByTestId("query-document-input").setInputFiles(fixtures.pdfPath);

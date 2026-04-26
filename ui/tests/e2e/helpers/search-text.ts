@@ -9,14 +9,85 @@ import {
   expectSearchRequiresContent,
   importFixtureIntoCurrentLibrary,
   mockSingleTextSearchResult,
+  openInventoryImportPanel,
   openSearchAdvancedFilters,
   openSourcePreparationPanel,
+  workspacePollWaitMs,
 } from "./fixtures";
+
+async function mockHealthyRuntimeStatus(page) {
+  await page.route("**/api/runtime/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          app: {
+            component_id: "app",
+            display_name: "App",
+            status: "available",
+            message: "ready",
+            last_checked_at: "2026-04-26T00:00:00Z",
+          },
+          qdrant: {
+            component_id: "qdrant",
+            display_name: "Qdrant",
+            status: "available",
+            message: "ready",
+            last_checked_at: "2026-04-26T00:00:00Z",
+          },
+          providers: [],
+        },
+      }),
+    });
+  });
+}
+
+async function mockPartialRuntimeStatus(page) {
+  await page.route("**/api/runtime/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          app: {
+            component_id: "app",
+            display_name: "App",
+            status: "available",
+            message: "ready",
+            last_checked_at: "2026-04-26T00:00:00Z",
+          },
+          qdrant: {
+            component_id: "qdrant",
+            display_name: "Qdrant",
+            status: "available",
+            message: "ready",
+            last_checked_at: "2026-04-26T00:00:00Z",
+          },
+          providers: [
+            {
+              provider_id: "dashscope",
+              display_name: "DashScope",
+              provider_kind: "remote_http",
+              enabled: true,
+              status: "not_supported",
+              message: "not executable in this slice",
+              last_probed_at: "2026-04-26T00:00:00Z",
+              execution_input_types: [],
+              runtime_adapters: [],
+            },
+          ],
+        },
+      }),
+    });
+  });
+}
 
 export function registerSearchTextScenarios() {
   test("search task next step opens settings diagnostics and expands jobs", async ({ page }) => {
     const libraryName = await createLibrary(page, "search-jobs-deeplink");
     const libraryId = await currentLibraryId(page);
+    await mockHealthyRuntimeStatus(page);
 
     await page.route("**/api/libraries", async (route) => {
       if (route.request().method() !== "GET") {
@@ -77,41 +148,62 @@ export function registerSearchTextScenarios() {
       });
     });
 
-    await page.route("**/api/jobs?library_id=*", async (route) => {
+    await page.route("**/api/jobs**", async (route) => {
+      const url = new URL(route.request().url());
+      const currentLibraryJob = {
+        job_id: "job_search_jobs_001",
+        library_id: libraryId,
+        kind: "refresh",
+        status: "running",
+        phase: "encode",
+        progress: {
+          completed: 0,
+          total: 1,
+          unit: "source_root",
+        },
+        cancelable: true,
+        retryable: true,
+        current_attempt: {
+          attempt: 1,
+          status: "running",
+          summary: "Encoding 1 source root.",
+        },
+      };
+      const otherLibraryJob = {
+        ...currentLibraryJob,
+        job_id: "job_search_jobs_other_001",
+        library_id: "other-library",
+        progress: {
+          completed: 1,
+          total: 3,
+          unit: "source_root",
+        },
+      };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           data: {
-            jobs: [
-              {
-                job_id: "job_search_jobs_001",
-                library_id: libraryId,
-                kind: "refresh",
-                status: "running",
-                phase: "encode",
-                progress: {
-                  completed: 0,
-                  total: 1,
-                  unit: "source_root",
-                },
-                cancelable: true,
-                retryable: true,
-                current_attempt: {
-                  attempt: 1,
-                  status: "running",
-                  summary: "Encoding 1 source root.",
-                },
-              },
-            ],
+            jobs: url.searchParams.has("library_id")
+              ? [currentLibraryJob]
+              : [currentLibraryJob, otherLibraryJob],
           },
         }),
       });
     });
 
     await page.reload();
-    await expect(page.getByTestId("search-next-step-dock")).toContainText("等待当前任务完成");
-    await page.getByTestId("search-next-step-open-jobs").click();
+    await expect(page.getByTestId("status-capsule-button")).toContainText("准备中 · 2");
+    await expect(page.getByTestId("status-capsule-progress")).toHaveAttribute(
+      "data-progress-kind",
+      "determinate"
+    );
+    await expect(page.getByTestId("status-capsule-progress-label")).toHaveText("1/4 source_root");
+    await expect(page.locator(".status-stack .ui-notice-success")).toHaveCount(0);
+    await expect(page.getByTestId("search-next-step-dock")).toHaveCount(0);
+    await expect(page.getByTestId("import-form")).toHaveCount(0);
+    await expect(page.getByTestId("search-readiness-action")).toContainText("后台任务完成后即可搜索");
+    await page.getByTestId("search-readiness-open-jobs").click();
 
     await expect(page.getByTestId("settings-workspace")).toBeVisible();
     await expect(page.getByTestId("settings-stage-title")).toHaveText("诊断");
@@ -120,6 +212,295 @@ export function registerSearchTextScenarios() {
       ""
     );
     await expect(page.getByTestId("job-list")).toBeVisible();
+    await expect(page.getByTestId("job-card")).toHaveCount(1);
+    await expect(page.getByTestId("job-progress")).toHaveAttribute(
+      "data-progress-kind",
+      "determinate"
+    );
+  });
+
+  test("status capsule handles global jobs without computable totals", async ({ page }) => {
+    await createLibrary(page, "job-progress-indeterminate");
+    await mockHealthyRuntimeStatus(page);
+
+    await page.route("**/api/jobs**", async (route) => {
+      const url = new URL(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            jobs: url.searchParams.has("library_id")
+              ? []
+              : [
+                  {
+                    job_id: "job_waiting_001",
+                    library_id: "another-library",
+                    kind: "import",
+                    status: "queued",
+                    phase: "intake",
+                    progress: {
+                      completed: 0,
+                      total: 0,
+                      unit: "item",
+                    },
+                    cancelable: true,
+                    retryable: false,
+                    current_attempt: {
+                      attempt: 1,
+                      status: "queued",
+                      summary: "Waiting for execution.",
+                    },
+                  },
+                ],
+          },
+        }),
+      });
+    });
+
+    await page.reload();
+    await expect(page.getByTestId("status-capsule-button")).toContainText("准备中 · 1");
+    await expect(page.getByTestId("status-capsule-progress")).toHaveAttribute(
+      "data-progress-kind",
+      "indeterminate"
+    );
+    await expect(page.getByTestId("status-capsule-progress-label")).toHaveText("等待开始");
+    await expect(page.getByTestId("status-capsule-progress-label")).not.toContainText("NaN");
+  });
+
+  test("video result thumbnails keep their DOM node across workspace polling", async ({ page }) => {
+    const libraryId = "video-result-preview-stability";
+    const libraryName = "Video result preview stability";
+
+    await mockHealthyRuntimeStatus(page);
+    await page.route("**/api/settings/providers", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { providers: [] } }),
+      });
+    });
+    await page.route("**/api/libraries", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            libraries: [
+              {
+                id: libraryId,
+                display_name: libraryName,
+                lifecycle_state: "active",
+                counts: {
+                  accepted_items: 1,
+                  pending_jobs: 0,
+                },
+                latest_job_id: null,
+              },
+            ],
+          },
+        }),
+      });
+    });
+    await page.route(`**/api/libraries/${libraryId}/content-types`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { content_types: { content_types: {} } } }),
+      });
+    });
+    await page.route(`**/api/libraries/${libraryId}/resolved-content-models`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { content_types: {} } }),
+      });
+    });
+    await page.route(`**/api/libraries/${libraryId}/vector-space-diagnostics`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { vector_spaces: [] } }),
+      });
+    });
+    await page.route(`**/api/libraries/${libraryId}/video-sources`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { sources: [] } }),
+      });
+    });
+    await page.route("**/api/libraries/*/source-roots", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            source_roots: [
+              {
+                source_root_id: "root_video_preview",
+                root_path: "/tmp/video-preview",
+                enabled: true,
+                status: "ready",
+                watch_state: "watching",
+                rules: {
+                  include_globs: [],
+                  exclude_globs: [],
+                  include_extensions: [],
+                },
+                last_action: null,
+              },
+            ],
+          },
+        }),
+      });
+    });
+    await page.route("**/api/jobs**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: { jobs: [] } }),
+      });
+    });
+    await page.route("**/api/search/text", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            results: [
+              {
+                ...createMockSearchResult(0, "/tmp/video-preview/clip.mp4"),
+                library_id: libraryId,
+                preview: {
+                  url: "http://127.0.0.1:54210/mock-preview/clip.mp4",
+                },
+                source_type: "video",
+                kind: "video_segment",
+                locator: {
+                  start_ms: 42_000,
+                  end_ms: 50_000,
+                },
+              },
+            ],
+            next_cursor: null,
+            unsupported_content_types: [],
+          },
+        }),
+      });
+    });
+    await page.route(`**/api/libraries/${libraryId}/visual-units/vu_mock_0`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            visual_unit: {
+              visual_unit_id: "vu_mock_0",
+              source_id: "src_mock_0",
+              source_path: "/tmp/video-preview/clip.mp4",
+              source_type: "video",
+              kind: "video_segment",
+              locator: {
+                start_ms: 42_000,
+                end_ms: 50_000,
+              },
+            },
+            preview: {
+              url: "http://127.0.0.1:54210/mock-preview/clip.mp4",
+            },
+            neighbor_context: null,
+            library_id: libraryId,
+          },
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+    await expect(page.getByTestId("library-select")).toContainText(libraryName);
+    await page.reload();
+    await page.getByTestId("search-text-input").fill("terminal screen");
+    await page.getByTestId("search-submit-button").click();
+
+    const videoResult = page.locator('[data-testid="result-card"][data-kind="video_segment"]').first();
+    await expect(videoResult).toBeVisible();
+    const resultPreview = videoResult.getByTestId("result-preview");
+    await expect(resultPreview).toHaveAttribute("data-preview-kind", "video");
+    await videoResult.evaluate((node) => {
+      (node as HTMLElement).dataset.cardStableMarker = "kept";
+      node.querySelector<HTMLElement>('[data-testid="result-preview"]')!.dataset.pollStableMarker =
+        "kept";
+    });
+
+    await page.waitForTimeout(workspacePollWaitMs);
+    await expect(videoResult).toHaveAttribute("data-card-stable-marker", "kept");
+    await expect(resultPreview).toHaveAttribute("data-poll-stable-marker", "kept");
+
+    await videoResult.locator(".result-select").click();
+    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+    await expect(page.getByTestId("visual-unit-detail")).toContainText("clip.mp4");
+    await expect(videoResult).toHaveAttribute("data-card-stable-marker", "kept");
+    await expect(resultPreview).toHaveAttribute("data-poll-stable-marker", "kept");
+  });
+
+  test("status capsule keeps job activity visible while runtime is partially limited", async ({
+    page,
+  }) => {
+    await createLibrary(page, "job-progress-partial-runtime");
+    await mockPartialRuntimeStatus(page);
+
+    await page.route("**/api/jobs**", async (route) => {
+      const url = new URL(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            jobs: url.searchParams.has("library_id")
+              ? []
+              : [
+                  {
+                    job_id: "job_partial_runtime_001",
+                    library_id: "another-library",
+                    kind: "refresh",
+                    status: "running",
+                    phase: "stage_write",
+                    progress: {
+                      completed: 13,
+                      total: 57,
+                      unit: "visual_unit",
+                    },
+                    cancelable: true,
+                    retryable: false,
+                    current_attempt: {
+                      attempt: 1,
+                      status: "running",
+                      summary:
+                        "Writing batch 13/57 (8 visual unit(s)) into staged vector-space storage.",
+                    },
+                  },
+                ],
+          },
+        }),
+      });
+    });
+
+    await page.reload();
+    await expect(page.getByTestId("status-capsule-button")).toContainText("部分受限");
+    await expect(page.getByTestId("status-capsule-progress")).toHaveAttribute(
+      "data-progress-kind",
+      "determinate"
+    );
+    await expect(page.getByTestId("status-capsule-progress-label")).toHaveText("13/57 visual_unit");
+    await expect(
+      page.getByTestId("status-capsule-button").locator(".status-dot")
+    ).toHaveCSS("animation-name", "status-capsule-dot-pulse");
   });
 
   test("manual import and submitted search keep results and detail in the same workspace", async ({
@@ -166,10 +547,14 @@ export function registerSearchTextScenarios() {
       await openSourcePreparationPanel(page);
       await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);
       await page.getByTestId("source-root-submit-button").click();
+      await page.getByTestId("workspace-tab-search").click();
 
       await expect(page.getByTestId("search-state-strip")).toContainText("等待内容");
-      await expect(page.getByTestId("search-next-step-dock")).toContainText("准备第一批内容");
-      await expect(page.getByTestId("search-next-step-open-inventory")).toBeVisible();
+      await expect(page.getByTestId("search-readiness-action")).toContainText("接入来源或导入内容");
+      await expect(page.getByTestId("search-readiness-open-inventory")).toBeVisible();
+      await page.getByTestId("search-readiness-open-inventory").click();
+      await expect(page.getByTestId("inventory-panel")).toBeVisible();
+      await expect(page.getByTestId("inventory-import-panel")).toBeVisible();
     } finally {
       fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
     }
@@ -948,6 +1333,7 @@ export function registerSearchTextControlScenarios() {
   test("invalid import paths show explicit rejection feedback", async ({ page }) => {
     await createLibrary(page, "invalid-import");
 
+    await openInventoryImportPanel(page);
     await page.getByTestId("import-paths-input").fill("README.md");
     await page.getByTestId("import-submit-button").click();
 

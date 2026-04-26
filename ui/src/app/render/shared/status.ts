@@ -1,7 +1,7 @@
 import type { LibrarySnapshot } from "../../../types";
 import { allLibrariesTextScopeActive } from "../../selectors/library";
 import { currentSearchScopeStageState } from "../../selectors/search";
-import { currentStatusCapsule, libraryOperationalReadiness } from "../../selectors/runtime";
+import { currentStatusCapsule, globalJobsProgressSummary, libraryOperationalReadiness } from "../../selectors/runtime";
 import { escapeHtml, visualUnitKindDisplayName } from "../../selectors/common";
 import { state } from "../../state/store";
 import { renderEmptyState, renderNotice, renderUiButton } from "./primitives";
@@ -57,19 +57,11 @@ export function renderSearchStatusNextStep(
               ? "恢复来源观察"
               : "准备第一批内容";
     summary = scopeState.summary;
-    if (context !== "utility") {
-      actions.push(`
-        ${renderUiButton("打开来源准备", {
-          testId: "search-outcome-open-source-prep",
-          attrs: { "data-utilities-action": "focus-source-prep" },
-        })}
-      `);
-    }
     actions.push(`
       ${renderUiButton("前往库管理", {
-        tone: "secondary",
+        tone: context === "utility" ? "secondary" : "primary",
         testId: context === "utility" ? "utility-drawer-status-open-inventory" : "search-outcome-open-inventory",
-        attrs: { "data-workspace": "inventory" },
+        attrs: { "data-utilities-action": "focus-source-prep" },
       })}
     `);
   }
@@ -98,7 +90,7 @@ export function renderStatusNotices() {
     );
   }
 
-  if (state.statusMessage) {
+  if (state.statusMessage && !globalJobsProgressSummary()) {
     blocks.push(renderNotice({ tone: "success", title: "进行中", body: state.statusMessage }));
   }
 

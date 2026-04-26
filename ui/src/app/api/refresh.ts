@@ -155,6 +155,11 @@ export async function refreshJobs() {
   state.jobs = data.jobs;
 }
 
+export async function refreshGlobalJobs() {
+  const data = await apiRequest<JobsListData>("/jobs");
+  state.globalJobs = data.jobs;
+}
+
 export async function refreshVideoSources() {
   if (!state.selectedLibraryId) {
     state.videoSources = [];
@@ -262,6 +267,7 @@ export async function refreshWorkspace(options) {
     await refreshModelCatalog();
     await refreshGlobalContentTypes();
   }
+  await refreshGlobalJobs();
   await refreshJobs();
   await refreshVideoSources();
   renderWorkspace();
@@ -287,7 +293,6 @@ export async function switchCurrentLibrary(libraryId: string) {
   state.searchOutcome = null;
   state.searchInFlight = false;
   state.lastSearchRequest = null;
-  state.searchPreparationDisclosureOpen = false;
   state.settingsDiagnosticsJobsOpen = false;
   state.searchDetailSheetOpen = false;
   state.createLibraryPopoverOpen = false;

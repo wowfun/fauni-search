@@ -83,7 +83,6 @@ import {
   onSearchFilterSourceTypeChange,
   onSearchFilterTimeRangeEndInput,
   onSearchFilterTimeRangeStartInput,
-  onSearchPreparationDisclosureToggle,
   onSearchSubmit,
   onSearchTextInput,
   onSelectContentTypeTab,
@@ -110,6 +109,7 @@ import {
   onSubmitLibraryModelTest,
   onSubmitProviderConfig,
   onSubmitSourceRoot,
+  onToggleInventoryImport,
   onToggleLibraryArchive,
   onToggleInventoryLibraryMaintenance,
   onToggleInventorySourceManagement,
@@ -137,7 +137,11 @@ import {
 } from "../workspaces/search";
 import { renderSettingsPanel } from "../workspaces/settings";
 
-export function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
+export function patchWorkspaceMarkupPreservingDetail(
+  nextMarkup,
+  options: { preserveSearchDetailPanel?: boolean } = {}
+) {
+  const preserveSearchDetailPanel = Boolean(options.preserveSearchDetailPanel);
   if (!(root instanceof HTMLElement)) {
     return false;
   }
@@ -243,6 +247,23 @@ export function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
     previewIdentity(currentPreview) === previewIdentity(nextPreview) &&
     currentPreview.tagName === nextPreview.tagName;
 
+  const transferStablePreviewNodes = (currentRegion, nextRegion, selector) => {
+    const currentPreviews = Array.from(currentRegion.querySelectorAll(selector)).filter(
+      (preview) => preview instanceof HTMLElement
+    );
+    nextRegion.querySelectorAll(selector).forEach((nextPreview) => {
+      if (!(nextPreview instanceof HTMLElement)) {
+        return;
+      }
+      const currentPreview = currentPreviews.find((preview) =>
+        stablePreviewMatches(preview, nextPreview)
+      );
+      if (stablePreviewMatches(currentPreview, nextPreview)) {
+        nextPreview.replaceWith(currentPreview);
+      }
+    });
+  };
+
   const patchInventoryDetailPanel = (currentRegion, nextRegion) => {
     const currentPanel = currentRegion.querySelector('[data-testid="inventory-detail-panel"]');
     const nextPanel = nextRegion.querySelector('[data-testid="inventory-detail-panel"]');
@@ -327,6 +348,165 @@ export function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
     return patchInventoryDetailPanel(currentLayout, nextLayout);
   };
 
+  const patchSearchLeftColumn = (currentColumn, nextColumn) => {
+    transferStablePreviewNodes(
+      currentColumn,
+      nextColumn,
+      '[data-testid="result-preview"][data-preview-identity], [data-testid="result-preview"][data-preview-key]'
+    );
+    currentColumn.replaceWith(nextColumn);
+    return true;
+  };
+
+  const patchSearchResultCard = (currentCard, nextCard) => {
+    const currentSelect = currentCard.querySelector(".result-select");
+    const nextSelect = nextCard.querySelector(".result-select");
+    const currentVisual = currentSelect?.querySelector(".result-visual");
+    const nextVisual = nextSelect?.querySelector(".result-visual");
+    const currentPreview = currentVisual?.querySelector(
+      '[data-testid="result-preview"][data-preview-identity], [data-testid="result-preview"][data-preview-key]'
+    );
+    const nextPreview = nextVisual?.querySelector(
+      '[data-testid="result-preview"][data-preview-identity], [data-testid="result-preview"][data-preview-key]'
+    );
+    if (
+      !(currentSelect instanceof HTMLElement) ||
+      !(nextSelect instanceof HTMLElement) ||
+      !(currentVisual instanceof HTMLElement) ||
+      !(nextVisual instanceof HTMLElement) ||
+      !stablePreviewMatches(currentPreview, nextPreview)
+    ) {
+      return false;
+    }
+
+    currentCard.className = nextCard.className;
+    currentSelect.className = nextSelect.className;
+    currentVisual.className = nextVisual.className;
+    if (
+      !syncElementSiblingsAroundStableChild(currentSelect, nextSelect, currentVisual, nextVisual)
+    ) {
+      return false;
+    }
+
+    syncOptionalRegion(currentCard, ".ui-object-list-actions", nextCard.querySelector(".ui-object-list-actions"));
+    return true;
+  };
+
+  const patchSearchResultList = (currentSurface, nextSurface) => {
+    const currentList = currentSurface.querySelector('[data-testid="result-list"]');
+    const nextList = nextSurface.querySelector('[data-testid="result-list"]');
+    if (!(currentList instanceof HTMLElement) || !(nextList instanceof HTMLElement)) {
+      return false;
+    }
+
+    const currentCards = Array.from(currentList.querySelectorAll('[data-testid="result-card"]'));
+    const nextCards = Array.from(nextList.querySelectorAll('[data-testid="result-card"]'));
+    if (currentCards.length !== nextCards.length) {
+      return false;
+    }
+    const cardIdentity = (card) =>
+      `${card.getAttribute("data-kind") ?? ""}:${card.getAttribute("data-visual-unit-id") ?? ""}`;
+    if (
+      currentCards.some(
+        (card, index) =>
+          !(card instanceof HTMLElement) ||
+          !(nextCards[index] instanceof HTMLElement) ||
+          cardIdentity(card) !== cardIdentity(nextCards[index])
+      )
+    ) {
+      return false;
+    }
+
+    currentSurface.className = nextSurface.className;
+    currentSurface.setAttribute(
+      "data-search-results-surface",
+      nextSurface.getAttribute("data-search-results-surface") ?? ""
+    );
+    if (!syncElementSiblingsAroundStableChild(currentSurface, nextSurface, currentList, nextList)) {
+      return false;
+    }
+
+    currentList.className = nextList.className;
+    return currentCards.every((card, index) =>
+      patchSearchResultCard(card, nextCards[index])
+    );
+  };
+
+  const patchSearchCenterRegion = (currentDeskRegion, nextDeskRegion) => {
+    const currentCenter = currentDeskRegion.querySelector(".workspace-center");
+    const nextCenter = nextDeskRegion.querySelector(".workspace-center");
+    if (currentCenter instanceof HTMLElement && nextCenter instanceof HTMLElement) {
+      const currentSurface = currentCenter.querySelector('[data-testid="search-results-surface"]');
+      const nextSurface = nextCenter.querySelector('[data-testid="search-results-surface"]');
+      if (
+        currentSurface instanceof HTMLElement &&
+        nextSurface instanceof HTMLElement &&
+        patchSearchResultList(currentSurface, nextSurface)
+      ) {
+        const currentPanel = currentSurface.closest(".search-results-panel");
+        const nextPanel = nextSurface.closest(".search-results-panel");
+        if (!(currentPanel instanceof HTMLElement) || !(nextPanel instanceof HTMLElement)) {
+          currentCenter.replaceWith(nextCenter);
+          return;
+        }
+
+        currentCenter.className = nextCenter.className;
+        if (
+          !syncElementSiblingsAroundStableChild(currentPanel, nextPanel, currentSurface, nextSurface)
+        ) {
+          currentCenter.replaceWith(nextCenter);
+          return;
+        }
+        currentPanel.className = nextPanel.className;
+        if (
+          !syncElementSiblingsAroundStableChild(currentCenter, nextCenter, currentPanel, nextPanel)
+        ) {
+          currentCenter.replaceWith(nextCenter);
+        }
+      } else {
+        transferStablePreviewNodes(
+          currentCenter,
+          nextCenter,
+          '[data-testid="result-preview"][data-preview-identity], [data-testid="result-preview"][data-preview-key]'
+        );
+        currentCenter.replaceWith(nextCenter);
+      }
+      return;
+    }
+    if (currentCenter instanceof HTMLElement) {
+      currentCenter.remove();
+      return;
+    }
+    if (nextCenter instanceof HTMLElement) {
+      currentDeskRegion.append(nextCenter);
+    }
+  };
+
+  const patchRightColumn = () => {
+    if (
+      preserveSearchDetailPanel &&
+      state.activeWorkspace === "search" &&
+      currentRight instanceof HTMLElement &&
+      nextRight instanceof HTMLElement
+    ) {
+      currentRight.className = nextRight.className;
+      return true;
+    }
+    if (currentRight instanceof HTMLElement && nextRight instanceof HTMLElement) {
+      currentRight.replaceWith(nextRight);
+      return true;
+    }
+    if (currentRight instanceof HTMLElement) {
+      currentRight.remove();
+      return true;
+    }
+    if (nextRight instanceof HTMLElement) {
+      currentDesk.append(nextRight);
+      return true;
+    }
+    return true;
+  };
+
   currentShellBar.replaceWith(nextShellBar);
 
   const currentStatusStack = currentShell.querySelector(".status-stack");
@@ -348,13 +528,13 @@ export function patchWorkspaceMarkupPreservingDetail(nextMarkup) {
   currentDesk.className = nextDesk.className;
   if (state.activeWorkspace === "inventory" && patchInventoryLeftColumn(currentLeft, nextLeft)) {
     syncOptionalRegion(currentDesk, ".workspace-center", nextDesk.querySelector(".workspace-center"));
+  } else if (state.activeWorkspace === "search" && patchSearchLeftColumn(currentLeft, nextLeft)) {
+    patchSearchCenterRegion(currentDesk, nextDesk);
   } else {
     currentLeft.replaceWith(nextLeft);
     syncOptionalRegion(currentDesk, ".workspace-center", nextDesk.querySelector(".workspace-center"));
   }
-  if (currentRight instanceof HTMLElement && nextRight instanceof HTMLElement) {
-    currentRight.className = nextRight.className;
-  } else if (currentRight instanceof HTMLElement || nextRight instanceof HTMLElement) {
+  if (!patchRightColumn()) {
     return false;
   }
   return true;
@@ -374,7 +554,7 @@ export function renderWorkspace() {
   const searchDetailSheetOpen = searchDetailSheetIsOpen();
   const isSearchWorkspace = state.activeWorkspace === "search";
   const searchMobileSheetViewport = window.matchMedia("(max-width: 720px)").matches;
-  const searchNextStepDock = isSearchWorkspace ? renderSearchNextStepDock(library) : "";
+  const searchReadinessAction = isSearchWorkspace ? renderSearchNextStepDock(library) : "";
   const searchHasResults = Boolean((state.searchOutcome?.results ?? []).length);
   const shouldShowSearchResultsColumn = isSearchWorkspace && (searchHasResults || state.searchInFlight);
   const shouldRenderSearchDetailPanel =
@@ -420,9 +600,7 @@ export function renderWorkspace() {
               isSearchWorkspace
                 ? `
                   <section class="${searchStagePanelClass}" data-testid="search-panel">
-                    <div class="search-stage-layout ${
-                      searchNextStepDock ? "search-stage-layout-with-dock" : "search-stage-layout-single"
-                    }">
+                    <div class="search-stage-layout search-stage-layout-single">
                       <div class="search-stage-main">
                         ${
                           searchHasResults
@@ -435,6 +613,7 @@ export function renderWorkspace() {
                         }
                         ${renderSearchControls(library, searchHasResults)}
                         ${renderLibraryContext({ library, variant: "search-scope" })}
+                        ${searchReadinessAction}
                         ${
                           searchHasResults || !state.searchOutcome
                             ? ""
@@ -445,7 +624,6 @@ export function renderWorkspace() {
                             `
                         }
                       </div>
-                      ${searchNextStepDock}
                     </div>
                   </section>
                 `
@@ -509,8 +687,15 @@ export function renderWorkspace() {
     </main>
   `;
 
-  const shouldPatchWorkspace = shouldPreserveDetailPanel || state.activeWorkspace === "inventory";
-  const patchedWorkspace = shouldPatchWorkspace && patchWorkspaceMarkupPreservingDetail(nextMarkup);
+  const shouldPatchWorkspace =
+    shouldPreserveDetailPanel ||
+    state.activeWorkspace === "inventory" ||
+    (isSearchWorkspace && searchHasResults);
+  const patchedWorkspace =
+    shouldPatchWorkspace &&
+    patchWorkspaceMarkupPreservingDetail(nextMarkup, {
+      preserveSearchDetailPanel: shouldPreserveDetailPanel,
+    });
   if (!patchedWorkspace) {
     root.innerHTML = nextMarkup;
   }
@@ -662,9 +847,6 @@ export function renderWorkspace() {
   document.querySelector("#source-root-form")?.addEventListener("submit", onSubmitSourceRoot);
   document.querySelector("#source-root-reset-button")?.addEventListener("click", onResetSourceRootEditor);
   document
-    .querySelector("#search-preparation-disclosure")
-    ?.addEventListener("toggle", onSearchPreparationDisclosureToggle);
-  document
     .querySelector("#settings-diagnostics-jobs-disclosure")
     ?.addEventListener("toggle", onSettingsDiagnosticsJobsToggle);
   document.querySelector("#source-root-path")?.addEventListener("input", onSourceRootPathInput);
@@ -683,6 +865,9 @@ export function renderWorkspace() {
   document
     .querySelector("[data-inventory-source-management-toggle]")
     ?.addEventListener("click", onToggleInventorySourceManagement);
+  document
+    .querySelector("[data-inventory-import-toggle]")
+    ?.addEventListener("click", onToggleInventoryImport);
   document
     .querySelector("[data-inventory-library-maintenance-toggle]")
     ?.addEventListener("click", onToggleInventoryLibraryMaintenance);

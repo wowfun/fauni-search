@@ -433,12 +433,14 @@ textarea {
 }
 
 .inventory-action-stack,
+.inventory-import-panel,
 .inventory-library-maintenance-panel,
 .inventory-library-maintenance-actions {
   display: grid;
   gap: 0.7rem;
 }
 
+.inventory-import-panel,
 .inventory-library-maintenance-panel {
   padding: 0.95rem 1rem;
   border-radius: 16px;
@@ -446,6 +448,7 @@ textarea {
   background: rgba(255, 252, 247, 0.72);
 }
 
+.inventory-import-head,
 .inventory-library-maintenance-head {
   display: flex;
   justify-content: space-between;
@@ -453,9 +456,15 @@ textarea {
   align-items: start;
 }
 
+.inventory-import-head h3,
+.inventory-import-head p,
 .inventory-library-maintenance-head h4,
 .inventory-library-maintenance-head p {
   margin: 0;
+}
+
+.inventory-import-form {
+  max-width: 48rem;
 }
 
 .inventory-filter-tags {
@@ -669,6 +678,45 @@ textarea {
 .notice p {
   margin: 0;
   line-height: 1.5;
+}
+
+.job-progress {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.job-progress-track {
+  height: 0.45rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(13, 99, 86, 0.1);
+}
+
+.job-progress-fill {
+  display: block;
+  height: 100%;
+  min-width: 0.55rem;
+  border-radius: inherit;
+  background: var(--teal);
+}
+
+.job-progress-indeterminate .job-progress-fill {
+  width: 38% !important;
+  animation: job-progress-sweep 1.35s ease-in-out infinite;
+}
+
+.job-progress small {
+  color: rgba(18, 32, 51, 0.66);
+}
+
+@keyframes job-progress-sweep {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(260%);
+  }
 }
 
 .inline-actions {

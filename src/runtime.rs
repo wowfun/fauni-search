@@ -211,7 +211,7 @@ pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared:
                 ));
                 continue;
             };
-            if let Err(error) = index_visual_units(
+            match index_visual_units(
                 &prepared.library_id,
                 batch,
                 &group.resolved_model,
@@ -220,11 +220,14 @@ pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared:
             )
             .await
             {
-                failures.push(format!(
-                    "vector_space {}: {} failed: {}",
-                    batch.vector_space_id, error.phase, error.message
-                ));
-                continue;
+                Ok(_) => {}
+                Err(error) => {
+                    failures.push(format!(
+                        "vector_space {}: {} failed: {}",
+                        batch.vector_space_id, error.phase, error.message
+                    ));
+                    continue;
+                }
             }
             indexed_visual_units += batch.visual_units.len();
             indexed_vector_spaces += 1;
@@ -381,7 +384,7 @@ pub(crate) async fn run_source_action_job(
                         ));
                         continue;
                     };
-                    if let Err(message) = index_source_action_visual_units(
+                    match index_source_action_visual_units(
                         &prepared.library_id,
                         plan.action.as_str(),
                         &batch,
@@ -391,11 +394,14 @@ pub(crate) async fn run_source_action_job(
                     )
                     .await
                     {
-                        failures.push(format!(
-                            "vector_space {}: {}",
-                            batch.vector_space_id, message
-                        ));
-                        continue;
+                        Ok(_) => {}
+                        Err(message) => {
+                            failures.push(format!(
+                                "vector_space {}: {}",
+                                batch.vector_space_id, message
+                            ));
+                            continue;
+                        }
                     }
                     activated_vector_spaces.insert(batch.vector_space_id.clone());
                 }

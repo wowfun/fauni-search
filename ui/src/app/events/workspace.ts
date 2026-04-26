@@ -17,8 +17,8 @@ import {
   isTerminalJobStatus,
   JOB_POLL_INTERVAL_MS,
   JOB_POLL_TIMEOUT_MS,
-  keepSearchPreparationDisclosureOpen,
   libraryDisplayName,
+  libraryOperationalReadiness,
   libraryIsArchived,
   normalizeContentTypeBindingForProvider,
   populateSourceRootEditor,
@@ -56,6 +56,8 @@ import {
   selectedProviderConfig,
   selectedVisualUnitId,
   selectedVisualUnitOriginLibraryId,
+  setInventoryImportOpen,
+  setInventorySourceManagementOpen,
   setLibraryQueryDocumentVisualUnit,
   setLibraryQueryVideoSource,
   setLibraryQueryVideoVisualUnit,
@@ -230,9 +232,23 @@ export async function onUtilitiesAction(event) {
   state.statusMessage = null;
 
   if (action === "focus-source-prep") {
-    state.activeWorkspace = "search";
-    state.searchPreparationDisclosureOpen = true;
-    renderWorkspace();
+    const library = selectedLibrary();
+    state.activeWorkspace = "inventory";
+    state.searchDetailSheetOpen = false;
+    state.inventoryDetailSheetOpen = false;
+    if (library) {
+      const readiness = libraryOperationalReadiness(library);
+      const shouldImport = readiness.enabledRoots > 0 && readiness.status === "等待内容";
+      setInventoryImportOpen(shouldImport);
+      setInventorySourceManagementOpen(!shouldImport);
+    }
+    try {
+      await refreshLibrarySources();
+      renderWorkspace();
+    } catch (error) {
+      state.globalError = toApiError(error);
+      renderWorkspace();
+    }
     return;
   }
 

@@ -15,8 +15,6 @@ import {
   isDocumentPageQueryImage,
   libraryById,
   libraryDisplayName,
-  libraryNeedsPreparation,
-  libraryOperationalReadiness,
   pageLabel,
   queryDocumentDisplayName,
   queryDocumentPreviewUrl,
@@ -33,7 +31,6 @@ import {
   renderUiIcon,
   searchHasMoreResults,
   searchModeDisplayName,
-  searchStageNextAction,
   selectedLibrary,
   selectedVisualUnitId,
   selectedVisualUnitOriginLibraryId,
@@ -45,7 +42,6 @@ import {
   type LibrarySnapshot,
   type SearchResultItem,
 } from "../core";
-import { renderInventoryBridge, renderProviderBridge } from "../render/shared/bridges";
 import { renderDetailCard } from "../render/shared/detail";
 import { renderObjectListItem } from "../render/shared/list-item";
 import { renderPreviewSurface, renderSearchResultPreview } from "../render/shared/preview";
@@ -58,8 +54,7 @@ import {
   renderTypeTag,
   renderUiButton,
 } from "../render/shared/primitives";
-import { renderSourceRootsPanel } from "../render/shared/source-roots";
-import { renderImportReceipt, renderSearchStatusNextStep } from "../render/shared/status";
+import { renderSearchStatusNextStep } from "../render/shared/status";
 
 export function renderSearchStateStrip(library: LibrarySnapshot | null) {
   const stageState = currentSearchStageState(library);
@@ -87,16 +82,7 @@ export function renderSearchLoadingNotice() {
 }
 
 export function shouldRenderSearchNextStepDock(library: LibrarySnapshot | null) {
-  if (!library) {
-    return true;
-  }
-
-  return (
-    libraryNeedsPreparation(library) ||
-    currentSearchScopeStageState(library).nextAction === "jobs" ||
-    state.searchPreparationDisclosureOpen ||
-    Boolean(state.editingSourceRootId)
-  );
+  return currentSearchScopeStageState(library).nextAction !== "search";
 }
 
 export function renderSearchNextStepDock(library: LibrarySnapshot | null) {
@@ -104,245 +90,51 @@ export function renderSearchNextStepDock(library: LibrarySnapshot | null) {
     return "";
   }
 
-  if (!library) {
-    return `
-      <aside class="next-step-dock" data-testid="search-next-step-dock">
-        <p class="eyebrow">下一步</p>
-        <h3>先去库管理</h3>
-        <p class="helper">新建库和当前库管理已经移到库管理工作区；先完成库准备，再回到 Search 发起查询。</p>
-        <div class="dock-note">
-          <strong>主路径</strong>
-          <p class="helper">库管理 → 导入内容 → 等待可搜索 → 发起搜索。</p>
-        </div>
-        <div class="dock-actions">
-          <button
-            type="button"
-            data-testid="search-next-step-open-inventory"
-            data-workspace="inventory"
-          >
-            前往库管理
-          </button>
-        </div>
-      </aside>
-    `;
-  }
-
   const allLibrariesScope = allLibrariesTextScopeActive();
-  const readiness = libraryOperationalReadiness(library);
   const scopeState = currentSearchScopeStageState(library);
   const nextAction = scopeState.nextAction;
-  const supportDisclosures = renderSearchSupportDisclosures(library, nextAction);
-  const dockFacts = allLibrariesScope
-    ? [
-        `覆盖 ${scopeState.totalLibraries} 个库`,
-        `可搜索库 ${scopeState.searchableLibraries}`,
-        `对象 ${scopeState.searchableUnits}`,
-        `准备中 ${scopeState.pendingLibraries}`,
-      ]
-    : [
-        `启用来源根 ${readiness.enabledRoots}`,
-        `可搜索 ${readiness.searchableUnits}`,
-        `待处理 ${readiness.pendingJobs}`,
-      ];
-  const readinessNote = `
-    <div class="dock-note">
-      <strong>${escapeHtml(allLibrariesScope ? "当前范围" : libraryDisplayName(library))}</strong>
-      <p class="helper">${escapeHtml(dockFacts.join(" · "))}</p>
-      ${
-        !allLibrariesScope && readiness.lastActionSummary
-          ? `<p class="helper">${escapeHtml(readiness.lastActionSummary)}</p>`
-          : ""
-      }
-    </div>
-  `;
-
-  if (nextAction === "settings") {
-    return `
-      <aside class="next-step-dock" data-testid="search-next-step-dock">
-        <p class="eyebrow">下一步</p>
-        <h3>${escapeHtml(allLibrariesScope ? "先完成一个库的搜索配置" : "检查当前库覆盖")}</h3>
-        <p class="helper">${escapeHtml(scopeState.summary)}</p>
-        <div class="dock-note">
-          <strong>配置状态</strong>
-          <p class="helper">${escapeHtml(
-            allLibrariesScope
-              ? "所有库范围里还没有可搜索库；先让至少一个库的内容类型与 resolved model 完成就绪。"
-              : `${readiness.blockedContentTypes} 个启用内容类型仍未就绪；先确认当前库覆盖、连接与 resolved model。`
-          )}</p>
-        </div>
-        <div class="dock-actions">
-          <button
-            type="button"
-            data-testid="search-next-step-open-library-overrides"
-            data-open-settings-section="library-overrides"
-          >
-            前往当前库覆盖
-          </button>
-        </div>
-        ${renderProviderBridge(library)}
-        ${supportDisclosures}
-      </aside>
-    `;
-  }
-
-  if (nextAction === "jobs") {
-    return `
-      <aside class="next-step-dock" data-testid="search-next-step-dock">
-        <p class="eyebrow">下一步</p>
-        <h3>${escapeHtml(allLibrariesScope ? "等待至少一个库准备完成" : "等待当前任务完成")}</h3>
-        <p class="helper">${escapeHtml(scopeState.summary)}</p>
-        ${readinessNote}
-        <div class="dock-actions">
-          <button
-            type="button"
-            data-testid="search-next-step-open-jobs"
-            data-utilities-action="focus-search-jobs"
-          >
-            查看任务
-          </button>
-          <button
-            type="button"
-            class="ui-button ui-button-secondary"
-            data-testid="search-next-step-open-source-prep"
-            data-utilities-action="focus-source-prep"
-          >
-            打开来源准备
-          </button>
-        </div>
-        ${supportDisclosures}
-      </aside>
-    `;
-  }
-
-  if (libraryNeedsPreparation(library)) {
-    const title =
-      allLibrariesScope
-        ? "让至少一个库进入可搜索状态"
-        : readiness.status === "尚未接入来源根"
-        ? "接入第一个来源根"
-        : readiness.status === "来源根已停用"
-          ? "恢复一个来源根"
-          : readiness.status === "需要关注"
-            ? "先检查来源根健康"
-            : readiness.status === "观察未稳定"
-              ? "恢复来源观察"
-              : "准备第一批内容";
-    return `
-      <aside class="next-step-dock" data-testid="search-next-step-dock">
-        <p class="eyebrow">下一步</p>
-        <h3>${escapeHtml(title)}</h3>
-        <p class="helper">${escapeHtml(scopeState.summary)}</p>
-        ${readinessNote}
-        <div class="dock-actions">
-          <button
-            type="button"
-            data-testid="search-next-step-open-source-prep"
-            data-utilities-action="focus-source-prep"
-          >
-            打开来源准备
-          </button>
-          <button
-            type="button"
-            class="ui-button ui-button-secondary"
-            data-testid="search-next-step-open-inventory"
-            data-workspace="inventory"
-          >
-            前往库管理
-          </button>
-        </div>
-        ${renderInventoryBridge(library)}
-        ${renderProviderBridge(library)}
-        ${supportDisclosures}
-      </aside>
-    `;
-  }
+  const action =
+    nextAction === "settings"
+      ? {
+          label: "检查配置",
+          testId: "search-readiness-open-library-overrides",
+          attrs: `data-open-settings-section="library-overrides"`,
+        }
+      : nextAction === "jobs"
+        ? {
+            label: "查看任务",
+            testId: "search-readiness-open-jobs",
+            attrs: `data-utilities-action="focus-search-jobs"`,
+          }
+        : {
+            label: "去库管理",
+            testId: "search-readiness-open-inventory",
+            attrs: library ? `data-utilities-action="focus-source-prep"` : `data-workspace="inventory"`,
+          };
+  const summary =
+    nextAction === "settings"
+      ? "当前库覆盖或模型绑定未就绪。"
+      : nextAction === "jobs"
+        ? "后台任务完成后即可搜索。"
+        : nextAction === "library"
+          ? "先创建或选择一个库。"
+          : allLibrariesScope
+            ? "至少准备一个库后即可搜索。"
+            : "接入来源或导入内容后即可搜索。";
 
   return `
-    <aside class="next-step-dock" data-testid="search-next-step-dock">
-      <p class="eyebrow">${escapeHtml(allLibrariesScope ? "当前范围" : "当前库")}</p>
-      <h3>${escapeHtml(allLibrariesScope ? "所有库" : libraryDisplayName(library))}</h3>
-      <p class="helper">${escapeHtml(
-        allLibrariesScope
-          ? scopeState.summary
-          : `${library.id} · 可搜索 ${library.counts.accepted_items} · 待处理 ${library.counts.pending_jobs}`
-      )}</p>
-      <div class="dock-note">
-        <strong>建议</strong>
-        <p class="helper">${escapeHtml(
-          allLibrariesScope
-            ? "先发起一轮跨库文本查询，再从结果卡或详情面继续下钻到命中库。"
-            : "先搜一轮，再从结果卡或详情面直接复用对象作为下一次查询输入。"
-        )}</p>
-      </div>
-      <div class="dock-actions">
-        <button
-          type="button"
-          class="ui-button ui-button-secondary"
-          data-testid="search-next-step-open-source-prep"
-          data-utilities-action="focus-source-prep"
-        >
-          打开来源准备
-        </button>
-      </div>
-      ${renderInventoryBridge(library)}
-      ${renderProviderBridge(library)}
-      ${supportDisclosures}
-    </aside>
-  `;
-}
-
-export function renderSearchSupportDisclosures(library: LibrarySnapshot | null, nextAction = searchStageNextAction(library)) {
-  if (!library) {
-    return "";
-  }
-
-  const preparationOpen =
-    state.searchPreparationDisclosureOpen ||
-    Boolean(state.editingSourceRootId) ||
-    nextAction === "source-prep";
-
-  return `
-    <div class="next-step-support">
-      <details
-        id="search-preparation-disclosure"
-        class="support-disclosure support-disclosure-subtle"
-        ${preparationOpen ? "open" : ""}
+    <div class="search-readiness-action" data-testid="search-readiness-action" data-next-action="${escapeHtml(nextAction)}">
+      ${renderStatusTag(scopeState.status, scopeState.pillClass as any)}
+      <p class="helper">${escapeHtml(summary)}</p>
+      <button
+        type="button"
+        class="ui-button ui-button-secondary"
+        data-testid="${escapeHtml(action.testId)}"
+        ${action.attrs}
       >
-        <summary>导入与来源准备</summary>
-        <div class="support-disclosure-body">
-          ${renderImportPanel(library)}
-          ${renderSourceRootsPanel(library)}
-        </div>
-      </details>
+        ${escapeHtml(action.label)}
+      </button>
     </div>
-  `;
-}
-
-export function renderImportPanel(library: LibrarySnapshot | null) {
-  return `
-    <section class="panel panel-tight utility-panel">
-      <div class="panel-head">
-        <div>
-          <p class="eyebrow">导入</p>
-          <h2>导入内容</h2>
-        </div>
-      </div>
-      <form id="import-form" class="stack-form" data-testid="import-form">
-        <label>
-          <span>本地路径</span>
-          <textarea
-            id="import-paths"
-            data-testid="import-paths-input"
-            rows="6"
-            placeholder="/path/to/file.pdf&#10;/path/to/image.png"
-            ${library ? "" : "disabled"}
-          >${escapeHtml(state.importPathsDraft)}</textarea>
-        </label>
-        ${renderUiButton("提交导入", { type: "submit", testId: "import-submit-button", disabled: !library })}
-      </form>
-      <p class="helper">当前仍以服务器可读的本地路径作为正式导入入口；逐行填写文件或目录路径后即可提交导入。</p>
-      ${renderImportReceipt()}
-    </section>
   `;
 }
 

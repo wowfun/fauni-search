@@ -159,16 +159,25 @@ export async function openInventorySourceManagement(page) {
   await expect(managementPanel).toBeVisible();
 }
 
+export async function openInventoryImportPanel(page) {
+  await openInventoryWorkspace(page);
+  const importPanel = page.getByTestId("inventory-import-panel");
+  if (!(await importPanel.isVisible())) {
+    await page.getByTestId("inventory-action-import-paths").click();
+  }
+  await expect(importPanel).toBeVisible();
+}
+
 export async function openSearchWorkspace(page) {
   await page.getByTestId("workspace-tab-search").click();
   await expect(page.getByTestId("search-panel")).toBeVisible();
 }
 
 export async function openSourcePreparationPanel(page) {
-  await openSearchWorkspace(page);
+  await openInventorySourceManagement(page);
   const sourceRootPathInput = page.getByTestId("source-root-path-input");
   if (!(await sourceRootPathInput.isVisible())) {
-    await page.locator("summary").filter({ hasText: "导入与来源准备" }).click();
+    await page.getByTestId("inventory-source-root-create-button").click();
   }
   await expect(sourceRootPathInput).toBeVisible();
 }
@@ -463,9 +472,11 @@ export async function mockImageSearchResults(
 export async function expectSearchRequiresContent(page) {
   await expect(page.getByTestId("search-submit-button")).toBeDisabled();
   await expect(page.getByTestId("search-state-strip")).toContainText("尚未接入来源根");
-  await expect(page.getByTestId("search-next-step-dock")).toBeVisible();
-  await expect(page.getByTestId("search-next-step-dock")).toContainText("接入第一个来源根");
-  await expect(page.getByTestId("search-next-step-open-source-prep")).toBeVisible();
+  await expect(page.getByTestId("search-readiness-action")).toBeVisible();
+  await expect(page.getByTestId("search-readiness-action")).toContainText("接入来源");
+  await expect(page.getByTestId("search-readiness-open-inventory")).toBeVisible();
+  await expect(page.getByTestId("search-next-step-dock")).toHaveCount(0);
+  await expect(page.getByTestId("import-form")).toHaveCount(0);
 }
 
 export async function openSearchAdvancedFilters(page) {

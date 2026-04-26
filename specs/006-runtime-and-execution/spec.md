@@ -84,6 +84,7 @@
 - 当前切片中的显式 resume 当前只要求覆盖仍保留 replayable request 的 terminal `failed` / `canceled` 任务；若任务已保留 durable 部分成果，这些成果应继续作为 resume 的基线，而不是在 resume 前先被回滚
 - 对多 `vector_space` 任务，恢复与重试应面向仍未成功的空间继续推进，而不是默认撤销已成功空间后整体重跑
 - 进度快照至少应能表达：当前阶段、阶段内进度摘要、总体推进状态与是否可取消
+- 摄取 / 索引类任务的进度快照不应长期停留在来源根或路径数量这类粗粒度单位；进入 encode / stage-write / activation 等索引阶段后，应优先以可观察的细粒度工作单元表达，例如 `visual_unit`
 - 本专题只固定进度语义，不固定前端展示模型或具体百分比计算算法
 - 当前 restart-persistence 切片是显式例外：`jobs`、任务尝试与检查点不进入 restart-durable subset，应用重启后 `/jobs` 为空是预期行为，而不是恢复失败
 - 因应用重启而中断的导入、`refresh` 或 `rescan`，当前切片不要求自动恢复执行；需要由后续显式触发重新排队

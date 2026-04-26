@@ -135,7 +135,7 @@ export async function onCreateLibrary(event) {
     state.searchOutcome = null;
     state.searchInFlight = false;
     state.lastSearchRequest = null;
-    state.searchPreparationDisclosureOpen = false;
+    state.inventoryImportOpen = false;
     state.settingsDiagnosticsJobsOpen = false;
     state.searchDetailSheetOpen = false;
     state.statusMessage = null;
@@ -324,7 +324,7 @@ export async function onDeleteLibrary() {
     state.searchOutcome = null;
     state.searchInFlight = false;
     state.lastSearchRequest = null;
-    state.searchPreparationDisclosureOpen = false;
+    state.inventoryImportOpen = false;
     state.settingsDiagnosticsJobsOpen = false;
     state.searchDetailSheetOpen = false;
     state.createLibraryPopoverOpen = false;

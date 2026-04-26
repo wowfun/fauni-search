@@ -57,12 +57,25 @@ export function renderPreviewSurface(visualUnit, preview, testId = "visual-previ
 
 export function renderSearchResultPreview(result: SearchResultItem) {
   const title = `${visualUnitKindDisplayName(result.kind)} · ${sourceName(result.source_path)}`;
+  const previewIdentity =
+    result.library_id && result.visual_unit_id
+      ? `${result.library_id}:${result.visual_unit_id}`
+      : result.visual_unit_id ?? result.source_path ?? result.preview.url;
+  const previewKey = [
+    result.library_id ?? "",
+    result.visual_unit_id ?? result.source_path,
+    result.preview.url,
+    result.locator?.start_ms ?? "",
+    result.locator?.end_ms ?? "",
+  ].join("::");
 
   if (result.kind === "image") {
     return `
       <img
         class="result-preview-image"
         data-testid="result-preview"
+        data-preview-identity="${escapeHtml(previewIdentity)}"
+        data-preview-key="${escapeHtml(previewKey)}"
         src="${escapeHtml(result.preview.url)}"
         alt="${escapeHtml(title)}"
         loading="lazy"
@@ -77,6 +90,8 @@ export function renderSearchResultPreview(result: SearchResultItem) {
       <video
         class="result-preview-video"
         data-testid="result-preview"
+        data-preview-identity="${escapeHtml(previewIdentity)}"
+        data-preview-key="${escapeHtml(previewKey)}"
         data-preview-kind="video"
         data-start-ms="${escapeHtml(startMs)}"
         data-end-ms="${escapeHtml(endMs)}"

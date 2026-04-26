@@ -406,6 +406,7 @@
   - `reason_code`
   - `message`
 - 任务快照载荷至少应包含：`job_id`、`kind`、`status`、`phase`、`progress`、`cancelable`、`retryable`、`current_attempt`
+- `progress` 应稳定表达 `completed`、`total` 与 `unit`；同一任务在不同阶段可以切换更贴近当前工作的 `unit`，例如从 `source_root` / `item` 切到索引阶段的 `visual_unit`
 - 当任务由显式 retry 重新排队时，任务快照还应能表达其 retry lineage；至少应暴露可选 `retried_from_job_id`
 - `POST /jobs/{job_id}/cancel` 的成功响应可以直接返回更新后的任务快照
 - `POST /jobs/{job_id}/resume` 的成功响应可以直接返回被重新打开的同一 job 快照

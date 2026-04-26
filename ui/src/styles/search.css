@@ -53,10 +53,6 @@
   gap: 1rem;
 }
 
-.search-stage-layout-with-dock {
-  grid-template-columns: minmax(0, 1.3fr) minmax(248px, 0.7fr);
-}
-
 .search-stage-layout-single {
   grid-template-columns: 1fr;
 }
@@ -372,58 +368,21 @@
   font-weight: 600;
 }
 
-.next-step-dock {
-  display: grid;
-  gap: 0.65rem;
-  align-content: start;
-  padding: 0.9rem;
-  border-radius: 16px;
-  border: 1px solid rgba(197, 139, 51, 0.14);
-  background: rgba(249, 244, 235, 0.76);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
-}
-
-.search-stage-panel-reading .next-step-dock {
-  gap: 0.55rem;
-  padding: 0.8rem;
-  border-radius: 14px;
-}
-
-.next-step-dock h3 {
-  margin-bottom: 0.1rem;
-  font-size: 1.15rem;
-}
-
-.search-stage-panel-reading .next-step-dock h3 {
-  font-size: 1.05rem;
-}
-
-.dock-note {
-  padding: 0.75rem 0.82rem;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.52);
-  border: 1px solid rgba(197, 139, 51, 0.12);
-}
-
-.dock-note p {
-  margin: 0.35rem 0 0;
-}
-
-.dock-actions {
+.search-readiness-action {
   display: flex;
+  align-items: center;
+  gap: 0.75rem;
   flex-wrap: wrap;
-  gap: 0.7rem;
+  min-height: 3rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 14px;
+  background: rgba(255, 252, 247, 0.68);
+  border: 1px solid rgba(30, 42, 38, 0.08);
 }
 
-.next-step-dock .workspace-bridge {
-  margin-top: 0;
-  padding-top: 0.85rem;
-  border-top: 1px solid rgba(30, 42, 38, 0.08);
-}
-
-.next-step-support {
-  display: grid;
-  gap: 0.55rem;
+.search-readiness-action .helper {
+  flex: 1 1 18rem;
+  margin: 0;
 }
 
 .search-operations-stack {

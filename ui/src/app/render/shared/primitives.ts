@@ -108,6 +108,7 @@ export function renderStatusButton(
     className?: string;
     testId?: string;
     prefixHtml?: string;
+    childrenHtml?: string;
     attrs?: Record<string, string | number | boolean | null | undefined>;
     disabled?: boolean;
   } = {}
@@ -125,7 +126,8 @@ export function renderStatusButton(
       ${attrs}
     >
       ${options.prefixHtml ?? ""}
-      ${escapeHtml(label)}
+      <span>${escapeHtml(label)}</span>
+      ${options.childrenHtml ?? ""}
     </button>
   `;
 }

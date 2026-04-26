@@ -4,6 +4,8 @@ import {
   createLibrary,
   createTempDocumentSearchFixtures,
   mockDocumentSearchResults,
+  openInventoryImportPanel,
+  openSearchWorkspace,
   waitForFirstJobCompleted,
 } from "./fixtures";
 
@@ -13,9 +15,11 @@ export function registerWorkspaceMobileDetailScenarios() {
     try {
       await page.setViewportSize({ width: 390, height: 844 });
       await createLibrary(page, "search-mobile-sheet");
+      await openInventoryImportPanel(page);
       await page.getByTestId("import-paths-input").fill(`${fixtures.imagePath}\n${fixtures.pdfPath}`);
       await page.getByTestId("import-submit-button").click();
       await waitForFirstJobCompleted(page);
+      await openSearchWorkspace(page);
       await expect(page.getByTestId("detail-panel")).toHaveCount(0);
 
       await page.getByTestId("search-mode-document").click();

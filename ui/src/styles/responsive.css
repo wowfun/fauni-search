@@ -173,6 +173,7 @@
   }
 
   .inventory-source-management-summary,
+  .inventory-import-head,
   .inventory-source-management-head,
   .inventory-library-maintenance-head,
   .source-root-form-head,
@@ -202,7 +203,6 @@
   .search-common-filters,
   .workspace-library-toolbar-row,
   .workspace-library-name-form,
-  .dock-actions,
   .detail-action-row {
     display: grid;
     grid-template-columns: 1fr;
