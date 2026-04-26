@@ -2,15 +2,14 @@
 
 ## 2026-04-26
 ### Added
-- Added the public App OpenAPI contract and the initial `faus` product CLI for `serve`, `status`, `web`, and basic library workflows.
-- Added explicit dev smoke coverage for the headless `faus serve` runtime.
+- Added the public App OpenAPI contract and the initial `faus` product CLI covering runtime, Web, library, jobs, and import workflows.
+- Added explicit dev smoke coverage for the headless `faus serve` runtime and local script alignment.
 
 ### Changed
-- Reworked the Rust HTTP/API boundary around axum 0.8, `/runtime/status`, route discovery, and API-only `faus serve`.
-- Moved production Web hosting and API proxying into `faus web`, while keeping Vite under the local development wrapper.
-- Reworked local runtime scripts around `faus serve`, including pid discovery, backend-before-Vite readiness, and dev smoke alignment.
-- Improved `faus` CLI structure, help text, direct local API connections, startup probing, and client-side error diagnostics.
-- Aligned local smoke scripts with the current public library payloads and runtime-status naming.
+- Reworked the Rust HTTP/API boundary, route discovery, `/runtime/status`, `faus serve`, `faus web`, and local wrapper responsibilities.
+- Replaced the single-row durable state JSON snapshot with structured SQLite tables for persistent library state.
+- Improved `faus` CLI structure, help text, client-side diagnostics, and direct App API workflows.
+- Simplified the Search and background-task UI, including Inventory-owned imports, status-capsule job progress, and stable video result thumbnails during polling.
 
 ## 2026-04-25
 ### Changed
