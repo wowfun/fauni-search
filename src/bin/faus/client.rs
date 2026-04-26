@@ -1,7 +1,7 @@
 use crate::error::CliError;
-use reqwest::{Client, Url};
+use reqwest::{multipart, Client, Url};
 use serde_json::{json, Value};
-use std::{env, time::Duration};
+use std::{env, fs, path::Path, time::Duration};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:53210";
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -120,11 +120,52 @@ pub(crate) async fn patch_json(
     send_json_request(client.patch(&request.url).json(body), request).await
 }
 
+pub(crate) async fn delete_json(
+    client: &Client,
+    request: &AppRequest,
+) -> Result<FetchedJson, CliError> {
+    send_json_request(client.delete(&request.url), request).await
+}
+
 pub(crate) async fn post_empty_json(
     client: &Client,
     request: &AppRequest,
 ) -> Result<FetchedJson, CliError> {
     send_json_request(client.post(&request.url), request).await
+}
+
+pub(crate) async fn post_multipart_file(
+    client: &Client,
+    request: &AppRequest,
+    field_name: &'static str,
+    path: &Path,
+) -> Result<FetchedJson, CliError> {
+    let bytes = fs::read(path).map_err(|error| {
+        CliError::new(
+            "file_read_failed",
+            format!("Could not read query file `{}`: {error}", path.display()),
+        )
+        .with_hint("Check that the path exists and is readable from the current shell.")
+        .with_details(json!({ "path": path.to_string_lossy() }))
+    })?;
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("query-file")
+        .to_string();
+    let content_type = infer_content_type(path);
+    let part = multipart::Part::bytes(bytes)
+        .file_name(filename)
+        .mime_str(content_type)
+        .map_err(|error| {
+            CliError::new(
+                "multipart_build_failed",
+                format!("Could not prepare query file upload: {error}"),
+            )
+        })?;
+    let form = multipart::Form::new().part(field_name, part);
+    send_json_request(client.post(&request.url).multipart(form), request).await
 }
 
 async fn send_json_request(
@@ -207,4 +248,22 @@ fn connection_hint(context: &AppRequest) -> &'static str {
 
 fn invalid_json_hint() -> &'static str {
     "The target may still be starting, the port may be occupied by another process, or the URL may not be a FauniSearch App API server."
+}
+
+fn infer_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("mp4") | Some("m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
+    }
 }

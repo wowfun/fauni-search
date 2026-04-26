@@ -3,6 +3,7 @@
 ## 2026-04-26
 ### Added
 - Added the public App OpenAPI contract and the initial `faus` product CLI covering runtime, Web, library, jobs, and import workflows.
+- Added `faus sources` and flag-based `faus search`.
 - Added explicit dev smoke coverage for the headless `faus serve` runtime and local script alignment.
 
 ### Changed

@@ -37,6 +37,7 @@ fn top_help_describes_cli_and_examples() {
     assert!(stdout.contains("Examples:"));
     assert!(stdout.contains("faus serve"));
     assert!(stdout.contains("faus library list"));
+    assert!(stdout.contains("faus sources roots list"));
     assert!(stdout.contains("faus import --library-id demo"));
 }
 
@@ -869,6 +870,797 @@ async fn import_human_output_summarizes_rejections_and_job() {
     assert!(stdout.contains("unsupported_type"));
 }
 
+#[test]
+fn sources_help_exposes_workflows() {
+    let output = faus()
+        .args(["sources", "--help"])
+        .output()
+        .expect("faus sources help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    for command in ["roots", "list", "refresh", "rescan"] {
+        assert!(stdout.contains(command), "missing {command} in help");
+    }
+    assert!(stdout.contains("source inventory"));
+    assert!(stdout.contains("does not start local processes"));
+}
+
+#[test]
+fn sources_roots_help_exposes_lifecycle_commands() {
+    let output = faus()
+        .args(["sources", "roots", "--help"])
+        .output()
+        .expect("faus sources roots help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    for command in ["list", "create", "show", "update", "delete"] {
+        assert!(stdout.contains(command), "missing {command} in help");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_roots_list_uses_faus_base_url_and_outputs_json() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args(["--json", "sources", "roots", "list", "--library-id", "demo"])
+        .output()
+        .expect("faus sources roots list should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["data"]["base_url"], server.base_url);
+    assert_eq!(
+        payload["data"]["source_roots"][0]["source_root_id"],
+        "root_1"
+    );
+    assert_eq!(server.requests(), vec!["/libraries/demo/source-roots"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_roots_create_sends_body_and_outputs_source_root() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let cwd = temp_test_dir("sources-root-create");
+    let expected_path = cwd.join("docs").to_string_lossy().to_string();
+
+    let output = faus()
+        .current_dir(&cwd)
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--debug",
+            "--json",
+            "sources",
+            "roots",
+            "create",
+            "--library-id",
+            "demo",
+            "--root-path",
+            "docs",
+            "--disabled",
+            "--include-glob",
+            "**/*.pdf",
+            "--exclude-glob",
+            "**/drafts/**",
+            "--include-extension",
+            "pdf",
+        ])
+        .output()
+        .expect("faus sources roots create should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["source_root"]["source_root_id"], "root_1");
+    assert_eq!(payload["data"]["source_root"]["root_path"], expected_path);
+    assert_eq!(
+        payload["debug"]["request_url"],
+        format!("{}/libraries/demo/source-roots", server.base_url)
+    );
+    assert_eq!(payload["debug"]["http_status"], 201);
+
+    let records = server.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].method, "POST");
+    assert_eq!(records[0].path, "/libraries/demo/source-roots");
+    assert_eq!(
+        records[0].body,
+        Some(json!({
+            "root_path": expected_path,
+            "enabled": false,
+            "rules": {
+                "include_globs": ["**/*.pdf"],
+                "exclude_globs": ["**/drafts/**"],
+                "include_extensions": ["pdf"]
+            }
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_roots_show_update_and_delete_use_expected_paths() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let cwd = temp_test_dir("sources-root-update");
+    let updated_path = cwd.join("library").to_string_lossy().to_string();
+
+    let show = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "roots",
+            "show",
+            "--library-id",
+            "demo",
+            "root_1",
+        ])
+        .output()
+        .expect("faus sources roots show should run");
+    assert_success(&show);
+    let show_payload = stdout_json(&show);
+    assert_eq!(
+        show_payload["data"]["source_root"]["source_root_id"],
+        "root_1"
+    );
+
+    let update = faus()
+        .current_dir(&cwd)
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "roots",
+            "update",
+            "--library-id",
+            "demo",
+            "root_1",
+            "--root-path",
+            "library",
+            "--disable",
+            "--include-glob",
+            "**/*.md",
+        ])
+        .output()
+        .expect("faus sources roots update should run");
+    assert_success(&update);
+    let update_payload = stdout_json(&update);
+    assert_eq!(update_payload["data"]["source_root"]["enabled"], false);
+
+    let delete = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "roots",
+            "delete",
+            "--library-id",
+            "demo",
+            "root_1",
+        ])
+        .output()
+        .expect("faus sources roots delete should run");
+    assert_success(&delete);
+
+    let records = server.records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].method, "GET");
+    assert_eq!(records[0].path, "/libraries/demo/source-roots/root_1");
+    assert_eq!(records[1].method, "PATCH");
+    assert_eq!(records[1].path, "/libraries/demo/source-roots/root_1");
+    assert_eq!(
+        records[1].body,
+        Some(json!({
+            "root_path": updated_path,
+            "enabled": false,
+            "rules": {
+                "include_globs": ["**/*.md"],
+                "exclude_globs": [],
+                "include_extensions": []
+            }
+        }))
+    );
+    assert_eq!(records[2].method, "DELETE");
+    assert_eq!(records[2].path, "/libraries/demo/source-roots/root_1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_list_filters_are_url_encoded() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "list",
+            "--library-id",
+            "demo",
+            "--source-root-id",
+            "root 1",
+            "--source-type",
+            "video/mp4",
+            "--status",
+            "needs attention",
+        ])
+        .output()
+        .expect("faus sources list should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["sources"][0]["source_id"], "src_1");
+    assert_eq!(
+        server.requests(),
+        vec!["/libraries/demo/sources?source_root_id=root+1&source_type=video%2Fmp4&status=needs+attention"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_refresh_and_rescan_use_library_and_root_paths() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let refresh_library = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "refresh",
+            "--library-id",
+            "demo",
+        ])
+        .output()
+        .expect("faus sources refresh should run");
+    assert_success(&refresh_library);
+    let refresh_payload = stdout_json(&refresh_library);
+    assert_eq!(refresh_payload["data"]["action"]["job_handle"], "job_1");
+
+    let rescan_root = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "rescan",
+            "--library-id",
+            "demo",
+            "--source-root-id",
+            "root_1",
+        ])
+        .output()
+        .expect("faus sources rescan should run");
+    assert_success(&rescan_root);
+
+    let records = server.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].method, "POST");
+    assert_eq!(records[0].path, "/libraries/demo/refresh");
+    assert_eq!(records[1].method, "POST");
+    assert_eq!(
+        records[1].path,
+        "/libraries/demo/source-roots/root_1/rescan"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_base_url_flag_overrides_env_and_trims_trailing_slash() {
+    let env_server = StatusServer::start(RuntimeMode::Ok).await;
+    let flag_server = StatusServer::start(RuntimeMode::Ok).await;
+    let base_url_with_slash = format!("{}/", flag_server.base_url);
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &env_server.base_url)
+        .args([
+            "--base-url",
+            &base_url_with_slash,
+            "--json",
+            "sources",
+            "roots",
+            "show",
+            "--library-id",
+            "demo",
+            "root_1",
+        ])
+        .output()
+        .expect("faus sources roots show should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["base_url"], flag_server.base_url);
+    assert_eq!(env_server.requests(), Vec::<String>::new());
+    assert_eq!(
+        flag_server.requests(),
+        vec!["/libraries/demo/source-roots/root_1"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_preserves_server_error_envelope() {
+    let server = StatusServer::start(RuntimeMode::ErrorEnvelope).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "roots",
+            "list",
+            "--library-id",
+            "demo",
+        ])
+        .output()
+        .expect("faus sources roots list should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["error"]["code"], "runtime_unavailable");
+    assert_eq!(payload["error"]["message"], "Qdrant is offline");
+    assert_eq!(payload["error"]["details"]["component"], "qdrant");
+    assert_eq!(payload["error"]["retryable"], true);
+    assert!(payload["error"].get("hint").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_rejects_missing_data_envelope() {
+    let server = StatusServer::start(RuntimeMode::MissingData).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "roots",
+            "list",
+            "--library-id",
+            "demo",
+        ])
+        .output()
+        .expect("faus sources roots list should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("App API contract"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/libraries/demo/source-roots", server.base_url)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_rejects_non_json_response() {
+    let server = StatusServer::start(RuntimeMode::NotJson).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "sources",
+            "roots",
+            "list",
+            "--library-id",
+            "demo",
+        ])
+        .output()
+        .expect("faus sources roots list should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("FauniSearch App API server"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/libraries/demo/source-roots", server.base_url)
+    );
+    assert_eq!(payload["error"]["details"]["http_status"], 200);
+}
+
+#[test]
+fn search_help_describes_flag_based_inputs() {
+    let output = faus()
+        .args(["search", "--help"])
+        .output()
+        .expect("faus search help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    for flag in [
+        "--library-id",
+        "--all-libraries",
+        "--text",
+        "--image",
+        "--video",
+        "--document",
+        "--top-k",
+        "--cursor",
+        "--target-content-type",
+    ] {
+        assert!(stdout.contains(flag), "missing {flag} in help");
+    }
+    assert!(stdout.contains("combined queries"));
+    assert!(stdout.contains("faus search --library-id demo --text"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_text_library_scope_sends_body_and_outputs_json() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args([
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--text",
+            "terminal screen",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["data"]["base_url"], server.base_url);
+    assert_eq!(
+        payload["data"]["search"]["results"][0]["library_id"],
+        "demo"
+    );
+    assert_eq!(server.requests(), vec!["/search/text"]);
+
+    let records = server.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].method, "POST");
+    assert_eq!(records[0].path, "/search/text");
+    assert_eq!(
+        records[0].body,
+        Some(json!({
+            "text": "terminal screen",
+            "search_scope": {
+                "kind": "library",
+                "library_id": "demo"
+            }
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_text_all_libraries_sends_common_flags_and_debug() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--debug",
+            "--json",
+            "search",
+            "--all-libraries",
+            "--text",
+            "quarterly report",
+            "--top-k",
+            "7",
+            "--cursor",
+            "cursor_1",
+            "--target-content-type",
+            "image",
+            "--target-content-type",
+            "video",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["search"]["debug"]["request_debug"], true);
+    assert_eq!(
+        payload["debug"]["search_request_url"],
+        format!("{}/search/text", server.base_url)
+    );
+    assert_eq!(payload["debug"]["search_http_status"], 200);
+
+    let records = server.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].body,
+        Some(json!({
+            "text": "quarterly report",
+            "search_scope": {
+                "kind": "all_libraries"
+            },
+            "top_k": 7,
+            "cursor": "cursor_1",
+            "target_content_types": ["image", "video"],
+            "debug": true
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_file_inputs_upload_then_search() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let cwd = temp_test_dir("search-files");
+    let image = cwd.join("query.png");
+    let video = cwd.join("clip.mp4");
+    let document = cwd.join("report.pdf");
+    fs::write(&image, b"image").expect("image fixture should be written");
+    fs::write(&video, b"video").expect("video fixture should be written");
+    fs::write(&document, b"%PDF").expect("document fixture should be written");
+
+    let image_output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--image",
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("faus image search should run");
+    assert_success(&image_output);
+    let image_payload = stdout_json(&image_output);
+    assert_eq!(
+        image_payload["data"]["query_asset"]["temp_asset_id"],
+        "asset_image_1"
+    );
+
+    let video_output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--video",
+            video.to_str().unwrap(),
+            "--video-start-ms",
+            "42000",
+            "--video-end-ms",
+            "50000",
+        ])
+        .output()
+        .expect("faus video search should run");
+    assert_success(&video_output);
+
+    let document_output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--document",
+            document.to_str().unwrap(),
+            "--document-start-page",
+            "1",
+            "--document-end-page",
+            "3",
+        ])
+        .output()
+        .expect("faus document search should run");
+    assert_success(&document_output);
+
+    assert_eq!(
+        server.requests(),
+        vec![
+            "/libraries/demo/query-assets/images",
+            "/search/image",
+            "/libraries/demo/query-assets/videos",
+            "/search/video",
+            "/libraries/demo/query-assets/documents",
+            "/search/document",
+        ]
+    );
+    let records = server.records();
+    assert_eq!(
+        records[1].body.as_ref().unwrap()["image_input"]["kind"],
+        "temp_asset"
+    );
+    assert_eq!(
+        records[1].body.as_ref().unwrap()["image_input"]["temp_asset_id"],
+        "asset_image_1"
+    );
+    assert_eq!(
+        records[3].body.as_ref().unwrap()["video_input"]["locator"],
+        json!({ "start_ms": 42000, "end_ms": 50000 })
+    );
+    assert_eq!(
+        records[5].body.as_ref().unwrap()["document_input"]["locator"],
+        json!({ "start_page": 1, "end_page": 3 })
+    );
+}
+
+#[test]
+fn search_multiple_inputs_returns_not_supported_without_http() {
+    let output = faus()
+        .args([
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--text",
+            "terminal",
+            "--image",
+            "/tmp/query.png",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "not_supported");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("combined search"));
+}
+
+#[test]
+fn search_file_all_libraries_returns_not_supported_without_http() {
+    let output = faus()
+        .args([
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--json",
+            "search",
+            "--all-libraries",
+            "--image",
+            "/tmp/query.png",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "not_supported");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("--library-id"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_base_url_flag_overrides_env_and_trims_trailing_slash() {
+    let env_server = StatusServer::start(RuntimeMode::Ok).await;
+    let flag_server = StatusServer::start(RuntimeMode::Ok).await;
+    let base_url_with_slash = format!("{}/", flag_server.base_url);
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &env_server.base_url)
+        .args([
+            "--base-url",
+            &base_url_with_slash,
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--text",
+            "query",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["base_url"], flag_server.base_url);
+    assert_eq!(env_server.requests(), Vec::<String>::new());
+    assert_eq!(flag_server.requests(), vec!["/search/text"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_preserves_server_error_envelope() {
+    let server = StatusServer::start(RuntimeMode::ErrorEnvelope).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--text",
+            "query",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["error"]["code"], "runtime_unavailable");
+    assert_eq!(payload["error"]["message"], "Qdrant is offline");
+    assert_eq!(payload["error"]["details"]["component"], "qdrant");
+    assert_eq!(payload["error"]["retryable"], true);
+    assert!(payload["error"].get("hint").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_rejects_missing_success_data_envelope() {
+    let server = StatusServer::start(RuntimeMode::MissingData).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--text",
+            "query",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("App API contract"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/search/text", server.base_url)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_rejects_non_json_response() {
+    let server = StatusServer::start(RuntimeMode::NotJson).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "search",
+            "--library-id",
+            "demo",
+            "--text",
+            "query",
+        ])
+        .output()
+        .expect("faus search should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_response");
+    assert!(payload["error"]["hint"]
+        .as_str()
+        .expect("hint should be present")
+        .contains("FauniSearch App API server"));
+    assert_eq!(
+        payload["error"]["details"]["request_url"],
+        format!("{}/search/text", server.base_url)
+    );
+    assert_eq!(payload["error"]["details"]["http_status"], 200);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_human_output_is_short_summary() {
     let server = StatusServer::start(RuntimeMode::Ok).await;
@@ -1391,6 +2183,49 @@ impl StatusServer {
             .route("/libraries/{library_id}/archive", post(archive_library))
             .route("/libraries/{library_id}/restore", post(restore_library))
             .route("/libraries/{library_id}/imports", post(import_paths))
+            .route(
+                "/libraries/{library_id}/source-roots",
+                get(list_source_roots).post(create_source_root),
+            )
+            .route(
+                "/libraries/{library_id}/source-roots/{source_root_id}",
+                get(show_source_root)
+                    .patch(update_source_root)
+                    .delete(delete_source_root),
+            )
+            .route("/libraries/{library_id}/sources", get(list_sources))
+            .route(
+                "/libraries/{library_id}/refresh",
+                post(refresh_library_sources),
+            )
+            .route(
+                "/libraries/{library_id}/rescan",
+                post(rescan_library_sources),
+            )
+            .route(
+                "/libraries/{library_id}/source-roots/{source_root_id}/refresh",
+                post(refresh_source_root),
+            )
+            .route(
+                "/libraries/{library_id}/source-roots/{source_root_id}/rescan",
+                post(rescan_source_root),
+            )
+            .route(
+                "/libraries/{library_id}/query-assets/images",
+                post(upload_query_image),
+            )
+            .route(
+                "/libraries/{library_id}/query-assets/videos",
+                post(upload_query_video),
+            )
+            .route(
+                "/libraries/{library_id}/query-assets/documents",
+                post(upload_query_document),
+            )
+            .route("/search/text", post(search_text))
+            .route("/search/image", post(search_image))
+            .route("/search/video", post(search_video))
+            .route("/search/document", post(search_document))
             .with_state(state);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
@@ -1708,6 +2543,286 @@ async fn import_paths(
     }
 }
 
+async fn list_source_roots(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    let path = format!("/libraries/{library_id}/source-roots");
+    state.record_http("GET", &path, None);
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "meta": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => Json(json!({
+            "data": {
+                "source_roots": [
+                    source_root_snapshot("root_1", "/tmp/demo", true)
+                ]
+            }
+        }))
+        .into_response(),
+    }
+}
+
+async fn create_source_root(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let path = format!("/libraries/{library_id}/source-roots");
+    state.record_http("POST", &path, Some(body.clone()));
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "meta": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => {
+            let root_path = body
+                .get("root_path")
+                .and_then(Value::as_str)
+                .unwrap_or("/tmp/demo");
+            let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "data": source_root_snapshot("root_1", root_path, enabled)
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn show_source_root(
+    Path((library_id, source_root_id)): Path<(String, String)>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    let path = format!("/libraries/{library_id}/source-roots/{source_root_id}");
+    state.record_http("GET", &path, None);
+    Json(json!({
+        "data": {
+            "source_root": source_root_snapshot(&source_root_id, "/tmp/demo", true)
+        }
+    }))
+    .into_response()
+}
+
+async fn update_source_root(
+    Path((library_id, source_root_id)): Path<(String, String)>,
+    State(state): State<StatusServerState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let path = format!("/libraries/{library_id}/source-roots/{source_root_id}");
+    state.record_http("PATCH", &path, Some(body.clone()));
+    let root_path = body
+        .get("root_path")
+        .and_then(Value::as_str)
+        .unwrap_or("/tmp/demo");
+    let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    Json(json!({
+        "data": source_root_snapshot(&source_root_id, root_path, enabled)
+    }))
+    .into_response()
+}
+
+async fn delete_source_root(
+    Path((library_id, source_root_id)): Path<(String, String)>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    let path = format!("/libraries/{library_id}/source-roots/{source_root_id}");
+    state.record_http("DELETE", &path, None);
+    Json(json!({
+        "data": source_root_snapshot(&source_root_id, "/tmp/demo", false)
+    }))
+    .into_response()
+}
+
+async fn list_sources(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+    uri: axum::http::Uri,
+) -> Response {
+    let path = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/sources")
+        .to_string();
+    state.record_http("GET", &path, None);
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "meta": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => Json(json!({
+            "data": {
+                "sources": [
+                    source_snapshot(&library_id, "src_1", "root_1")
+                ]
+            }
+        }))
+        .into_response(),
+    }
+}
+
+async fn refresh_library_sources(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    source_action_response(
+        state,
+        format!("/libraries/{library_id}/refresh"),
+        None,
+        "refresh",
+    )
+}
+
+async fn rescan_library_sources(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    source_action_response(
+        state,
+        format!("/libraries/{library_id}/rescan"),
+        None,
+        "rescan",
+    )
+}
+
+async fn refresh_source_root(
+    Path((library_id, source_root_id)): Path<(String, String)>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    source_action_response(
+        state,
+        format!("/libraries/{library_id}/source-roots/{source_root_id}/refresh"),
+        Some(source_root_id),
+        "refresh",
+    )
+}
+
+async fn rescan_source_root(
+    Path((library_id, source_root_id)): Path<(String, String)>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    source_action_response(
+        state,
+        format!("/libraries/{library_id}/source-roots/{source_root_id}/rescan"),
+        Some(source_root_id),
+        "rescan",
+    )
+}
+
+fn source_action_response(
+    state: StatusServerState,
+    path: String,
+    source_root_id: Option<String>,
+    action: &str,
+) -> Response {
+    state.record_http("POST", &path, None);
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "meta": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => Json(json!({
+            "data": source_action_snapshot(source_root_id.as_deref().unwrap_or("root_1"), action)
+        }))
+        .into_response(),
+    }
+}
+
+async fn upload_query_image(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    upload_query_asset(state, &library_id, "images", "image", "image/png")
+}
+
+async fn upload_query_video(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    upload_query_asset(state, &library_id, "videos", "video", "video/mp4")
+}
+
+async fn upload_query_document(
+    Path(library_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    upload_query_asset(
+        state,
+        &library_id,
+        "documents",
+        "document",
+        "application/pdf",
+    )
+}
+
+fn upload_query_asset(
+    state: StatusServerState,
+    library_id: &str,
+    route_segment: &str,
+    source_type: &str,
+    content_type: &str,
+) -> Response {
+    let path = format!("/libraries/{library_id}/query-assets/{route_segment}");
+    state.record_http("POST", &path, None);
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "data": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => (
+            StatusCode::CREATED,
+            Json(json!({
+                "data": {
+                    "temp_asset_id": format!("asset_{source_type}_1"),
+                    "preview": {
+                        "url": format!("/libraries/{library_id}/query-assets/{route_segment}/asset_{source_type}_1/preview")
+                    },
+                    "source_type": source_type,
+                    "content_type": content_type,
+                    "original_filename": format!("query.{source_type}")
+                }
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn search_text(State(state): State<StatusServerState>, Json(body): Json<Value>) -> Response {
+    search_response(state, "/search/text", "text", body)
+}
+
+async fn search_image(State(state): State<StatusServerState>, Json(body): Json<Value>) -> Response {
+    search_response(state, "/search/image", "image", body)
+}
+
+async fn search_video(State(state): State<StatusServerState>, Json(body): Json<Value>) -> Response {
+    search_response(state, "/search/video", "video", body)
+}
+
+async fn search_document(
+    State(state): State<StatusServerState>,
+    Json(body): Json<Value>,
+) -> Response {
+    search_response(state, "/search/document", "document", body)
+}
+
+fn search_response(
+    state: StatusServerState,
+    path: &str,
+    search_kind: &str,
+    body: Value,
+) -> Response {
+    state.record_http("POST", path, Some(body.clone()));
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "data": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => Json(json!({
+            "data": search_snapshot(search_kind, &body)
+        }))
+        .into_response(),
+    }
+}
+
 fn library_snapshot(library_id: &str, display_name: &str, lifecycle_state: &str) -> Value {
     json!({
         "id": library_id,
@@ -1719,6 +2834,110 @@ fn library_snapshot(library_id: &str, display_name: &str, lifecycle_state: &str)
         },
         "latest_job_id": null,
     })
+}
+
+fn source_root_snapshot(source_root_id: &str, root_path: &str, enabled: bool) -> Value {
+    json!({
+        "source_root_id": source_root_id,
+        "root_path": root_path,
+        "enabled": enabled,
+        "status": if enabled { "ready" } else { "disabled" },
+        "watch_state": if enabled { "watching" } else { "disabled" },
+        "coverage_summary": {
+            "observed_file_count": 3,
+            "matched_file_count": 2,
+            "active_source_count": 1,
+            "inactive_source_count": 1,
+            "last_scan_at_ms": 123456
+        },
+        "rules": {
+            "include_globs": ["**/*"],
+            "exclude_globs": [],
+            "include_extensions": ["pdf"]
+        }
+    })
+}
+
+fn source_snapshot(library_id: &str, source_id: &str, source_root_id: &str) -> Value {
+    json!({
+        "source_id": source_id,
+        "source_path": format!("/tmp/{library_id}/report.pdf"),
+        "source_type": "pdf",
+        "kind": "document",
+        "status": "ready",
+        "relative_path": "report.pdf",
+        "source_root_id": source_root_id,
+        "source_root_path": format!("/tmp/{library_id}"),
+        "source_root_label": source_root_id,
+        "visual_unit_count": 2,
+        "representative_visual_unit": {
+            "visual_unit_id": "vu_1",
+            "source_id": source_id,
+            "kind": "document_page",
+            "source_type": "pdf",
+            "locator": { "page": 1 }
+        },
+        "representative_preview": {
+            "url": format!("/libraries/{library_id}/visual-units/vu_1/preview")
+        }
+    })
+}
+
+fn source_action_snapshot(source_root_id: &str, action: &str) -> Value {
+    json!({
+        "accepted": [
+            {
+                "source_root_id": source_root_id,
+                "root_path": "/tmp/demo",
+                "action": action
+            }
+        ],
+        "rejected": [],
+        "job_handle": "job_1",
+        "job": job_snapshot("job_1", "demo", "source_action", "queued", action, None)
+    })
+}
+
+fn search_snapshot(search_kind: &str, body: &Value) -> Value {
+    let library_id = body
+        .get("search_scope")
+        .and_then(|scope| scope.get("library_id"))
+        .and_then(Value::as_str)
+        .or_else(|| body.get("library_id").and_then(Value::as_str))
+        .unwrap_or("demo");
+    let mut data = json!({
+        "results": [
+            {
+                "library_id": library_id,
+                "visual_unit_id": "vu_1",
+                "source_id": "src_1",
+                "preview": {
+                    "url": format!("/libraries/{library_id}/visual-units/vu_1/preview")
+                },
+                "source_path": format!("/tmp/{search_kind}-source"),
+                "source_type": search_kind,
+                "kind": match search_kind {
+                    "video" => "video_segment",
+                    "document" => "document_page",
+                    "image" => "image",
+                    _ => "text_chunk",
+                },
+                "locator": match search_kind {
+                    "video" => json!({ "start_ms": 42000, "end_ms": 50000 }),
+                    "document" => json!({ "page": 1 }),
+                    _ => json!({ "path": format!("/tmp/{search_kind}-source") }),
+                },
+                "cursor": "cursor_1",
+                "score": 8.25
+            }
+        ],
+        "next_cursor": "cursor_2",
+        "unsupported_content_types": []
+    });
+    if body.get("debug").and_then(Value::as_bool).unwrap_or(false) {
+        data["debug"] = json!({ "request_debug": true });
+    }
+    data
 }
 
 fn import_snapshot(library_id: &str, body: &Value) -> Value {
