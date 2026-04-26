@@ -206,7 +206,7 @@ export async function refreshGlobalContentTypes() {
 }
 
 export async function refreshRuntimeHealth() {
-  const data = await apiRequest<RuntimeHealthData>("/runtime-health");
+  const data = await apiRequest<RuntimeHealthData>("/runtime/status");
   state.runtimeHealth = data;
 }
 

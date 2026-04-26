@@ -893,15 +893,15 @@ export function renderRuntimeHealthPanel() {
     : "";
 
   return `
-    <section class="panel settings-panel" data-testid="runtime-health-panel">
+    <section class="panel settings-panel" data-testid="runtime-status-panel">
       <div class="panel-head">
         <div>
           <p class="eyebrow">运行时</p>
-          <h2>运行时健康</h2>
+          <h2>运行时状态</h2>
         </div>
       </div>
       <ul class="provider-resolution-list">
-        ${processRows || `<li>${renderEmptyState("暂无运行时健康快照。")}</li>`}
+        ${processRows || `<li>${renderEmptyState("暂无运行时状态快照。")}</li>`}
       </ul>
       <div class="inline-actions">
         <a href="${endpoints.appHealth}" target="_blank" rel="noreferrer">App 健康</a>

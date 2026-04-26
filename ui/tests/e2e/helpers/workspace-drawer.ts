@@ -24,7 +24,7 @@ export function registerWorkspaceDrawerScenarios() {
 
     await expect(page.getByTestId("settings-workspace")).toBeVisible();
     await expect(page.getByTestId("settings-stage-title")).toHaveText("诊断");
-    await expect(page.getByTestId("runtime-health-panel")).toBeVisible();
+    await expect(page.getByTestId("runtime-status-panel")).toBeVisible();
     await expect(page.getByTestId("settings-diagnostics-jobs-disclosure")).toBeVisible();
     await expect(page.getByTestId("settings-diagnostics-jobs-disclosure")).not.toHaveAttribute(
       "open",

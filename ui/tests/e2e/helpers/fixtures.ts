@@ -208,11 +208,11 @@ export async function openSettingsSection(page, section) {
 export async function openSettingsDiagnostics(page) {
   if (!(await page.getByTestId("settings-workspace").isVisible())) {
     await page.getByTestId("status-capsule-button").click();
-  } else if (!(await page.getByTestId("runtime-health-panel").isVisible())) {
+  } else if (!(await page.getByTestId("runtime-status-panel").isVisible())) {
     await openSettingsSection(page, "diagnostics");
   }
   await expect(page.getByTestId("settings-workspace")).toBeVisible();
-  await expect(page.getByTestId("runtime-health-panel")).toBeVisible();
+  await expect(page.getByTestId("runtime-status-panel")).toBeVisible();
 }
 
 export async function openDiagnosticsJobs(page) {

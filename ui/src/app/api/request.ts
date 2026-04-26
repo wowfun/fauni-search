@@ -60,6 +60,10 @@ export function toApiError(error: unknown): ApiErrorPayload {
   };
 }
 
+function apiFetchPath(path: string): string {
+  return `${import.meta.env.DEV ? "/api" : ""}${path}`;
+}
+
 export async function apiRequest<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   const isFormDataBody = options.body instanceof FormData;
@@ -67,7 +71,7 @@ export async function apiRequest<T = any>(path: string, options: RequestInit = {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(apiFetchPath(path), {
     ...options,
     headers,
   });

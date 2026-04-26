@@ -14,7 +14,7 @@ export function registerSettingsScenarios() {
     await createLibrary(page, "settings-diagnostics");
     await openSettingsSection(page, "diagnostics");
 
-    await expect(page.getByTestId("runtime-health-panel")).toBeVisible();
+    await expect(page.getByTestId("runtime-status-panel")).toBeVisible();
     await expect(page.getByTestId("vector-space-diagnostics-panel")).toBeVisible();
     await expect(page.getByTestId("settings-diagnostics-jobs-disclosure")).toBeVisible();
     await expect(page.getByTestId("settings-diagnostics-jobs-disclosure")).not.toHaveAttribute(
