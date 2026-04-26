@@ -34,16 +34,15 @@ pub(crate) enum ServeOutput {
 pub(crate) struct ServeReady {
     pub(crate) base_url: String,
     pub(crate) health_url: String,
-    pub(crate) web_url: String,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct ServeArgs {
-    #[arg(long)]
+    #[arg(long, value_name = "HOST", help = "Rust App API listen host")]
     pub(crate) host: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_name = "PORT", help = "Rust App API listen port")]
     pub(crate) port: Option<u16>,
-    #[arg(long)]
+    #[arg(long, help = "Use the isolated .env.dev runtime profile")]
     pub(crate) dev: bool,
 }
 
@@ -142,7 +141,6 @@ pub(crate) async fn run_serve_with_ready_hook(
         format!("[info] Config:  {}", loaded_env.source.display()),
     );
     serve_log(output, format!("[info] App:     {app_base_url}/health"));
-    serve_log(output, format!("[info] Web:     {app_base_url}"));
     serve_log(
         output,
         format!("[info] OpenAPI: {app_base_url}/openapi.json"),
@@ -156,7 +154,6 @@ pub(crate) async fn run_serve_with_ready_hook(
 
     let ready = ServeReady {
         health_url: format!("{app_base_url}/health"),
-        web_url: app_base_url.clone(),
         base_url: app_base_url,
     };
 
@@ -440,6 +437,11 @@ fn load_selected_env(repo_root: &Path, dev: bool) -> CliResult<LoadedEnv> {
     Ok(selected)
 }
 
+pub(crate) fn load_default_env(repo_root: &Path) -> CliResult<()> {
+    let _ = load_selected_env(repo_root, false)?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct LoadedEnv {
     source: PathBuf,
@@ -607,7 +609,7 @@ fn sidecar_health_url() -> Result<String, io::Error> {
     ))
 }
 
-fn required_env(name: &'static str) -> Result<String, io::Error> {
+pub(crate) fn required_env(name: &'static str) -> Result<String, io::Error> {
     env::var(name).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -618,7 +620,7 @@ fn required_env(name: &'static str) -> Result<String, io::Error> {
     })
 }
 
-fn find_repo_root(start: &Path) -> Result<PathBuf, io::Error> {
+pub(crate) fn find_repo_root(start: &Path) -> Result<PathBuf, io::Error> {
     for candidate in start.ancestors() {
         if candidate.join("Cargo.toml").exists() && candidate.join("fauni.config.json").exists() {
             return Ok(candidate.to_path_buf());

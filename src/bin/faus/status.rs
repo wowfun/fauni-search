@@ -1,8 +1,7 @@
 use crate::{
-    client::{fetch_json, resolve_base_url},
+    client::{app_client, fetch_json, resolve_base_url},
     error::{CliError, CliFailure},
 };
-use reqwest::Client;
 use serde_json::{json, Value};
 
 pub(crate) async fn run_status(
@@ -12,11 +11,11 @@ pub(crate) async fn run_status(
 ) -> Result<(), CliFailure> {
     let base =
         resolve_base_url(base_url_arg).map_err(|error| CliFailure::client(error, json_output))?;
-    let health_url = format!("{}/health", base.base_url);
-    let runtime_status_url = format!("{}/runtime/status", base.base_url);
-    let client = Client::new();
+    let health_request = base.request("/health");
+    let runtime_status_request = base.request("/runtime/status");
+    let client = app_client().map_err(|error| CliFailure::client(error, json_output))?;
 
-    let health = fetch_json(&client, &health_url)
+    let health = fetch_json(&client, &health_request)
         .await
         .and_then(|fetched| {
             if fetched.value.is_object() {
@@ -24,21 +23,31 @@ pub(crate) async fn run_status(
             } else {
                 Err(CliError::new(
                     "invalid_response",
-                    format!("{health_url} did not return a JSON object"),
+                    format!("{} did not return a JSON object", health_request.url),
                 ))
+                .map_err(|error| {
+                    error
+                        .with_hint("The target may still be starting, the port may be occupied by another process, or the URL may not be a FauniSearch App API server.")
+                        .with_details(health_request.details(Some(fetched.status)))
+                })
             }
         })
         .map_err(|error| CliFailure::client(error, json_output))?;
 
-    let runtime_envelope = fetch_json(&client, &runtime_status_url)
+    let runtime_envelope = fetch_json(&client, &runtime_status_request)
         .await
         .map_err(|error| CliFailure::client(error, json_output))?;
     let Some(runtime_status) = runtime_envelope.value.get("data").cloned() else {
         return Err(CliFailure::client(
             CliError::new(
                 "invalid_response",
-                format!("{runtime_status_url} did not return a SuccessEnvelope data object"),
-            ),
+                format!(
+                    "{} did not return a SuccessEnvelope data object",
+                    runtime_status_request.url
+                ),
+            )
+            .with_hint("The server responded, but the payload did not match the FauniSearch App API contract.")
+            .with_details(runtime_status_request.details(Some(runtime_envelope.status))),
             json_output,
         ));
     };
@@ -46,8 +55,13 @@ pub(crate) async fn run_status(
         return Err(CliFailure::client(
             CliError::new(
                 "invalid_response",
-                format!("{runtime_status_url} did not return a SuccessEnvelope data object"),
-            ),
+                format!(
+                    "{} did not return a SuccessEnvelope data object",
+                    runtime_status_request.url
+                ),
+            )
+            .with_hint("The server responded, but the payload did not match the FauniSearch App API contract.")
+            .with_details(runtime_status_request.details(Some(runtime_envelope.status))),
             json_output,
         ));
     }
@@ -64,8 +78,8 @@ pub(crate) async fn run_status(
         if debug {
             payload["debug"] = json!({
                 "base_url_source": base.source,
-                "health_url": health_url,
-                "runtime_status_url": runtime_status_url,
+                "health_url": health_request.url,
+                "runtime_status_url": runtime_status_request.url,
                 "health_status": health.status,
                 "runtime_status_http_status": runtime_envelope.status,
             });
@@ -79,7 +93,10 @@ pub(crate) async fn run_status(
             &base.base_url,
             &health.value,
             &runtime_status,
-            debug.then_some((health_url.as_str(), runtime_status_url.as_str())),
+            debug.then_some((
+                health_request.url.as_str(),
+                runtime_status_request.url.as_str(),
+            )),
         );
     }
 

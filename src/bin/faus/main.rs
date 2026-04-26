@@ -1,23 +1,35 @@
 mod client;
 mod error;
+mod library;
 mod serve;
 mod status;
 mod web;
 
 use clap::{Parser, Subcommand};
 use error::{invalid_input, CliFailure};
+use library::{run_library, LibraryArgs};
 use serve::{run_serve, ServeArgs};
 use status::run_status;
 use web::run_web;
 
 #[derive(Parser, Debug)]
-#[command(name = "faus", about = "FauniSearch product CLI")]
+#[command(
+    name = "faus",
+    about = "FauniSearch product CLI",
+    long_about = "FauniSearch product CLI for starting the local runtime and using the App API.",
+    after_help = "Examples:\n  faus serve\n  faus status\n  faus library list\n  faus web"
+)]
 struct Cli {
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        value_name = "URL",
+        help = "Use a FauniSearch App API base URL for client commands"
+    )]
     base_url: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Print stable machine-readable JSON")]
     json: bool,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Include CLI-side diagnostic metadata")]
     debug: bool,
     #[command(subcommand)]
     command: Commands,
@@ -25,8 +37,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    #[command(about = "Start the headless local runtime")]
     Serve(ServeArgs),
+    #[command(
+        about = "Inspect an existing App API runtime",
+        long_about = "Inspect an existing FauniSearch App API runtime. This command does not start local processes.",
+        after_help = "Examples:\n  faus status\n  faus --base-url http://127.0.0.1:54210 status\n  faus --json status"
+    )]
     Status,
+    #[command(about = "Manage libraries through the App API")]
+    Library(LibraryArgs),
+    #[command(
+        about = "Open the Web experience for a local or existing runtime",
+        long_about = "Open the FauniSearch Web experience. With an explicit base URL it connects to that App API; without one it may start the default local runtime. It uses built Web assets and does not start Vite.",
+        after_help = "Examples:\n  faus web\n  faus --base-url http://127.0.0.1:54210 web\n  faus --json web"
+    )]
     Web,
 }
 
@@ -57,6 +82,7 @@ async fn run(cli: Cli) -> Result<(), CliFailure> {
             run_serve(args, cli.debug).await.map_err(CliFailure::human)
         }
         Commands::Status => run_status(cli.base_url, cli.json, cli.debug).await,
+        Commands::Library(args) => run_library(args, cli.base_url, cli.json, cli.debug).await,
         Commands::Web => run_web(cli.base_url, cli.json, cli.debug).await,
     }
 }

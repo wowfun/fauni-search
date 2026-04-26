@@ -16,7 +16,11 @@ impl CliFailure {
         if json_output {
             Self::Json(error)
         } else {
-            Self::Human(format!("{}: {}", error.code, error.message))
+            let mut message = format!("{}: {}", error.code, error.message);
+            if let Some(hint) = &error.hint {
+                message.push_str(&format!("\n[hint] {hint}"));
+            }
+            Self::Human(message)
         }
     }
 
@@ -39,6 +43,7 @@ impl CliFailure {
 pub(crate) struct CliError {
     pub(crate) code: String,
     pub(crate) message: String,
+    pub(crate) hint: Option<String>,
     pub(crate) details: Option<Value>,
     pub(crate) retryable: Option<bool>,
 }
@@ -56,9 +61,15 @@ impl CliError {
         Self {
             code: code.to_string(),
             message: message.into(),
+            hint: None,
             details: None,
             retryable: None,
         }
+    }
+
+    pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 
     pub(crate) fn with_details(mut self, details: Value) -> Self {
@@ -75,6 +86,9 @@ impl CliError {
         let mut error = serde_json::Map::new();
         error.insert("code".to_string(), Value::String(self.code));
         error.insert("message".to_string(), Value::String(self.message));
+        if let Some(hint) = self.hint {
+            error.insert("hint".to_string(), Value::String(hint));
+        }
         if let Some(details) = self.details {
             error.insert("details".to_string(), details);
         }

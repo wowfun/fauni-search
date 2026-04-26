@@ -16,19 +16,12 @@ use crate::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
-    response::{IntoResponse, Response},
-    routing::get,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
     Extension, Json, Router,
 };
 use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path as FsPath, PathBuf},
-    sync::Arc,
-};
-use tower_http::services::ServeDir;
+use std::{collections::BTreeMap, fs, sync::Arc};
 use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -112,11 +105,13 @@ pub fn build_app(state: SharedState) -> Router {
         .split_for_parts();
 
     router
-        .route("/", get(web_index))
-        .nest_service("/assets", ServeDir::new(ui_assets_dir()))
-        .fallback(web_spa_fallback)
+        .route("/", axum::routing::get(root_discovery))
         .layer(Extension(Arc::new(openapi)))
         .with_state(state)
+}
+
+async fn root_discovery() -> Json<RootPayload> {
+    route_discovery().await
 }
 
 #[utoipa::path(
@@ -186,98 +181,6 @@ async fn route_discovery() -> Json<RootPayload> {
             "POST /search/document",
         ],
     })
-}
-
-async fn web_index() -> Response {
-    web_index_response(&ui_index_path())
-}
-
-async fn web_spa_fallback(method: Method, uri: Uri) -> Response {
-    if method != Method::GET || is_api_path(uri.path()) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    web_index_response(&ui_index_path())
-}
-
-fn web_index_response(index_path: &FsPath) -> Response {
-    match fs::read(index_path) {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            bytes,
-        )
-            .into_response(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "Web assets are not built. Expected ui/dist/index.html.",
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            format!("Failed to read Web assets: {error}"),
-        )
-            .into_response(),
-    }
-}
-
-fn is_api_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/openapi.json"
-            | "/health"
-            | "/routes"
-            | "/runtime"
-            | "/runtime-health"
-            | "/settings"
-            | "/libraries"
-            | "/jobs"
-            | "/search"
-    ) || path.starts_with("/runtime/")
-        || path.starts_with("/settings/")
-        || path.starts_with("/libraries/")
-        || path.starts_with("/jobs/")
-        || path.starts_with("/search/")
-}
-
-fn ui_dist_dir() -> PathBuf {
-    FsPath::new(env!("CARGO_MANIFEST_DIR")).join("ui/dist")
-}
-
-fn ui_assets_dir() -> PathBuf {
-    ui_dist_dir().join("assets")
-}
-
-fn ui_index_path() -> PathBuf {
-    ui_dist_dir().join("index.html")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_web_index_returns_service_unavailable() {
-        let missing_index = std::env::temp_dir()
-            .join(format!(
-                "fauni-search-missing-web-index-{}",
-                std::process::id()
-            ))
-            .join("index.html");
-        let _ = fs::remove_file(&missing_index);
-
-        let response = web_index_response(&missing_index);
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        assert!(content_type.starts_with("text/plain"));
-    }
 }
 
 #[utoipa::path(

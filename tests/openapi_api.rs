@@ -49,7 +49,7 @@ async fn openapi_api_json_exposes_public_app_contract() {
 
     assert!(
         !paths.contains_key("/"),
-        "server-hosted Web root must not be in the public App OpenAPI contract"
+        "human route discovery root must not be in the public App OpenAPI contract"
     );
     assert!(
         !paths.keys().any(|path| path.starts_with("/assets")),
