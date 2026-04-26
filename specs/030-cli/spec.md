@@ -55,6 +55,7 @@
 - `faus serve` 不通过 `--base-url` 决定监听地址；它使用 `--host`、`--port` 与运行配置启动 Rust server
 - `faus status`、library、import、search、jobs 等 client 型命令默认不读取 `.env`、`.env.dev` 或 `FAUNI_ENV_FILE`
 - 当 Rust 主服务不可达时，client 型命令必须明确报告连接失败；是否启动本机 runtime 只属于 `faus serve` 与基于它的 `faus web` 语义
+- client 型命令连接 Rust 主服务 App API 时不得使用 ambient `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量；本地产品 API 默认应直连目标 base URL
 
 ## 输出与错误
 
@@ -69,11 +70,20 @@
   - `status: "error"`
   - `error.code`
   - `error.message`
+  - 可选 `error.hint`
   - 可选 `error.details`
   - 可选 `error.retryable`
 - 服务端统一错误载荷必须原样映射到 CLI 错误对象中；CLI 可以补充连接层错误码，但不得改写服务端错误语义
-- 默认人类可读输出中的错误文案应保留服务端错误消息，并在连接失败、not_ready、not_supported 这类常见场景中给出明确下一步
+- 默认人类可读输出中的错误文案应保留服务端错误消息，并在连接失败、空响应、not_ready、not_supported 这类常见场景中给出明确下一步；CLI 层错误可以附带 `hint`
+- CLI 层连接和响应错误的 JSON `details` 应优先包含 `base_url`、`base_url_source`、`request_url` 与必要的 HTTP 状态，避免只暴露底层 parser 或 socket 文案
 - `--debug` 可以透传 HTTP 请求中的 `debug` 字段，或展示响应中的调试摘要；调试信息不得默认进入人类可读输出的主层级
+
+## Help 与示例
+
+- 顶层 `faus --help` 应说明产品 CLI 的用途，并展示 `serve`、`status`、`library`、`web` 等常用入口
+- 全局 flags 的 help 文案必须说明 `--base-url`、`--json`、`--debug` 的用途
+- 子命令 help 应用产品语义描述职责边界，例如 `status` 只读连接已有 server，`library` 操作库资源，`web` 启动或连接 Web 体验
+- 基础工作流命令应提供足够短的示例，使用户能直接尝试 `faus serve`、`faus status`、`faus library list` 与 `faus web`
 
 ## 基础命令面
 
@@ -91,7 +101,7 @@
 
 - `faus serve` 是产品级 headless runtime 入口
 - `faus serve` 启动 runtime 三件套：Qdrant、Python sidecar 与 Rust server
-- `faus serve` 不启动 Vite UI；正式 Web 入口由 Rust server-hosted Web 承接
+- `faus serve` 不启动 Vite UI，也不托管 `ui/dist`；它只提供 headless App API runtime
 - 默认前台运行，进程生命周期由当前终端控制
 - 后台化、pid、日志文件、stop 与运行面清理由 `scripts/local/run.sh --detach` 等 wrapper 和本地脚本承接
 - `faus serve` 至少支持：
@@ -155,10 +165,11 @@
 
 - `faus web` 用于进入当前 Rust server 对应的 Web 体验
 - 当显式 `--base-url` 或 `FAUS_BASE_URL` 存在时，`faus web` 优先连接该 server 并打开对应 Web URL
-- 当没有显式目标 server 时，`faus web` 可以复用 `faus serve` 能力启动默认本机 runtime，再打开浏览器
+- 当没有显式目标 server 时，`faus web` 可以复用 `faus serve` 能力启动默认本机 runtime，再启动本地 Web server 并打开浏览器
 - 如果浏览器打开失败，命令应打印可访问 URL
-- 如果 `faus web` 自己启动了本机 runtime，它应保持前台运行并由用户中断退出；如果只连接已有 server，打开或打印 URL 后可以退出
-- server-hosted Web 的具体路由、静态资源托管和 Vite 开发模式分界由 [008-ui-ux](../008-ui-ux/spec.md) 与 [020-frontend-architecture](../020-frontend-architecture/spec.md) 承接
+- `faus web` 托管 `ui/dist` 并把同源 API 路径代理到 Rust server App API；Web URL 默认使用本地运行配置的 `UI_HOST` / `UI_PORT`
+- `faus web` 应保持前台运行并由用户中断退出
+- CLI-hosted Web 的具体路由、静态资源托管和 Vite 开发模式分界由 [008-ui-ux](../008-ui-ux/spec.md) 与 [020-frontend-architecture](../020-frontend-architecture/spec.md) 承接
 
 ## 与本地脚本的分界
 

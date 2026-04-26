@@ -57,9 +57,8 @@
 - 请求封套是顶层请求对象；操作字段直接位于顶层，并可按需携带 `request_id`、`debug`、`cursor` 等通用字段
 - 响应封套是顶层响应对象；JSON 成功响应默认使用 `SuccessEnvelope<T>` 并包含 `data`，失败响应使用 `ErrorEnvelope` 并包含 `error`，两者不得同时出现
 - `GET /health` 是轻量 liveness JSON 例外，可以直接返回健康摘要而不套 `SuccessEnvelope<T>`
-- `GET /` 是 Rust server-hosted Web 的 HTML 入口，不套 `SuccessEnvelope<T>`，也不是客户端机器契约事实源
-- `GET /routes` 是人工路由发现入口；机器可读契约必须以 `GET /openapi.json` 为准
-- Web 静态资产、`/assets/*` 与 SPA fallback 路径不属于 App 公开 API，不纳入 OpenAPI contract
+- `GET /` 与 `GET /routes` 是 App API server 的人工路由发现入口；机器可读契约必须以 `GET /openapi.json` 为准
+- Web 静态资产、`/assets/*` 与 SPA fallback 路径由 `faus web` 的本地 Web server 承接，不属于 App 公开 API，不纳入 OpenAPI contract
 - preview 与其他 binary/media 响应不套 `SuccessEnvelope<T>`；OpenAPI 中应表达其 media type、状态码和统一错误响应
 - multipart 请求应以公开字段、`multipart/form-data` media type 与成功 / 错误响应描述，不把内部 multipart parser struct 暴露为公开 schema component
 - 列表或分页响应可以在 `data` 内承载结果数组，并在顶层响应中返回 `next_cursor`
@@ -184,10 +183,11 @@
 
 - 非搜索控制面接口族由 [008-ui-ux](../008-ui-ux/spec.md) 定义其存在与职责；本专题固定这些接口族的公开编码
 - Rust server 公开 App 基础入口包括：
+  - `GET /`
   - `GET /openapi.json`
   - `GET /health`
   - `GET /routes`
-- Rust server Web 基础入口包括 `GET /`；该入口返回 Web HTML，不作为 JSON envelope API，也不替代 `GET /openapi.json`
+- `GET /` 与 `GET /routes` 返回人工 route discovery JSON，不作为客户端生成或兼容性判断的事实源
 - 若通过 HTTP 暴露，库创建接口的稳定入口应包括 `POST /libraries`
 - 若通过 HTTP 暴露，库管理接口的稳定入口还应包括：
   - `PATCH /libraries/{library_id}`

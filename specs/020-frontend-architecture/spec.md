@@ -31,18 +31,18 @@
 - 单向依赖（One-Way Dependencies）：共享类型与共享状态位于依赖底层，渲染模块依赖共享状态，事件绑定依赖渲染与共享状态，引导层位于最上层
 - 壳层连续性（Same-App Continuity）：前端代码组织不得削弱 `Search`、`Inventory`、`Settings` 作为同一壳层下正式工作区的连续性
 - 样式集中入口（Single CSS Entry）：生产入口文件只应导入一个样式聚合入口，而不是继续直接依赖大型单体样式文件
-- Rust 托管生产入口（Rust-hosted Production Entry）：生产 Web 入口由 Rust server 从 `ui/dist` 托管，Vite 只作为开发期前端服务器与代理
+- CLI 托管生产入口（CLI-hosted Production Entry）：生产 Web 入口由 `faus web` 的本地 Web server 从 `ui/dist` 托管，Vite 只作为开发期前端服务器与代理
 - 测试辅助分域（Scenario Helpers By Domain）：UI 侧 E2E helper 应按搜索、工作区、来源管理、设置、运行时与共享 fixture 拆分，避免单体场景文件继续膨胀
 
 ## 生产 Web 托管
 
-- `ui/dist` 是 Rust server 托管生产 Web 的构建产物来源
-- Rust server 的 `GET /` 应返回 `ui/dist/index.html`，作为正式 Web 入口
-- `ui/dist/assets/*` 等构建产物应由 Rust server 作为静态资产提供；这些资产路径不属于前端 API 事实源
-- 前端客户端路由需要的 SPA fallback 应回到 `index.html`，但不得覆盖 `/openapi.json`、`/health`、`/runtime/status` 或其他公开 App API
-- 当 `ui/dist/index.html` 缺失时，Rust server 不应因此启动失败；`GET /` 应返回明确的 Web assets 未构建错误，后端 API 继续可用
+- `ui/dist` 是 `faus web` 托管生产 Web 的构建产物来源
+- `faus web` 的本地 Web server `GET /` 应返回 `ui/dist/index.html`，作为正式 Web 入口
+- `ui/dist/assets/*` 等构建产物应由 `faus web` 本地 Web server 作为静态资产提供；这些资产路径不属于前端 API 事实源
+- 前端客户端路由需要的 SPA fallback 应回到 `index.html`，但不得覆盖 `/openapi.json`、`/health`、`/runtime/status` 或其他公开 App API proxy 路径
+- 当 `ui/dist/index.html` 缺失时，App API server 不应因此启动失败；`faus web` 应返回明确的 Web assets 未构建错误
 - Vite dev server 与 `/api` proxy 仅服务前端开发期；生产 Web 不依赖 Vite 运行
-- 前端代码不得依赖 Vite-only 路径、环境或代理语义才能在 Rust server-hosted Web 中工作
+- 前端代码不得依赖 Vite-only 路径、环境或代理语义才能在 `faus web` 托管的生产 Web 中工作
 
 ## 生产 UI 代码组织
 

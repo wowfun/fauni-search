@@ -53,7 +53,7 @@
   - Qdrant
   - Python sidecar
   - Rust server
-- `faus serve` 不启动 Vite UI，也不要求前端开发服务器存在
+- `faus serve` 不启动 Vite UI，不托管 `ui/dist`，也不要求前端开发服务器存在
 - `faus serve` 默认前台运行，直到用户中断或进程收到终止信号
 - 启动失败必须返回非零退出码，并清理本次命令启动的子进程
 - 正常中断时应尽量关闭本次命令启动的 sidecar 与 Qdrant 子进程，避免遗留孤儿进程
@@ -73,7 +73,6 @@
 - 默认人类可读输出应展示启动进度、监听地址和关键 runtime 组件状态
 - Rust server ready 后应展示至少以下信息：
   - server base URL
-  - Web URL
   - OpenAPI URL
 - `--debug` 可以展示子进程命令、端口选择、配置来源与 readiness 探测细节
 - `--json` 的长运行输出语义不在本切片强制固定；如果实现支持机器输出，必须避免混入人类日志
@@ -98,7 +97,7 @@
 
 - `faus serve` 能以前台命令形式启动 Qdrant、Python sidecar 与 Rust server
 - `--host`、`--port` 与 `--dev` 的行为有明确实现和测试覆盖
-- `faus serve` 不启动 Vite UI，也不依赖 Vite 开发服务器
+- `faus serve` 不启动 Vite UI，不托管 `ui/dist`，也不依赖 Vite 开发服务器
 - 启动失败返回非零退出码，并清理本次启动的子进程
 - 本切片不新增 HTTP endpoint，不改变 OpenAPI，不修改 Web 前端实现
 - 本切片不把 bootstrap、doctor、reset、smoke 或后台守护内联为产品 CLI 默认行为

@@ -77,6 +77,7 @@
   - provider / sidecar 状态概览
 - 组件不可用时应展示服务端返回的状态与消息，但不把该状态转成 CLI 执行失败
 - 连接失败时应提示目标 base URL 不可达，并提示用户通过 `faus serve` 或本地脚本启动服务
+- 连接失败、空响应或非 JSON 响应等 CLI 层错误可以附带 `hint`，帮助用户区分服务未启动、服务仍在启动、端口被占用或目标不是 FauniSearch server
 
 ## JSON 输出
 
@@ -111,12 +112,20 @@
   "status": "error",
   "error": {
     "code": "connection_failed",
-    "message": "..."
+    "message": "...",
+    "hint": "..."
   }
 }
 ```
 
 - 人类可读错误应写入 stderr，并返回非零退出码
+- JSON 错误对象可在 `error.details` 中包含 `base_url`、`base_url_source`、`request_url` 与必要的 HTTP 状态
+
+## Help 文案
+
+- `faus status --help` 应说明该命令只连接已有 Rust server，不启动任何本地进程
+- help 中应描述 `--base-url`、`--json`、`--debug` 对状态查询的影响
+- help 示例应覆盖默认运行面和显式 base URL 的常见用法
 
 ## 与本地脚本的分界
 

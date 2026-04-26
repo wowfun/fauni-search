@@ -39,7 +39,7 @@
 | sidecar 启动失败 | 命令返回非零退出码，stderr 展示明确原因 |
 | Rust server ready 超时 | 命令返回非零退出码，清理本次启动的子进程 |
 | 用户发送中断信号 | 命令退出，并关闭本次启动的子进程 |
-| 启动成功 | 输出包含 server base URL、Web URL 与 OpenAPI URL |
+| 启动成功 | 输出包含 server base URL 与 OpenAPI URL，不包含 Web URL |
 | 启动成功 | 不启动 Vite UI，不要求 Vite 端口可用 |
 
 ## 断言重点

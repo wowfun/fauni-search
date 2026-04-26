@@ -1,6 +1,6 @@
 # 170 faus Web CLI 当前阶段计划
 
-本计划承接 [spec.md](./spec.md)，只规划 `faus web`。Runtime 启动能力由 [150-faus-serve-cli](../150-faus-serve-cli/spec.md) 建立，状态连接经验由 [160-faus-status-cli](../160-faus-status-cli/spec.md) 建立，Rust server-hosted Web 入口由 [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 与 [020-frontend-architecture](../020-frontend-architecture/spec.md) 约束，长期 CLI 命令面继续由 [030-cli](../030-cli/spec.md) 承接。本切片不改变 Web 前端实现，不新增 HTTP API。
+本计划承接 [spec.md](./spec.md)，只规划 `faus web`。Runtime 启动能力由 [150-faus-serve-cli](../150-faus-serve-cli/spec.md) 建立，状态连接经验由 [160-faus-status-cli](../160-faus-status-cli/spec.md) 建立，CLI-hosted Web 入口由 [020-frontend-architecture](../020-frontend-architecture/spec.md) 约束，长期 CLI 命令面继续由 [030-cli](../030-cli/spec.md) 承接。本切片不改变 Web 前端实现，不新增 App API。
 
 ## 概要
 
@@ -48,9 +48,9 @@
 
 ### 5. 浏览器打开与输出
 
-- Web URL 默认等于规范化后的 base URL 根路径
-- 该根路径应由 Rust server 返回 Web HTML；`/routes` 与 `/openapi.json` 不作为 `faus web` 的默认打开目标
-- 若根路径返回 Web assets 未构建错误，命令应报告可诊断失败，而不是改开 `/routes`
+- Web URL 默认等于 `UI_HOST` / `UI_PORT` 对应的本地 Web server 根路径
+- 本地 Web server 应返回 `ui/dist/index.html`，并把 App API 路径代理到规范化后的 base URL
+- 若 `ui/dist/index.html` 缺失，命令应报告可诊断失败，而不是打开 `/routes`
 - 使用 `webbrowser` crate 打开 Web URL；CLI 内部保留可替换 opener，以便测试不真实打开用户浏览器
 - 浏览器打开失败时打印 Web URL，允许用户手动访问
 - `--json` 输出 `status: "ok"` 与 `data.base_url`、`data.web_url`、`data.opened`、`data.server_started`

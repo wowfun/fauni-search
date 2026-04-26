@@ -2,14 +2,15 @@
 
 ## 2026-04-26
 ### Added
-- Added the public App OpenAPI contract at `GET /openapi.json` and Rust server-hosted Web from `ui/dist`.
-- Added the initial `faus` product CLI with `serve`, `status`, and `web`, plus an explicit `scripts/local/smoke-faus-serve.sh --dev` smoke.
+- Added the public App OpenAPI contract and the initial `faus` product CLI for `serve`, `status`, `web`, and basic library workflows.
+- Added explicit dev smoke coverage for the headless `faus serve` runtime.
 
 ### Changed
-- Upgraded the Rust HTTP stack to axum 0.8/OpenAPI router registration and moved human route discovery from `GET /` to `GET /routes`.
-- Replaced the public runtime health route and smoke naming with `GET /runtime/status` / `smoke-runtime-status`, and aligned the Web UI with the new route.
-- Reworked `scripts/local/run.sh` as a full-stack wrapper over `faus serve`, including `faus serve` pid discovery and backend-ready-before-Vite startup.
-- Reorganized the `faus` CLI into binary-local modules and removed or documented stale Rust dead-code warnings without changing public behavior.
+- Reworked the Rust HTTP/API boundary around axum 0.8, `/runtime/status`, route discovery, and API-only `faus serve`.
+- Moved production Web hosting and API proxying into `faus web`, while keeping Vite under the local development wrapper.
+- Reworked local runtime scripts around `faus serve`, including pid discovery, backend-before-Vite readiness, and dev smoke alignment.
+- Improved `faus` CLI structure, help text, direct local API connections, startup probing, and client-side error diagnostics.
+- Aligned local smoke scripts with the current public library payloads and runtime-status naming.
 
 ## 2026-04-25
 ### Changed

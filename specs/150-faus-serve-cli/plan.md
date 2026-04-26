@@ -51,7 +51,7 @@
 
 ### 5. 输出与信号
 
-- 人类可读输出展示启动进度、server base URL、Web URL 与 OpenAPI URL
+- 人类可读输出展示启动进度、server base URL 与 OpenAPI URL
 - `--debug` 展示配置来源、子进程命令和 readiness 细节
 - 捕获中断信号并关闭本次命令启动的子进程
 - 前台运行期间不混入不稳定机器输出
