@@ -82,8 +82,8 @@ def main() -> int:
     create_status, created_payload = post_json(
         f"{APP_URL}/libraries",
         {
-            "display_name": "smoke-runtime-health",
-            "library_id": f"smoke-runtime-health-{int(time.time())}",
+            "display_name": "smoke-runtime-status",
+            "library_id": f"smoke-runtime-status-{int(time.time())}",
             "config": {},
         },
     )
@@ -106,21 +106,21 @@ def main() -> int:
     job = wait_for_job_terminal(job_id)
     if job.get("status") != "completed":
         raise SystemExit(
-            "[error] runtime-health smoke import did not complete: " + json.dumps(job, ensure_ascii=False)
+            "[error] runtime status smoke import did not complete: " + json.dumps(job, ensure_ascii=False)
         )
 
-    runtime_health = get_json(f"{APP_URL}/runtime-health")["data"]
+    runtime_status = get_json(f"{APP_URL}/runtime/status")["data"]
     resolved_models = get_json(f"{APP_URL}/libraries/{library_id}/resolved-content-models")["data"]
     diagnostics = get_json(f"{APP_URL}/libraries/{library_id}/vector-space-diagnostics")["data"]
 
-    providers = {provider["provider_id"]: provider for provider in runtime_health.get("providers", [])}
+    providers = {provider["provider_id"]: provider for provider in runtime_status.get("providers", [])}
     local_sidecar = providers.get("local_sidecar")
     if not local_sidecar:
-        raise SystemExit("[error] runtime-health did not include local_sidecar diagnostics")
+        raise SystemExit("[error] runtime status did not include local_sidecar diagnostics")
 
     if local_sidecar.get("model_id") != LOCAL_MODEL_ID:
         raise SystemExit(
-            "[error] runtime-health did not report the expected local model: "
+            "[error] runtime status did not report the expected local model: "
             + json.dumps(local_sidecar, ensure_ascii=False)
         )
 
@@ -142,7 +142,7 @@ def main() -> int:
     expected_adapters = {"document_query_via_page_images", "video_query_via_frame_images"}
     if expected_adapters - runtime_adapters:
         raise SystemExit(
-            "[error] runtime-health did not report the expected runtime adapters: "
+            "[error] runtime status did not report the expected runtime adapters: "
             + json.dumps(local_sidecar, ensure_ascii=False)
         )
 
@@ -177,9 +177,9 @@ def main() -> int:
         "status": "ok",
         "library_id": library_id,
         "job_id": job_id,
-        "runtime_health_status": {
-            "app": runtime_health["app"]["status"],
-            "qdrant": runtime_health["qdrant"]["status"],
+        "runtime_status": {
+            "app": runtime_status["app"]["status"],
+            "qdrant": runtime_status["qdrant"]["status"],
             "local_sidecar": local_sidecar["status"],
         },
         "execution_input_types": execution_input_types,

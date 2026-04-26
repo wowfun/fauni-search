@@ -9,21 +9,25 @@ const DASHSCOPE_PROVIDER_ID: &str = "dashscope";
 const DEFAULT_MODEL_ID: &str = "athrael-soju/colqwen3.5-4.5B-v3";
 
 #[tokio::test]
-async fn runtime_health_aggregates_app_qdrant_and_provider_diagnostics() {
-    let env = TestEnv::new("runtime-health").await;
+async fn runtime_status_aggregates_app_qdrant_and_provider_diagnostics() {
+    let env = TestEnv::new("runtime-status").await;
     let app = env.boot().await;
 
     let create = app
         .post_json(
             "/libraries",
             json!({
-                "display_name": "Runtime Health"
+                "display_name": "Runtime Status"
             }),
         )
         .await;
     assert_eq!(create.status, StatusCode::CREATED);
 
-    let response = app.get_json("/runtime-health").await;
+    let legacy_path = format!("{}-{}", "/runtime", "health");
+    let old_response = app.get_json(&legacy_path).await;
+    assert_eq!(old_response.status, StatusCode::NOT_FOUND);
+
+    let response = app.get_json("/runtime/status").await;
     assert_eq!(response.status, StatusCode::OK);
     let body = response.json();
     let data = &body["data"];
@@ -39,12 +43,12 @@ async fn runtime_health_aggregates_app_qdrant_and_provider_diagnostics() {
 
     let providers = data["providers"]
         .as_array()
-        .expect("runtime health should include provider snapshots");
+        .expect("runtime status should include provider snapshots");
 
     let local = providers
         .iter()
         .find(|provider| provider["provider_id"] == LOCAL_SIDECAR_PROVIDER_ID)
-        .expect("local sidecar runtime health should be present");
+        .expect("local sidecar runtime status should be present");
     assert_eq!(local["status"], "available");
     assert_eq!(local["model_id"], DEFAULT_MODEL_ID);
     assert_eq!(local["model_version"], "main");
@@ -71,7 +75,7 @@ async fn runtime_health_aggregates_app_qdrant_and_provider_diagnostics() {
     let dashscope = providers
         .iter()
         .find(|provider| provider["provider_id"] == DASHSCOPE_PROVIDER_ID)
-        .expect("dashscope runtime health should be present");
+        .expect("dashscope runtime status should be present");
     assert_eq!(dashscope["status"], "not_supported");
     assert_eq!(dashscope["execution_input_types"], json!([]));
     assert_eq!(dashscope["runtime_adapters"], json!([]));

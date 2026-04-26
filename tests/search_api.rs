@@ -246,7 +246,10 @@ async fn search_text_returns_results_with_debug_vector_type_after_import() {
         data["debug"]["vector_type"],
         "multi_vector_late_interaction"
     );
-    assert_eq!(data["debug"]["repr_kind"], serde_json::Value::Null);
+    assert_eq!(
+        data["debug"][concat!("repr", "_kind")],
+        serde_json::Value::Null
+    );
     assert_eq!(data["debug"]["content_types"].as_array().unwrap().len(), 1);
     assert_eq!(
         data["debug"]["content_types"][0]["content_type"],

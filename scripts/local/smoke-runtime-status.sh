@@ -12,7 +12,7 @@ JSON=0
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/local/smoke-runtime-health.sh [--dev] [--json]
+  bash scripts/local/smoke-runtime-status.sh [--dev] [--json]
 
 Options:
   --dev   Use .env.dev instead of .env
@@ -52,8 +52,8 @@ else
 fi
 
 if [[ "$JSON" -eq 1 ]]; then
-  PYTHONUNBUFFERED=1 "$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/smoke_runtime_health.py" --json
+  PYTHONUNBUFFERED=1 "$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/smoke_runtime_status.py" --json
 else
   echo "[info] Config: ${FAUNI_CONFIG_SOURCE#$ROOT_DIR/}"
-  PYTHONUNBUFFERED=1 "$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/smoke_runtime_health.py"
+  PYTHONUNBUFFERED=1 "$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/smoke_runtime_status.py"
 fi

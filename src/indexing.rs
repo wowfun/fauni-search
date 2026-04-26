@@ -38,7 +38,6 @@ pub(crate) async fn index_visual_units(
     .map_err(|message| IndexingError {
         phase: "stage_write",
         message,
-        completed: 0,
     })?;
     let mut stage_initialized = false;
 
@@ -51,7 +50,6 @@ pub(crate) async fn index_visual_units(
             .map_err(|message| IndexingError {
                 phase: "stage_write",
                 message,
-                completed: 0,
             })?;
         stage_initialized = true;
     }
@@ -78,7 +76,6 @@ pub(crate) async fn index_visual_units(
             return Err(IndexingError {
                 phase: "stage_write",
                 message,
-                completed: 0,
             });
         }
     }
@@ -143,7 +140,6 @@ pub(crate) async fn index_visual_units(
                 return Err(IndexingError {
                     phase: "stage_write",
                     message,
-                    completed: 0,
                 });
             }
             stage_initialized = true;
@@ -156,7 +152,6 @@ pub(crate) async fn index_visual_units(
             return Err(IndexingError {
                 phase: "stage_write",
                 message,
-                completed: 0,
             });
         }
     }
@@ -165,7 +160,6 @@ pub(crate) async fn index_visual_units(
         return Err(IndexingError {
             phase: "stage_write",
             message: "No staged Qdrant collection was created for the import job.".to_string(),
-            completed: 0,
         });
     }
 
@@ -174,7 +168,6 @@ pub(crate) async fn index_visual_units(
         return Err(IndexingError {
             phase: "stage_write",
             message,
-            completed: 0,
         });
     }
 
@@ -183,7 +176,6 @@ pub(crate) async fn index_visual_units(
         return Err(IndexingError {
             phase: "activated",
             message,
-            completed: prepared.visual_units.len(),
         });
     }
     best_effort_cleanup_retired_stage_collections(&write_plan).await;
@@ -358,18 +350,17 @@ pub(crate) fn build_search_response(
     let mut filtered_candidates = executed_groups
         .iter()
         .flat_map(|group| {
-            group
-                .candidates
-                .iter()
-                .filter_map(|point| {
-                    point
-                        .payload
-                        .clone()
-                        .map(|payload| (point.score, group.library_id.clone(), payload))
-                })
+            group.candidates.iter().filter_map(|point| {
+                point
+                    .payload
+                    .clone()
+                    .map(|payload| (point.score, group.library_id.clone(), payload))
+            })
         })
         .into_iter()
-        .filter(|(_, library_id, payload)| search_payload_matches_filters(&plan, library_id, payload))
+        .filter(|(_, library_id, payload)| {
+            search_payload_matches_filters(&plan, library_id, payload)
+        })
         .collect::<Vec<_>>();
     filtered_candidates.sort_by(|left, right| right.0.total_cmp(&left.0));
     let filtered_result_count = filtered_candidates.len();

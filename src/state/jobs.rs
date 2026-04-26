@@ -1027,7 +1027,6 @@ impl AppState {
                 }
                 Some(PreparedSourceActionVectorSpaceBatch {
                     vector_space_id: binding.vector_space_id.clone(),
-                    content_types: binding.content_types,
                     can_rebuild_from_scratch,
                     had_existing_index: active_vector_spaces.contains(&binding.vector_space_id),
                     stale_point_ids: stale_point_ids.clone(),

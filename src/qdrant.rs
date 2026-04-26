@@ -697,6 +697,7 @@ pub(crate) fn build_qdrant_point(
     })
 }
 
+// Kept with unit coverage as the reusable Qdrant upsert body chunking helper.
 #[allow(dead_code)]
 pub(crate) fn chunk_qdrant_points(
     points: Vec<Value>,

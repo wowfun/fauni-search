@@ -16,7 +16,6 @@ use std::{env, time::Duration};
 pub(crate) struct IndexingError {
     pub(crate) phase: &'static str,
     pub(crate) message: String,
-    pub(crate) completed: usize,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +61,7 @@ pub(crate) struct SidecarErrorEnvelope {
 pub(crate) struct SidecarErrorPayload {
     code: String,
     message: String,
+    // Preserve sidecar error details for wire compatibility even when the app only surfaces code/message today.
     #[allow(dead_code)]
     details: Option<Value>,
 }
@@ -95,7 +95,6 @@ pub(crate) async fn embed_documents(
             sidecar_base_url().map_err(|error| IndexingError {
                 phase: "encode",
                 message: error.payload.message,
-                completed: 0,
             })?
         ))
         .json(&payload)
@@ -104,7 +103,6 @@ pub(crate) async fn embed_documents(
         .map_err(|error| IndexingError {
             phase: "encode",
             message: format!("Sidecar document embedding request failed: {error}"),
-            completed: 0,
         })?;
 
     if !response.status().is_success() {
@@ -115,7 +113,6 @@ pub(crate) async fn embed_documents(
         return Err(IndexingError {
             phase: "encode",
             message,
-            completed: 0,
         });
     }
 
@@ -123,7 +120,6 @@ pub(crate) async fn embed_documents(
         response.json().await.map_err(|error| IndexingError {
             phase: "encode",
             message: format!("Sidecar document embedding response was invalid JSON: {error}"),
-            completed: 0,
         })?;
 
     if envelope.data.embeddings.len() != visual_units.len() {
@@ -134,7 +130,6 @@ pub(crate) async fn embed_documents(
                 envelope.data.embeddings.len(),
                 visual_units.len()
             ),
-            completed: 0,
         });
     }
 
@@ -146,7 +141,6 @@ pub(crate) async fn embed_documents(
                     "Sidecar returned an empty document embedding for {}.",
                     visual_unit.source_path
                 ),
-                completed: 0,
             });
         }
         if let Some(source_type) = &embedding.source_type {
@@ -157,7 +151,6 @@ pub(crate) async fn embed_documents(
                         "Sidecar returned source_type {} for {}, but the expected source_type was {}.",
                         source_type, visual_unit.source_path, visual_unit.source_type
                     ),
-                    completed: 0,
                 });
             }
         }
@@ -169,7 +162,6 @@ pub(crate) async fn embed_documents(
                         "Sidecar returned kind {} for {}, but the expected kind was {}.",
                         kind, visual_unit.source_path, visual_unit.kind
                     ),
-                    completed: 0,
                 });
             }
         }
@@ -181,7 +173,6 @@ pub(crate) async fn embed_documents(
                         "Sidecar returned a document embedding for {}, but the expected path was {}.",
                         path, visual_unit.source_path
                     ),
-                    completed: 0,
                 });
             }
         }
@@ -193,7 +184,6 @@ pub(crate) async fn embed_documents(
                         "Sidecar returned locator {} for {}, but the expected locator was {}.",
                         locator, visual_unit.source_path, visual_unit.locator
                     ),
-                    completed: 0,
                 });
             }
         }

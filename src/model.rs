@@ -274,7 +274,6 @@ pub(crate) struct PreparedImport {
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedImportVectorSpaceBatch {
     pub(crate) vector_space_id: String,
-    pub(crate) content_types: Vec<String>,
     pub(crate) had_existing_index: bool,
     pub(crate) stale_point_ids: Vec<u64>,
     pub(crate) visual_units: Vec<VisualUnitRecord>,
@@ -370,7 +369,6 @@ pub(crate) struct PreparedSourceAction {
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedSourceActionVectorSpaceBatch {
     pub(crate) vector_space_id: String,
-    pub(crate) content_types: Vec<String>,
     pub(crate) can_rebuild_from_scratch: bool,
     pub(crate) had_existing_index: bool,
     pub(crate) stale_point_ids: Vec<u64>,
@@ -628,6 +626,8 @@ impl ImportJobOutcome {
 
 #[derive(Clone, Debug)]
 pub(crate) struct SearchPlan {
+    // Retained as the internal semantic hook for search-scope diagnostics; not currently emitted.
+    #[allow(dead_code)]
     pub(crate) search_scope_kind: String,
     pub(crate) library_id: String,
     pub(crate) top_k: usize,

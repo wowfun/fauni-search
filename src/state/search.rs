@@ -770,11 +770,13 @@ impl AppState {
             execution_groups: execution_groups_by_id.into_values().collect(),
             debug_content_types: resolved_content_models
                 .into_iter()
-                .map(|(content_type, resolved_model)| SearchContentTypeDebugEntry {
-                    library_id: resolved_library_id.clone(),
-                    content_type,
-                    resolved_model,
-                })
+                .map(
+                    |(content_type, resolved_model)| SearchContentTypeDebugEntry {
+                        library_id: resolved_library_id.clone(),
+                        content_type,
+                        resolved_model,
+                    },
+                )
                 .collect(),
             debug: debug.unwrap_or(false),
         })
@@ -1179,7 +1181,9 @@ fn merge_search_plan(target: &mut SearchPlan, incoming: SearchPlan) {
         .active_visual_unit_refs
         .extend(incoming.active_visual_unit_refs);
     target.execution_groups.extend(incoming.execution_groups);
-    target.debug_content_types.extend(incoming.debug_content_types);
+    target
+        .debug_content_types
+        .extend(incoming.debug_content_types);
 
     for content_type in incoming.target_content_types {
         if !target.target_content_types.contains(&content_type) {

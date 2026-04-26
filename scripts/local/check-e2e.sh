@@ -72,8 +72,8 @@ if [[ "$RUN_UI" -eq 1 ]]; then
 fi
 
 if [[ "$RUN_SMOKE" -eq 1 ]]; then
-  echo "[info] Running smoke-runtime-health"
-  bash "$ROOT_DIR/scripts/local/smoke-runtime-health.sh" --dev
+  echo "[info] Running smoke-runtime-status"
+  bash "$ROOT_DIR/scripts/local/smoke-runtime-status.sh" --dev
   echo "[info] Running smoke-text-search"
   bash "$ROOT_DIR/scripts/local/smoke-text-search.sh" --dev
   echo "[info] Running smoke-image-search"

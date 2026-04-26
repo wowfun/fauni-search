@@ -16,13 +16,21 @@ use crate::{
 };
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
-    routing::{get, post},
-    Json, Router,
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
+    response::{IntoResponse, Response},
+    routing::get,
+    Extension, Json, Router,
 };
 use serde_json::json;
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+};
+use tower_http::services::ServeDir;
+use utoipa::openapi::OpenApi;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 struct ParsedModelTestForm {
     provider_id: String,
@@ -44,139 +52,92 @@ struct PendingModelTestFile {
 }
 
 pub fn build_app(state: SharedState) -> Router {
-    Router::new()
-        .route("/", get(root))
-        .route("/health", get(health))
-        .route("/runtime-health", get(get_runtime_health))
-        .route("/settings/providers", get(list_provider_configs))
-        .route(
-            "/settings/providers/:provider_id",
-            axum::routing::patch(update_provider_config),
-        )
-        .route("/settings/model-catalog", get(get_model_catalog))
-        .route(
-            "/settings/content-types",
-            get(get_global_content_types).patch(update_global_content_types),
-        )
-        .route("/settings/model-tests", post(test_model_selection))
-        .route("/libraries", get(list_libraries).post(create_library))
-        .route(
-            "/libraries/:library_id",
-            get(get_library)
-                .patch(update_library)
-                .delete(delete_library),
-        )
-        .route("/libraries/:library_id/archive", post(archive_library))
-        .route("/libraries/:library_id/restore", post(restore_library))
-        .route(
-            "/libraries/:library_id/content-types",
-            get(get_library_content_types).patch(update_library_content_types),
-        )
-        .route(
-            "/libraries/:library_id/resolved-content-models",
-            get(get_resolved_content_models),
-        )
-        .route(
-            "/libraries/:library_id/vector-space-diagnostics",
-            get(get_vector_space_diagnostics),
-        )
-        .route("/libraries/:library_id/imports", post(import_paths))
-        .route(
-            "/libraries/:library_id/source-roots",
-            get(list_source_roots).post(create_source_root),
-        )
-        .route(
-            "/libraries/:library_id/source-roots/:source_root_id",
-            get(get_source_root)
-                .patch(update_source_root)
-                .delete(delete_source_root),
-        )
-        .route("/libraries/:library_id/sources", get(list_sources))
-        .route(
-            "/libraries/:library_id/refresh",
-            post(refresh_library_sources),
-        )
-        .route(
-            "/libraries/:library_id/rescan",
-            post(rescan_library_sources),
-        )
-        .route(
-            "/libraries/:library_id/rebuild",
-            post(rebuild_library_sources),
-        )
-        .route(
-            "/libraries/:library_id/source-roots/:source_root_id/refresh",
-            post(refresh_source_root),
-        )
-        .route(
-            "/libraries/:library_id/source-roots/:source_root_id/rescan",
-            post(rescan_source_root),
-        )
-        .route(
-            "/libraries/:library_id/maintenance",
-            post(run_library_maintenance_action),
-        )
-        .route(
-            "/libraries/:library_id/video-sources",
-            get(list_video_sources),
-        )
-        .route(
-            "/libraries/:library_id/query-assets/images",
-            post(upload_query_image),
-        )
-        .route(
-            "/libraries/:library_id/query-assets/videos",
-            post(upload_query_video),
-        )
-        .route(
-            "/libraries/:library_id/query-assets/documents",
-            post(upload_query_document),
-        )
-        .route(
-            "/libraries/:library_id/query-assets/images/:temp_asset_id/preview",
-            get(get_query_image_preview),
-        )
-        .route(
-            "/libraries/:library_id/query-assets/videos/:temp_asset_id/preview",
-            get(get_query_video_preview),
-        )
-        .route(
-            "/libraries/:library_id/query-assets/documents/:temp_asset_id/preview",
-            get(get_query_document_preview),
-        )
-        .route(
-            "/libraries/:library_id/video-sources/:source_id/preview",
-            get(get_video_source_preview),
-        )
-        .route(
-            "/libraries/:library_id/visual-units/:visual_unit_id",
-            get(get_visual_unit),
-        )
-        .route(
-            "/libraries/:library_id/visual-units/:visual_unit_id/preview",
-            get(get_visual_unit_preview),
-        )
-        .route("/jobs", get(list_jobs))
-        .route("/jobs/:job_id", get(get_job))
-        .route("/jobs/:job_id/cancel", post(cancel_job))
-        .route("/jobs/:job_id/resume", post(resume_job))
-        .route("/jobs/:job_id/retry", post(retry_job))
-        .route("/search/text", post(search_text))
-        .route("/search/image", post(search_image))
-        .route("/search/video", post(search_video))
-        .route("/search/document", post(search_document))
+    let (router, openapi) = OpenApiRouter::<SharedState>::new()
+        .routes(routes!(route_discovery))
+        .routes(routes!(get_openapi_contract))
+        .routes(routes!(health))
+        .routes(routes!(get_runtime_status))
+        .routes(routes!(list_provider_configs))
+        .routes(routes!(update_provider_config))
+        .routes(routes!(get_model_catalog))
+        .routes(routes!(
+            get_global_content_types,
+            update_global_content_types
+        ))
+        .routes(routes!(test_model_selection))
+        .routes(routes!(list_libraries, create_library))
+        .routes(routes!(get_library, update_library, delete_library))
+        .routes(routes!(archive_library))
+        .routes(routes!(restore_library))
+        .routes(routes!(
+            get_library_content_types,
+            update_library_content_types
+        ))
+        .routes(routes!(get_resolved_content_models))
+        .routes(routes!(get_vector_space_diagnostics))
+        .routes(routes!(import_paths))
+        .routes(routes!(list_source_roots, create_source_root))
+        .routes(routes!(
+            get_source_root,
+            update_source_root,
+            delete_source_root
+        ))
+        .routes(routes!(list_sources))
+        .routes(routes!(refresh_library_sources))
+        .routes(routes!(rescan_library_sources))
+        .routes(routes!(rebuild_library_sources))
+        .routes(routes!(refresh_source_root))
+        .routes(routes!(rescan_source_root))
+        .routes(routes!(run_library_maintenance_action))
+        .routes(routes!(list_video_sources))
+        .routes(routes!(upload_query_image))
+        .routes(routes!(upload_query_video))
+        .routes(routes!(upload_query_document))
+        .routes(routes!(get_query_image_preview))
+        .routes(routes!(get_query_video_preview))
+        .routes(routes!(get_query_document_preview))
+        .routes(routes!(get_video_source_preview))
+        .routes(routes!(get_visual_unit))
+        .routes(routes!(get_visual_unit_preview))
+        .routes(routes!(list_jobs))
+        .routes(routes!(get_job))
+        .routes(routes!(cancel_job))
+        .routes(routes!(resume_job))
+        .routes(routes!(retry_job))
+        .routes(routes!(search_text))
+        .routes(routes!(search_image))
+        .routes(routes!(search_video))
+        .routes(routes!(search_document))
         .layer(DefaultBodyLimit::max(APP_BODY_LIMIT_BYTES))
+        .split_for_parts();
+
+    router
+        .route("/", get(web_index))
+        .nest_service("/assets", ServeDir::new(ui_assets_dir()))
+        .fallback(web_spa_fallback)
+        .layer(Extension(Arc::new(openapi)))
         .with_state(state)
 }
 
-async fn root() -> Json<RootPayload> {
+#[utoipa::path(
+    get,
+    path = "/routes",
+    responses(
+        (status = 200, description = "Human-readable route discovery payload", body = RootPayload),
+    ),
+    tag = "system",
+)]
+async fn route_discovery() -> Json<RootPayload> {
     Json(RootPayload {
         name: "fauni-search",
         status: "workspace",
         stage: "search workspace",
         routes: vec![
+            "GET /",
+            "GET /routes",
+            "GET /openapi.json",
             "GET /health",
-            "GET /runtime-health",
+            "GET /runtime/status",
             "GET /settings/providers",
             "PATCH /settings/providers/{provider_id}",
             "GET /settings/model-catalog",
@@ -227,6 +188,114 @@ async fn root() -> Json<RootPayload> {
     })
 }
 
+async fn web_index() -> Response {
+    web_index_response(&ui_index_path())
+}
+
+async fn web_spa_fallback(method: Method, uri: Uri) -> Response {
+    if method != Method::GET || is_api_path(uri.path()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    web_index_response(&ui_index_path())
+}
+
+fn web_index_response(index_path: &FsPath) -> Response {
+    match fs::read(index_path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            bytes,
+        )
+            .into_response(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Web assets are not built. Expected ui/dist/index.html.",
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("Failed to read Web assets: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+fn is_api_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/openapi.json"
+            | "/health"
+            | "/routes"
+            | "/runtime"
+            | "/runtime-health"
+            | "/settings"
+            | "/libraries"
+            | "/jobs"
+            | "/search"
+    ) || path.starts_with("/runtime/")
+        || path.starts_with("/settings/")
+        || path.starts_with("/libraries/")
+        || path.starts_with("/jobs/")
+        || path.starts_with("/search/")
+}
+
+fn ui_dist_dir() -> PathBuf {
+    FsPath::new(env!("CARGO_MANIFEST_DIR")).join("ui/dist")
+}
+
+fn ui_assets_dir() -> PathBuf {
+    ui_dist_dir().join("assets")
+}
+
+fn ui_index_path() -> PathBuf {
+    ui_dist_dir().join("index.html")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_web_index_returns_service_unavailable() {
+        let missing_index = std::env::temp_dir()
+            .join(format!(
+                "fauni-search-missing-web-index-{}",
+                std::process::id()
+            ))
+            .join("index.html");
+        let _ = fs::remove_file(&missing_index);
+
+        let response = web_index_response(&missing_index);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(content_type.starts_with("text/plain"));
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/openapi.json",
+    responses((status = 200, description = "OpenAPI 3.1 contract JSON")),
+    tag = "system",
+)]
+async fn get_openapi_contract(Extension(openapi): Extension<Arc<OpenApi>>) -> Json<OpenApi> {
+    Json((*openapi).clone())
+}
+
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses((status = 200, description = "Lightweight liveness payload", body = HealthPayload)),
+    tag = "system",
+)]
 async fn health(State(state): State<SharedState>) -> Json<HealthPayload> {
     let state = state.read().await;
     Json(HealthPayload {
@@ -238,7 +307,16 @@ async fn health(State(state): State<SharedState>) -> Json<HealthPayload> {
     })
 }
 
-async fn get_runtime_health(
+#[utoipa::path(
+    get,
+    path = "/runtime/status",
+    responses(
+        (status = 200, description = "Runtime status snapshot", body = SuccessEnvelope<RuntimeHealthData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "system",
+)]
+async fn get_runtime_status(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<RuntimeHealthData>> {
     let mut state = state.write().await;
@@ -247,6 +325,15 @@ async fn get_runtime_health(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/settings/providers",
+    responses(
+        (status = 200, description = "Provider configuration list", body = SuccessEnvelope<ProvidersListData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
 async fn list_provider_configs(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<ProvidersListData>> {
@@ -257,6 +344,17 @@ async fn list_provider_configs(
     })
 }
 
+#[utoipa::path(
+    patch,
+    path = "/settings/providers/{provider_id}",
+    params(("provider_id" = String, Path, description = "Provider id")),
+    request_body = UpdateProviderConfigRequest,
+    responses(
+        (status = 200, description = "Updated provider configuration", body = SuccessEnvelope<ProviderConfigSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
 async fn update_provider_config(
     State(state): State<SharedState>,
     Path(provider_id): Path<String>,
@@ -267,6 +365,15 @@ async fn update_provider_config(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/settings/model-catalog",
+    responses(
+        (status = 200, description = "Model catalog", body = SuccessEnvelope<ModelCatalogData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
 async fn get_model_catalog(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<ModelCatalogData>> {
@@ -276,6 +383,15 @@ async fn get_model_catalog(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/settings/content-types",
+    responses(
+        (status = 200, description = "Global content type bindings", body = SuccessEnvelope<GlobalContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
 async fn get_global_content_types(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<GlobalContentTypesData>> {
@@ -285,6 +401,16 @@ async fn get_global_content_types(
     })
 }
 
+#[utoipa::path(
+    patch,
+    path = "/settings/content-types",
+    request_body = ContentTypesPayload,
+    responses(
+        (status = 200, description = "Updated global content type bindings", body = SuccessEnvelope<GlobalContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
 async fn update_global_content_types(
     State(state): State<SharedState>,
     Json(request): Json<ContentTypesPayload>,
@@ -294,6 +420,16 @@ async fn update_global_content_types(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/settings/model-tests",
+    request_body(content = SettingsModelTestForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "Settings model test result", body = SuccessEnvelope<ModelTestData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
 async fn test_model_selection(
     State(state): State<SharedState>,
     mut multipart: Multipart,
@@ -336,6 +472,15 @@ async fn test_model_selection(
     Ok(Json(SuccessEnvelope { data: result? }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries",
+    responses(
+        (status = 200, description = "Library list", body = SuccessEnvelope<LibrariesListData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn list_libraries(
     State(state): State<SharedState>,
 ) -> Json<SuccessEnvelope<LibrariesListData>> {
@@ -345,6 +490,16 @@ async fn list_libraries(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Library snapshot", body = SuccessEnvelope<LibrarySnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn get_library(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -354,6 +509,17 @@ async fn get_library(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/libraries/{library_id}",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body = UpdateLibraryApiRequest,
+    responses(
+        (status = 200, description = "Updated library snapshot", body = SuccessEnvelope<LibrarySnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn update_library(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -365,6 +531,16 @@ async fn update_library(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/archive",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Archived library snapshot", body = SuccessEnvelope<LibrarySnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn archive_library(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -374,6 +550,16 @@ async fn archive_library(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/restore",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Restored library snapshot", body = SuccessEnvelope<LibrarySnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn restore_library(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -383,6 +569,16 @@ async fn restore_library(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/libraries/{library_id}",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Deleted library snapshot", body = SuccessEnvelope<LibrarySnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn delete_library(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -623,6 +819,16 @@ fn stage_model_test_file(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries",
+    request_body = CreateLibraryApiRequest,
+    responses(
+        (status = 201, description = "Created library snapshot", body = SuccessEnvelope<LibrarySnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn create_library(
     State(state): State<SharedState>,
     Json(request): Json<CreateLibraryApiRequest>,
@@ -707,6 +913,16 @@ fn normalize_maintenance_action_request(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/content-types",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Library content type bindings", body = SuccessEnvelope<LibraryContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn get_library_content_types(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -717,6 +933,17 @@ async fn get_library_content_types(
     }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/libraries/{library_id}/content-types",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body = ContentTypesPayload,
+    responses(
+        (status = 200, description = "Updated library content type bindings", body = SuccessEnvelope<LibraryContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn update_library_content_types(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -729,6 +956,16 @@ async fn update_library_content_types(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/resolved-content-models",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Resolved content models", body = SuccessEnvelope<ResolvedContentModelsData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn get_resolved_content_models(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -738,6 +975,16 @@ async fn get_resolved_content_models(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/vector-space-diagnostics",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Vector space diagnostics", body = SuccessEnvelope<VectorSpaceDiagnosticsData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn get_vector_space_diagnostics(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -747,6 +994,16 @@ async fn get_vector_space_diagnostics(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/source-roots",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Source root list", body = SuccessEnvelope<SourceRootsListData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn list_source_roots(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -756,6 +1013,19 @@ async fn list_source_roots(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/source-roots/{source_root_id}",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("source_root_id" = String, Path, description = "Source root id"),
+    ),
+    responses(
+        (status = 200, description = "Source root detail", body = SuccessEnvelope<SourceRootDetailData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn get_source_root(
     State(state): State<SharedState>,
     Path((library_id, source_root_id)): Path<(String, String)>,
@@ -765,6 +1035,17 @@ async fn get_source_root(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/source-roots",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body = CreateSourceRootRequest,
+    responses(
+        (status = 201, description = "Created source root", body = SuccessEnvelope<SourceRootSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn create_source_root(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -778,6 +1059,20 @@ async fn create_source_root(
     ))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/libraries/{library_id}/source-roots/{source_root_id}",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("source_root_id" = String, Path, description = "Source root id"),
+    ),
+    request_body = UpdateSourceRootRequest,
+    responses(
+        (status = 200, description = "Updated source root", body = SuccessEnvelope<SourceRootSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn update_source_root(
     State(state): State<SharedState>,
     Path((library_id, source_root_id)): Path<(String, String)>,
@@ -788,6 +1083,19 @@ async fn update_source_root(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/libraries/{library_id}/source-roots/{source_root_id}",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("source_root_id" = String, Path, description = "Source root id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted source root", body = SuccessEnvelope<SourceRootSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn delete_source_root(
     State(state): State<SharedState>,
     Path((library_id, source_root_id)): Path<(String, String)>,
@@ -797,6 +1105,21 @@ async fn delete_source_root(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/sources",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("source_root_id" = Option<String>, Query, description = "Source root filter"),
+        ("source_type" = Option<String>, Query, description = "Source type filter"),
+        ("status" = Option<String>, Query, description = "Source status filter"),
+    ),
+    responses(
+        (status = 200, description = "Source inventory list", body = SuccessEnvelope<SourcesListData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn list_sources(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -807,6 +1130,16 @@ async fn list_sources(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/refresh",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Queued library refresh", body = SuccessEnvelope<SourceActionData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn refresh_library_sources(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -832,6 +1165,16 @@ async fn refresh_library_sources(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/rescan",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Queued library rescan", body = SuccessEnvelope<SourceActionData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn rescan_library_sources(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -857,6 +1200,16 @@ async fn rescan_library_sources(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/rebuild",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Queued library rebuild", body = SuccessEnvelope<SourceActionData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn rebuild_library_sources(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -882,6 +1235,19 @@ async fn rebuild_library_sources(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/source-roots/{source_root_id}/refresh",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("source_root_id" = String, Path, description = "Source root id"),
+    ),
+    responses(
+        (status = 200, description = "Queued source root refresh", body = SuccessEnvelope<SourceActionData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn refresh_source_root(
     State(state): State<SharedState>,
     Path((library_id, source_root_id)): Path<(String, String)>,
@@ -907,6 +1273,19 @@ async fn refresh_source_root(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/source-roots/{source_root_id}/rescan",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("source_root_id" = String, Path, description = "Source root id"),
+    ),
+    responses(
+        (status = 200, description = "Queued source root rescan", body = SuccessEnvelope<SourceActionData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "sources",
+)]
 async fn rescan_source_root(
     State(state): State<SharedState>,
     Path((library_id, source_root_id)): Path<(String, String)>,
@@ -932,6 +1311,17 @@ async fn rescan_source_root(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/maintenance",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body = MaintenanceActionRequest,
+    responses(
+        (status = 200, description = "Queued maintenance action", body = SuccessEnvelope<MaintenanceActionData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
 async fn run_library_maintenance_action(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -954,6 +1344,17 @@ async fn run_library_maintenance_action(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/imports",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body = ImportPathsRequest,
+    responses(
+        (status = 200, description = "Queued import", body = SuccessEnvelope<ImportPathsData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "imports",
+)]
 async fn import_paths(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -976,6 +1377,16 @@ async fn import_paths(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/video-sources",
+    params(("library_id" = String, Path, description = "Library id")),
+    responses(
+        (status = 200, description = "Video source list", body = SuccessEnvelope<VideoSourcesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn list_video_sources(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -985,6 +1396,17 @@ async fn list_video_sources(
     Ok(Json(SuccessEnvelope { data }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/query-assets/images",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body(content = QueryAssetUploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "Uploaded query image asset", body = SuccessEnvelope<QueryImageAssetData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn upload_query_image(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -1000,6 +1422,17 @@ async fn upload_query_image(
     Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/query-assets/videos",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body(content = QueryAssetUploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "Uploaded query video asset", body = SuccessEnvelope<QueryVideoAssetData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn upload_query_video(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -1015,6 +1448,17 @@ async fn upload_query_video(
     Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/libraries/{library_id}/query-assets/documents",
+    params(("library_id" = String, Path, description = "Library id")),
+    request_body(content = QueryAssetUploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "Uploaded query document asset", body = SuccessEnvelope<QueryDocumentAssetData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn upload_query_document(
     State(state): State<SharedState>,
     Path(library_id): Path<String>,
@@ -1030,6 +1474,19 @@ async fn upload_query_document(
     Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/visual-units/{visual_unit_id}",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("visual_unit_id" = String, Path, description = "Visual unit id"),
+    ),
+    responses(
+        (status = 200, description = "Visual unit detail", body = SuccessEnvelope<VisualUnitDetailData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "visual-units",
+)]
 async fn get_visual_unit(
     State(state): State<SharedState>,
     Path((library_id, visual_unit_id)): Path<(String, String)>,
@@ -1039,6 +1496,19 @@ async fn get_visual_unit(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/visual-units/{visual_unit_id}/preview",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("visual_unit_id" = String, Path, description = "Visual unit id"),
+    ),
+    responses(
+        (status = 200, description = "Visual unit preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "visual-units",
+)]
 async fn get_visual_unit_preview(
     State(state): State<SharedState>,
     Path((library_id, visual_unit_id)): Path<(String, String)>,
@@ -1063,6 +1533,19 @@ async fn get_visual_unit_preview(
     Ok((headers, bytes))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/query-assets/images/{temp_asset_id}/preview",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("temp_asset_id" = String, Path, description = "Temporary asset id"),
+    ),
+    responses(
+        (status = 200, description = "Query image preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn get_query_image_preview(
     State(state): State<SharedState>,
     Path((library_id, temp_asset_id)): Path<(String, String)>,
@@ -1093,6 +1576,19 @@ async fn get_query_image_preview(
     Ok((headers, bytes))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/query-assets/videos/{temp_asset_id}/preview",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("temp_asset_id" = String, Path, description = "Temporary asset id"),
+    ),
+    responses(
+        (status = 200, description = "Query video preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn get_query_video_preview(
     State(state): State<SharedState>,
     Path((library_id, temp_asset_id)): Path<(String, String)>,
@@ -1123,6 +1619,19 @@ async fn get_query_video_preview(
     Ok((headers, bytes))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/query-assets/documents/{temp_asset_id}/preview",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("temp_asset_id" = String, Path, description = "Temporary asset id"),
+    ),
+    responses(
+        (status = 200, description = "Query document preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn get_query_document_preview(
     State(state): State<SharedState>,
     Path((library_id, temp_asset_id)): Path<(String, String)>,
@@ -1153,6 +1662,19 @@ async fn get_query_document_preview(
     Ok((headers, bytes))
 }
 
+#[utoipa::path(
+    get,
+    path = "/libraries/{library_id}/video-sources/{source_id}/preview",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("source_id" = String, Path, description = "Source id"),
+    ),
+    responses(
+        (status = 200, description = "Video source preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
 async fn get_video_source_preview(
     State(state): State<SharedState>,
     Path((library_id, source_id)): Path<(String, String)>,
@@ -1177,6 +1699,16 @@ async fn get_video_source_preview(
     Ok((headers, bytes))
 }
 
+#[utoipa::path(
+    get,
+    path = "/jobs",
+    params(("library_id" = Option<String>, Query, description = "Library id filter")),
+    responses(
+        (status = 200, description = "Job list", body = SuccessEnvelope<JobsListData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "jobs",
+)]
 async fn list_jobs(
     State(state): State<SharedState>,
     Query(query): Query<JobsQuery>,
@@ -1187,6 +1719,16 @@ async fn list_jobs(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/jobs/{job_id}",
+    params(("job_id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Job snapshot", body = SuccessEnvelope<JobSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "jobs",
+)]
 async fn get_job(
     State(state): State<SharedState>,
     Path(job_id): Path<String>,
@@ -1196,6 +1738,16 @@ async fn get_job(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/jobs/{job_id}/cancel",
+    params(("job_id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Canceled job snapshot", body = SuccessEnvelope<JobSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "jobs",
+)]
 async fn cancel_job(
     State(state): State<SharedState>,
     Path(job_id): Path<String>,
@@ -1205,6 +1757,16 @@ async fn cancel_job(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/jobs/{job_id}/retry",
+    params(("job_id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Retried job snapshot", body = SuccessEnvelope<JobSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "jobs",
+)]
 async fn retry_job(
     State(state): State<SharedState>,
     Path(job_id): Path<String>,
@@ -1245,6 +1807,16 @@ async fn retry_job(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/jobs/{job_id}/resume",
+    params(("job_id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Resumed job snapshot", body = SuccessEnvelope<JobSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "jobs",
+)]
 async fn resume_job(
     State(state): State<SharedState>,
     Path(job_id): Path<String>,
@@ -1281,6 +1853,16 @@ async fn resume_job(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/search/text",
+    request_body = TextSearchRequest,
+    responses(
+        (status = 200, description = "Text search results", body = SuccessEnvelope<TextSearchData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "search",
+)]
 async fn search_text(
     State(state): State<SharedState>,
     Json(request): Json<TextSearchRequest>,
@@ -1314,6 +1896,16 @@ async fn search_text(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/search/image",
+    request_body = ImageSearchRequest,
+    responses(
+        (status = 200, description = "Image search results", body = SuccessEnvelope<TextSearchData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "search",
+)]
 async fn search_image(
     State(state): State<SharedState>,
     Json(request): Json<ImageSearchRequest>,
@@ -1331,7 +1923,7 @@ async fn search_image(
     let plan_library_id = (!plan.library_id.trim().is_empty())
         .then_some(plan.library_id.as_str())
         .ok_or_else(|| {
-        ApiError::not_supported(
+            ApiError::not_supported(
             "Current 110-image-search implementation only supports single-library search_scope.",
             Some(json!({
                 "field": "search_scope.kind",
@@ -1339,7 +1931,7 @@ async fn search_image(
                 "received": received_scope_kind,
             })),
         )
-    })?;
+        })?;
 
     let (query_path, query_locator) = match &query_input {
         ResolvedImageQueryInput::TempAsset(asset) => (asset.path.as_str(), None),
@@ -1374,6 +1966,16 @@ async fn search_image(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/search/video",
+    request_body = VideoSearchRequest,
+    responses(
+        (status = 200, description = "Video search results", body = SuccessEnvelope<TextSearchData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "search",
+)]
 async fn search_video(
     State(state): State<SharedState>,
     Json(request): Json<VideoSearchRequest>,
@@ -1391,7 +1993,7 @@ async fn search_video(
     let plan_library_id = (!plan.library_id.trim().is_empty())
         .then_some(plan.library_id.as_str())
         .ok_or_else(|| {
-        ApiError::not_supported(
+            ApiError::not_supported(
             "Current 120-video-search implementation only supports single-library search_scope.",
             Some(json!({
                 "field": "search_scope.kind",
@@ -1399,7 +2001,7 @@ async fn search_video(
                 "received": received_scope_kind,
             })),
         )
-    })?;
+        })?;
 
     let mut executed_groups = Vec::new();
     for group in &plan.execution_groups {
@@ -1427,6 +2029,16 @@ async fn search_video(
     Ok(Json(SuccessEnvelope { data: response }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/search/document",
+    request_body = DocumentSearchRequest,
+    responses(
+        (status = 200, description = "Document search results", body = SuccessEnvelope<TextSearchData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "search",
+)]
 async fn search_document(
     State(state): State<SharedState>,
     Json(request): Json<DocumentSearchRequest>,
@@ -1444,7 +2056,7 @@ async fn search_document(
     let plan_library_id = (!plan.library_id.trim().is_empty())
         .then_some(plan.library_id.as_str())
         .ok_or_else(|| {
-        ApiError::not_supported(
+            ApiError::not_supported(
             "Current 130-document-search implementation only supports single-library search_scope.",
             Some(json!({
                 "field": "search_scope.kind",
@@ -1452,7 +2064,7 @@ async fn search_document(
                 "received": received_scope_kind,
             })),
         )
-    })?;
+        })?;
 
     let mut executed_groups = Vec::new();
     for group in &plan.execution_groups {

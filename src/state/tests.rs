@@ -1796,8 +1796,8 @@ fn build_search_response_returns_qdrant_results_after_import() {
 
     let response = build_search_response(
         plan,
-        executed_search_groups(
-            &["image", "document"],
+        executed_search_groups_for_library(
+            &library.id,
             vec![
                 QdrantScoredPoint {
                     score: 0.9,
@@ -1982,11 +1982,13 @@ fn build_search_response_merges_multiple_vector_spaces_by_score() {
         ],
         debug_content_types: resolved_content_models
             .into_iter()
-            .map(|(content_type, resolved_model)| SearchContentTypeDebugEntry {
-                library_id: "lib_000001".to_string(),
-                content_type,
-                resolved_model,
-            })
+            .map(
+                |(content_type, resolved_model)| SearchContentTypeDebugEntry {
+                    library_id: "lib_000001".to_string(),
+                    content_type,
+                    resolved_model,
+                },
+            )
             .collect(),
         debug: true,
     };
@@ -2066,7 +2068,7 @@ fn build_search_response_applies_path_prefix_kind_source_type_and_time_range_fil
             unsupported_content_types: Vec::new(),
             active_visual_unit_refs: scoped_visual_unit_refs(
                 "lib_000001",
-                &["vu_000001", "vu_000002", "vu_000003"]
+                &["vu_000001", "vu_000002", "vu_000003"],
             ),
             execution_groups: available_execution_groups(&["video"]),
             debug_content_types: default_search_debug_content_types("lib_000001"),
@@ -3499,8 +3501,15 @@ fn executed_search_groups(
     _content_types: &[&str],
     candidates: Vec<QdrantScoredPoint>,
 ) -> Vec<crate::indexing::ExecutedSearchGroup> {
+    executed_search_groups_for_library("lib_000001", candidates)
+}
+
+fn executed_search_groups_for_library(
+    library_id: &str,
+    candidates: Vec<QdrantScoredPoint>,
+) -> Vec<crate::indexing::ExecutedSearchGroup> {
     vec![crate::indexing::ExecutedSearchGroup {
-        library_id: "lib_000001".to_string(),
+        library_id: library_id.to_string(),
         query_embedding: QueryEmbeddingResult {
             vectors: vec![vec![0.1, 0.2, 0.3]],
             pooled_vector: vec![0.1, 0.2, 0.3],
@@ -3581,11 +3590,13 @@ fn default_resolved_content_models() -> BTreeMap<String, ResolvedContentModelSel
 fn default_search_debug_content_types(library_id: &str) -> Vec<SearchContentTypeDebugEntry> {
     default_resolved_content_models()
         .into_iter()
-        .map(|(content_type, resolved_model)| SearchContentTypeDebugEntry {
-            library_id: library_id.to_string(),
-            content_type,
-            resolved_model,
-        })
+        .map(
+            |(content_type, resolved_model)| SearchContentTypeDebugEntry {
+                library_id: library_id.to_string(),
+                content_type,
+                resolved_model,
+            },
+        )
         .collect()
 }
 

@@ -969,7 +969,6 @@ impl AppState {
                 }
                 Some(PreparedImportVectorSpaceBatch {
                     vector_space_id: binding.vector_space_id.clone(),
-                    content_types: binding.content_types,
                     had_existing_index: active_vector_spaces.contains(&binding.vector_space_id),
                     stale_point_ids,
                     visual_units,

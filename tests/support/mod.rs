@@ -1,3 +1,4 @@
+// This support module is compiled into each integration test crate; each crate uses only a subset.
 #![allow(dead_code)]
 
 use axum::{
@@ -325,6 +326,7 @@ pub struct MultipartFile {
 
 pub struct TestResponse {
     pub status: StatusCode,
+    // Some integration test crates do not inspect headers, even though others do.
     #[allow(dead_code)]
     pub headers: axum::http::HeaderMap,
     body: Vec<u8>,
@@ -333,6 +335,14 @@ pub struct TestResponse {
 impl TestResponse {
     pub fn json(&self) -> Value {
         serde_json::from_slice(&self.body).expect("response body should be valid JSON")
+    }
+
+    pub fn text(&self) -> String {
+        String::from_utf8(self.body.clone()).expect("response body should be valid UTF-8")
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.body
     }
 }
 
@@ -531,21 +541,21 @@ impl QdrantStub {
             .route("/aliases", get(qdrant_list_aliases))
             .route("/collections/aliases", post(qdrant_update_aliases))
             .route(
-                "/collections/:collection_name",
+                "/collections/{collection_name}",
                 get(qdrant_get_collection)
                     .put(qdrant_create_collection)
                     .delete(qdrant_delete_collection),
             )
             .route(
-                "/collections/:collection_name/points",
+                "/collections/{collection_name}/points",
                 put(qdrant_upsert_points),
             )
             .route(
-                "/collections/:collection_name/points/query",
+                "/collections/{collection_name}/points/query",
                 post(qdrant_query_points),
             )
             .route(
-                "/collections/:collection_name/points/delete",
+                "/collections/{collection_name}/points/delete",
                 post(qdrant_delete_points),
             )
             .with_state(state);
