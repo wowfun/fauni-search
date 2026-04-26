@@ -32,7 +32,7 @@
 ## 设计原则
 
 - Server-first：产品业务能力只通过 Rust 主服务公开 API 暴露；除 `faus serve` 的本机 runtime 启动职责外，CLI 不直接读写内部状态、SQLite、Qdrant、runtime 文件或 sidecar
-- 层级清晰：`serve` 是 headless runtime 入口，`status` 是只读观察命令，`web` 基于启动或连接后的 Rust server 进入浏览器体验，library / import / search / jobs 是公开 HTTP API 的工作流 client
+- 层级清晰：`serve` 是 headless runtime 入口，`status` 是只读观察命令，`web` 基于启动或连接后的 Rust server 进入浏览器体验，library / sources / import / search / jobs 是公开 HTTP API 的工作流 client
 - 工作流优先：命令按用户目标组织，优先覆盖启动、状态查看、库操作、导入、搜索、任务观察和打开 Web，不机械镜像全部 HTTP API
 - 可脚本化输出：默认输出服务人类阅读；显式 `--json` 时必须提供稳定机器可读结构，不依赖人类文案解析
 - 运维分层：`faus serve` 是产品 runtime 启动入口；bootstrap、doctor、reset、stop、detach、smoke、Qdrant 诊断和运行面清理继续归 `scripts/local/*` 与 [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md)
@@ -53,7 +53,7 @@
   - 默认值 `http://127.0.0.1:53210`
 - `--base-url` 与 `FAUS_BASE_URL` 的尾随斜杠不得影响最终请求路径
 - `faus serve` 不通过 `--base-url` 决定监听地址；它使用 `--host`、`--port` 与运行配置启动 Rust server
-- `faus status`、library、import、search、jobs 等 client 型命令默认不读取 `.env`、`.env.dev` 或 `FAUNI_ENV_FILE`
+- `faus status`、library、sources、import、search、jobs 等 client 型命令默认不读取 `.env`、`.env.dev` 或 `FAUNI_ENV_FILE`
 - 当 Rust 主服务不可达时，client 型命令必须明确报告连接失败；是否启动本机 runtime 只属于 `faus serve` 与基于它的 `faus web` 语义
 - client 型命令连接 Rust 主服务 App API 时不得使用 ambient `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量；本地产品 API 默认应直连目标 base URL
 
@@ -92,8 +92,9 @@
 - `faus serve`
 - `faus status`
 - `faus library ...`
+- `faus sources ...`
 - `faus import ...`
-- `faus search text|image|video|document ...`
+- `faus search ...`
 - `faus jobs ...`
 - `faus web`
 
@@ -140,12 +141,39 @@
 - `faus import` 只负责提交导入请求并返回任务摘要，不负责直接扫描文件、生成 embedding 或等待全量索引完成
 - 等待、轮询、watch、tail 或 job log 属于扩展能力；基础命令不默认阻塞到索引完成，任务观察交给 `faus jobs`
 
+### `faus sources`
+
+- `faus sources` 承接库级来源管理工作流
+- `faus sources` 是 top-level resource group，但所有命令必须显式指定 `--library-id <library_id>`
+- `faus sources roots ...` 管理长期来源根配置，包括 list、create、show、update、delete
+- `faus sources list` 查看库级来源清单，可按来源根、来源类型与来源状态过滤
+- `faus sources refresh` 与 `faus sources rescan` 触发库级或来源根级来源动作，并返回动作回执与任务摘要
+- `faus sources` 只消费公开来源管理 API，不直接扫描文件系统、不读取本地 state、不管理 Qdrant
+- `rebuild`、maintenance、source repair、settings 与远端来源连接器不属于基础 `sources` 命令面
+
 ### `faus search`
 
-- `faus search text` 用于文本搜索，必须支持单库和所有库两种搜索范围
-- `faus search image`、`faus search video` 与 `faus search document` 优先支持一键上传搜索：CLI 先通过 query asset upload API 上传本地文件，再用返回的 `temp_asset_id` 调用对应搜索端点
-- 非文本搜索遵守服务端能力边界，默认只要求单库搜索；当用户请求服务端尚不支持的范围或输入形态时，应返回 `not_supported` 或等价服务端错误
-- 搜索命令应支持 `top_k`、`cursor`、`debug` 等与公开搜索契约对应的常用参数
+- `faus search` 采用 flag-based 查询输入，而不是 `text|image|video|document` 子命令
+- Canonical 命令形态固定为 `faus search [scope] [query input flags]`
+- 搜索范围通过 `--library-id <library_id>` 或 `--all-libraries` 显式给出
+- 查询输入通过以下 flag 给出：
+  - `--text <text>`
+  - `--image <path>`
+  - `--video <path>`
+  - `--document <path>`
+- 搜索命令形态预留未来组合查询，例如 `faus search --library-id demo --text "q" --image a.png`；当服务端尚不支持组合查询时，CLI 应返回 `not_supported` 而不是改变主命令形态
+- 当前最低稳定能力只执行单一输入搜索：
+  - `faus search --library-id <library_id> --text <text>`
+  - `faus search --all-libraries --text <text>`
+  - `faus search --library-id <library_id> --image <path>`
+  - `faus search --library-id <library_id> --video <path>`
+  - `faus search --library-id <library_id> --document <path>`
+- 图片、视频与文档搜索优先支持一键上传搜索：CLI 先通过 query asset upload API 上传本地文件，再用返回的 `temp_asset_id` 调用对应搜索端点
+- 搜索范围必须显式给出；CLI 不隐式猜测当前库或所有库
+- 文本搜索支持单库和所有库；非文本搜索遵守服务端能力边界，最低稳定能力只要求单库搜索
+- 当用户请求服务端尚不支持的范围、组合查询或输入形态时，应返回 `not_supported` 或等价服务端错误
+- 搜索命令应支持 `top_k`、`cursor`、`target_content_types`、`debug` 等与公开搜索契约对应的常用参数
+- 视频和文档搜索可以通过命令参数传递 locator 范围；复杂 filters 与库内对象复用属于扩展能力
 - 人类可读搜索输出应优先展示结果数量、来源路径、结果类型、库 ID、score 与可取用预览 URL
 - `--json` 搜索输出应保留服务端搜索响应结构，不丢弃 `next_cursor`、`unsupported_content_types` 或 `debug`
 
@@ -190,7 +218,7 @@
 ## 验收标准
 
 - 仓库存在 `faus` 产品 CLI 入口规划，且其命令面不与 `scripts/local/*` 职责混淆
-- 基础命令面覆盖 serve、status、library、import、search、jobs 与 web
+- 基础命令面覆盖 serve、status、library、sources、import、search、jobs 与 web
 - `serve -> status -> web` 的职责层级清晰：启动 runtime、观察 runtime、进入浏览器体验
 - `faus` 的 base URL 解析、`--json` 输出、错误映射和运行边界有明确规格约束
 - 搜索命令覆盖文本单库 / 所有库，以及图片、视频、文档的一键上传搜索
