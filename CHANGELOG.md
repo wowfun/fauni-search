@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-04-26
+### Added
+- Added the public App OpenAPI contract at `GET /openapi.json` and Rust server-hosted Web from `ui/dist`.
+- Added the initial `faus` product CLI with `serve`, `status`, and `web`, plus an explicit `scripts/local/smoke-faus-serve.sh --dev` smoke.
+
+### Changed
+- Upgraded the Rust HTTP stack to axum 0.8/OpenAPI router registration and moved human route discovery from `GET /` to `GET /routes`.
+- Replaced the public runtime health route and smoke naming with `GET /runtime/status` / `smoke-runtime-status`, and aligned the Web UI with the new route.
+- Reworked `scripts/local/run.sh` as a full-stack wrapper over `faus serve`, including `faus serve` pid discovery and backend-ready-before-Vite startup.
+- Reorganized the `faus` CLI into binary-local modules and removed or documented stale Rust dead-code warnings without changing public behavior.
+
 ## 2026-04-25
 ### Changed
 - Removed the `工具` drawer from the shell: the sidebar now keeps `Search / 库管理 / 设置`, the status capsule opens `Settings > 诊断`, and Inventory owns folded library maintenance beside refresh and rescan.
