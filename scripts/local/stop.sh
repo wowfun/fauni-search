@@ -157,7 +157,7 @@ cmd_matches_service() {
 
   case "$service" in
     app)
-      [[ "$cmd" == *"target/debug/fauni-search"* || "$cmd" == *"target/release/fauni-search"* || "$cmd" == *"cargo run"* ]]
+      [[ "$cmd" == *"target/debug/fauni-search"* || "$cmd" == *"target/release/fauni-search"* || "$cmd" == *"target/debug/faus serve"* || "$cmd" == *"target/release/faus serve"* || "$cmd" == *"cargo run"* ]]
       ;;
     sidecar)
       [[ "$cmd" == *"-m fauni_sidecar"* ]]

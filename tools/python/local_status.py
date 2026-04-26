@@ -67,6 +67,8 @@ def cmd_matches_service(service: str, cmd: str, ui_port: str) -> bool:
         return (
             "target/debug/fauni-search" in cmd
             or "target/release/fauni-search" in cmd
+            or "target/debug/faus serve" in cmd
+            or "target/release/faus serve" in cmd
             or "cargo run" in cmd
         )
     if service == "sidecar":

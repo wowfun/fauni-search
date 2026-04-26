@@ -263,6 +263,12 @@ pub(crate) fn resolve_local_sidecar_active_model(
     })
 }
 
+pub fn resolve_local_sidecar_active_model_from_env() -> Result<(String, String), io::Error> {
+    let loaded = load_merged_runtime_config()?;
+    let active = resolve_local_sidecar_active_model(&loaded.config)?;
+    Ok((active.model_id, active.version))
+}
+
 fn load_config_value(path: &Path, required: bool) -> Result<Value, io::Error> {
     if !path.exists() {
         return if required {

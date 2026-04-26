@@ -21,7 +21,7 @@ Usage:
 
 Options:
   --dev     Use .env.dev instead of .env
-  --detach  Start app, sidecar, and UI in the background and exit after health checks
+  --detach  Start backend runtime and UI in the background and exit after health checks
 EOF
 }
 
@@ -50,7 +50,6 @@ done
 require_repo_env
 
 APP_PID=""
-SIDECAR_PID=""
 UI_PID=""
 DETACH_READY=0
 GPU_ENV_PYTHON=""
@@ -62,10 +61,8 @@ cleanup() {
     exit 0
   fi
   if [[ -n "$APP_PID" ]]; then kill "$APP_PID" >/dev/null 2>&1 || true; fi
-  if [[ -n "$SIDECAR_PID" ]]; then kill "$SIDECAR_PID" >/dev/null 2>&1 || true; fi
   if [[ -n "$UI_PID" ]]; then kill "$UI_PID" >/dev/null 2>&1 || true; fi
   [[ -n "${APP_PID_FILE:-}" ]] && rm -f "$APP_PID_FILE"
-  [[ -n "${SIDECAR_PID_FILE:-}" ]] && rm -f "$SIDECAR_PID_FILE"
   [[ -n "${UI_PID_FILE:-}" ]] && rm -f "$UI_PID_FILE"
   exit "$code"
 }
@@ -85,53 +82,6 @@ wait_http_ok() {
 
   echo "[error] $label did not become ready at $url"
   return 1
-}
-
-ensure_qdrant_ready() {
-  local qdrant_args=()
-
-  if python3 "$PROBE_PY" http-ok "${QDRANT_URL%/}/collections" --timeout 1.0; then
-    return 0
-  fi
-
-  echo "[info] Qdrant is not reachable at $QDRANT_URL; starting it via scripts/local/run-qdrant.sh${FAUNI_ENV_ARG_HINT}"
-  if [[ "${FAUNI_CONFIG_MODE:-}" == "dev" ]]; then
-    qdrant_args+=(--dev)
-  fi
-
-  if ! bash "$ROOT_DIR/scripts/local/run-qdrant.sh" "${qdrant_args[@]}"; then
-    echo "[error] Qdrant failed to start; see $DEV_LOG_DIR/qdrant.log"
-    return 1
-  fi
-
-  if python3 "$PROBE_PY" http-ok "${QDRANT_URL%/}/collections" --timeout 1.0; then
-    return 0
-  fi
-
-  echo "[error] Qdrant is not reachable at $QDRANT_URL after starting; see $DEV_LOG_DIR/qdrant.log"
-  return 1
-}
-
-dir_has_entries() {
-  local dir="$1"
-  [[ -d "$dir" ]] || return 1
-  find "$dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
-}
-
-ensure_runtime_generation_ready() {
-  local runtime_config_path="$APP_RUNTIME_DIR/runtime-config.json"
-
-  if [[ -f "$runtime_config_path" ]]; then
-    return 0
-  fi
-
-  if dir_has_entries "$APP_RUNTIME_DIR" || dir_has_entries "$QDRANT_STORAGE_DIR"; then
-    echo "[error] Legacy runtime data detected for this environment; run scripts/local/cutover-runtime.sh${FAUNI_ENV_ARG_HINT} before starting services"
-    return 1
-  fi
-
-  mkdir -p "$APP_RUNTIME_DIR"
-  printf '{}\n' >"$runtime_config_path"
 }
 
 ensure_port_free() {
@@ -174,48 +124,30 @@ if ! PYTHONPATH="$ROOT_DIR/sidecar/src" "$GPU_ENV_PYTHON" "$PROBE_PY" import-mod
   exit 1
 fi
 
-ensure_runtime_generation_ready
-
-CONFIG_EMBEDDING_MODEL_ID="$("$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/read_config.py" local-sidecar-active --field model_id)"
-CONFIG_EMBEDDING_MODEL_VERSION="$("$GPU_ENV_PYTHON" "$ROOT_DIR/tools/python/read_config.py" local-sidecar-active --field version)"
-export EMBEDDING_MODEL_ID="$CONFIG_EMBEDDING_MODEL_ID"
-export EMBEDDING_MODEL_REVISION="$CONFIG_EMBEDDING_MODEL_VERSION"
-
 ensure_port_free "app" "$APP_HOST" "$APP_PORT"
 ensure_port_free "sidecar" "$SIDECAR_HOST" "$SIDECAR_PORT"
 ensure_port_free "ui" "$UI_HOST" "$UI_PORT"
 
-ensure_qdrant_ready
+echo "[info] Building faus binary"
+cargo build --bin faus
+
+FAUS_SERVE_ARGS=(serve)
+if [[ "${FAUNI_CONFIG_MODE:-}" == "dev" ]]; then
+  FAUS_SERVE_ARGS+=(--dev)
+fi
 
 mkdir -p "$APP_RUNTIME_DIR" "$DEV_LOG_DIR"
 APP_PID_FILE="$DEV_LOG_DIR/app.pid"
-SIDECAR_PID_FILE="$DEV_LOG_DIR/sidecar.pid"
 UI_PID_FILE="$DEV_LOG_DIR/ui.pid"
+rm -f "$DEV_LOG_DIR/sidecar.pid"
 
 if [[ "$DETACH" -eq 1 ]]; then
-  setsid nohup cargo run >"$DEV_LOG_DIR/app.log" 2>&1 < /dev/null &
+  setsid nohup "$ROOT_DIR/target/debug/faus" "${FAUS_SERVE_ARGS[@]}" >"$DEV_LOG_DIR/app.log" 2>&1 < /dev/null &
 else
-  nohup cargo run >"$DEV_LOG_DIR/app.log" 2>&1 &
+  nohup "$ROOT_DIR/target/debug/faus" "${FAUS_SERVE_ARGS[@]}" >"$DEV_LOG_DIR/app.log" 2>&1 &
 fi
 APP_PID=$!
 echo "$APP_PID" >"$APP_PID_FILE"
-
-if [[ "$DETACH" -eq 1 ]]; then
-  setsid nohup env PYTHONPATH="$ROOT_DIR/sidecar/src" "$GPU_ENV_PYTHON" -m fauni_sidecar >"$DEV_LOG_DIR/sidecar.log" 2>&1 < /dev/null &
-else
-  PYTHONPATH="$ROOT_DIR/sidecar/src" \
-  nohup "$GPU_ENV_PYTHON" -m fauni_sidecar >"$DEV_LOG_DIR/sidecar.log" 2>&1 &
-fi
-SIDECAR_PID=$!
-echo "$SIDECAR_PID" >"$SIDECAR_PID_FILE"
-
-if [[ "$DETACH" -eq 1 ]]; then
-  setsid nohup pnpm --dir "$ROOT_DIR/ui" dev -- --host "$UI_HOST" --port "$UI_PORT" --strictPort >"$DEV_LOG_DIR/ui.log" 2>&1 < /dev/null &
-else
-  nohup pnpm --dir "$ROOT_DIR/ui" dev -- --host "$UI_HOST" --port "$UI_PORT" --strictPort >"$DEV_LOG_DIR/ui.log" 2>&1 &
-fi
-UI_PID=$!
-echo "$UI_PID" >"$UI_PID_FILE"
 
 wait_http_ok "app" "http://$APP_HOST:$APP_PORT/health" || {
   echo "[error] app failed to start; see $DEV_LOG_DIR/app.log"
@@ -227,21 +159,34 @@ wait_http_ok "sidecar" "http://$SIDECAR_HOST:$SIDECAR_PORT/health" || {
   exit 1
 }
 
+wait_http_ok "qdrant" "${QDRANT_URL%/}/collections" || {
+  echo "[error] Qdrant failed to start; see $DEV_LOG_DIR/qdrant.log"
+  exit 1
+}
+
+if [[ "$DETACH" -eq 1 ]]; then
+  setsid nohup pnpm --dir "$ROOT_DIR/ui" dev -- --host "$UI_HOST" --port "$UI_PORT" --strictPort >"$DEV_LOG_DIR/ui.log" 2>&1 < /dev/null &
+else
+  nohup pnpm --dir "$ROOT_DIR/ui" dev -- --host "$UI_HOST" --port "$UI_PORT" --strictPort >"$DEV_LOG_DIR/ui.log" 2>&1 &
+fi
+UI_PID=$!
+echo "$UI_PID" >"$UI_PID_FILE"
+
 wait_http_ok "ui" "http://$UI_HOST:$UI_PORT/" || {
   echo "[error] UI failed to start; see $DEV_LOG_DIR/ui.log"
   exit 1
 }
 
-echo "[ok] Started app, sidecar, and UI"
+echo "[ok] Started backend runtime and UI"
 echo "[info] Config:  ${FAUNI_CONFIG_SOURCE#$ROOT_DIR/}"
 echo "[info] Models:  fauni.config.json + ${APP_RUNTIME_DIR}/runtime-config.json"
-echo "[info] Model:   $EMBEDDING_MODEL_ID@$EMBEDDING_MODEL_REVISION"
 echo "[info] App:     http://$APP_HOST:$APP_PORT/health"
 echo "[info] Sidecar: http://$SIDECAR_HOST:$SIDECAR_PORT/health"
+echo "[info] Qdrant:  ${QDRANT_URL%/}/collections"
 echo "[info] UI:      http://$UI_HOST:$UI_PORT/"
 echo "[info] Python:  $GPU_ENV_PYTHON"
 echo "[info] Logs:    $DEV_LOG_DIR"
-echo "[info] Pids:    $APP_PID_FILE $SIDECAR_PID_FILE $UI_PID_FILE"
+echo "[info] Pids:    $APP_PID_FILE $UI_PID_FILE"
 
 if [[ "$DETACH" -eq 1 ]]; then
   DETACH_READY=1
