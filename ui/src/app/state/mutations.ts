@@ -24,6 +24,7 @@ import type {
   ModelSelectionPayload,
   PreviewReference,
   ProviderConfigSnapshot,
+  ProviderModelConfigSnapshot,
   ProvidersListData,
   QueryAssetData,
   ResolvedContentModelSelectionPayload,
@@ -54,6 +55,7 @@ import {
   selectedGlobalTestModalities,
   selectedLibraryContentTypeKey,
   selectedLibraryTestModalities,
+  selectedProviderTestModalities,
 } from "../selectors/settings";
 import { queryDocumentRangeSummary } from "../selectors/query-assets";
 import { state } from "./store";
@@ -103,8 +105,23 @@ export function resetSearchResultLibraryFocus() {
 
 export function resetProviderEditor() {
   state.editingProviderId = "";
+  state.providerDisplayNameDraft = "";
+  state.providerKindDraft = "";
   state.providerEnabledDraft = true;
   state.providerBaseUrlDraft = "";
+  state.providerActiveModelDraft = "";
+  resetProviderModelEditor();
+}
+
+export function resetProviderModelEditor() {
+  state.editingProviderModelId = "";
+  state.providerModelIdDraft = "";
+  state.providerModelEnabledDraft = true;
+  state.providerModelVersionDraft = "main";
+  state.providerModelBackendDraft = "";
+  state.providerModelInputTypesDraft = "text, image";
+  state.providerModelVectorTypesDraft = "single_vector";
+  state.providerModelSupportsMixedInputsDraft = false;
 }
 
 export function resetInventoryState() {
@@ -212,8 +229,33 @@ export function hydrateProviderEditor(provider: ProviderConfigSnapshot | null) {
   }
 
   state.editingProviderId = provider.provider_id;
+  state.providerDisplayNameDraft = provider.display_name;
+  state.providerKindDraft = provider.provider_kind;
   state.providerEnabledDraft = provider.enabled;
   state.providerBaseUrlDraft = provider.base_url ?? "";
+  state.providerActiveModelDraft = provider.active_model ?? provider.models[0]?.model_id ?? "";
+  hydrateProviderModelEditor(
+    provider.models.find((model) => model.model_id === state.providerActiveModelDraft) ??
+      provider.models[0] ??
+      null
+  );
+}
+
+export function hydrateProviderModelEditor(model: ProviderModelConfigSnapshot | null) {
+  if (!model) {
+    resetProviderModelEditor();
+    return;
+  }
+  state.editingProviderModelId = model.model_id;
+  state.providerModelIdDraft = model.model_id;
+  state.providerModelEnabledDraft = model.enabled;
+  state.providerModelVersionDraft = model.version || "main";
+  state.providerModelBackendDraft = model.backend ?? "";
+  state.providerModelInputTypesDraft = model.embedding_capabilities.input_types.join(", ");
+  state.providerModelVectorTypesDraft = model.embedding_capabilities.vector_types.join(", ");
+  state.providerModelSupportsMixedInputsDraft = Boolean(
+    model.embedding_capabilities.supports_mixed_inputs
+  );
 }
 
 export function ensureValidModelTestDrafts() {
@@ -226,7 +268,10 @@ export function ensureValidModelTestDrafts() {
     state.selectedLibraryContentType = libraryContentType;
   }
 
-  const globalModalities = selectedGlobalTestModalities();
+  const globalModalities =
+    state.selectedSettingsSection === "providers"
+      ? selectedProviderTestModalities()
+      : selectedGlobalTestModalities();
   if (!globalModalities.includes(state.globalModelTestModalityDraft as ModelTestModality)) {
     state.globalModelTestModalityDraft =
       (globalModalities.includes("text") ? "text" : globalModalities[0]) ?? "";

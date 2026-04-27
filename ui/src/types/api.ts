@@ -21,9 +21,21 @@ export interface ProviderConfigSnapshot {
   display_name: string;
   provider_kind: string;
   enabled: boolean;
+  active_model?: string | null;
   base_url?: string | null;
   readonly_reason?: string | null;
   probe?: ProviderProbeSnapshot | null;
+  origin: string;
+  models: ProviderModelConfigSnapshot[];
+}
+
+export interface ProviderModelConfigSnapshot {
+  model_id: string;
+  enabled: boolean;
+  version: string;
+  backend?: string | null;
+  embedding_capabilities: EmbeddingCapabilities;
+  origin: string;
 }
 
 export interface ProvidersListData {
@@ -74,10 +86,17 @@ export type BindingSource =
 
 export interface GlobalContentTypesData {
   content_types: ContentTypesPayload;
+  origins?: Record<string, ContentTypeOriginSnapshot>;
 }
 
 export interface LibraryContentTypesData {
   content_types: ContentTypesPayload;
+  origins?: Record<string, ContentTypeOriginSnapshot>;
+}
+
+export interface ContentTypeOriginSnapshot {
+  origin: string;
+  has_runtime_overlay: boolean;
 }
 
 export interface ResolvedModelSelectionPayload {

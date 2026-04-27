@@ -219,7 +219,7 @@ export function currentWorkspaceMeta() {
   if (state.activeWorkspace === "settings") {
     return {
       title: "设置",
-      summary: "在同一处调整内容类型、当前库覆盖、连接、模型测试和诊断信息。",
+      summary: "在同一处调整模型提供方、内容类型、当前库覆盖和诊断信息。",
     };
   }
 

@@ -14,6 +14,7 @@ import {
   hasFocusedEditableControl,
   hydrateLibraryManagementDraft,
   hydrateProviderEditor,
+  hydrateProviderModelEditor,
   isTerminalJobStatus,
   JOB_POLL_INTERVAL_MS,
   JOB_POLL_TIMEOUT_MS,
@@ -54,6 +55,8 @@ import {
   selectedLibraryContentTypeKey,
   selectedLibraryModelSelection,
   selectedProviderConfig,
+  selectedProviderModelSelection,
+  selectedProviderTestModalities,
   selectedVisualUnitId,
   selectedVisualUnitOriginLibraryId,
   setLibraryQueryDocumentVisualUnit,
@@ -100,8 +103,27 @@ import { renderWorkspace } from "../render/workspace";
 export function onProviderConfigSelect(event) {
   const providerId = event.target.value;
   const provider = state.providerConfigs.find((item) => item.provider_id === providerId) ?? null;
-  hydrateProviderEditor(provider);
+  if (provider) {
+    hydrateProviderEditor(provider);
+  } else {
+    const previousProviderId = state.editingProviderId;
+    state.editingProviderId = providerId;
+    if (previousProviderId !== providerId) {
+      state.providerDisplayNameDraft = providerId;
+      state.providerKindDraft = providerId;
+    }
+    state.providerActiveModelDraft = "";
+    hydrateProviderModelEditor(null);
+  }
   renderWorkspace();
+}
+
+export function onProviderDisplayNameInput(event) {
+  state.providerDisplayNameDraft = event.target.value;
+}
+
+export function onProviderKindInput(event) {
+  state.providerKindDraft = event.target.value;
 }
 
 export function onProviderEnabledChange(event) {
@@ -110,6 +132,16 @@ export function onProviderEnabledChange(event) {
 
 export function onProviderBaseUrlInput(event) {
   state.providerBaseUrlDraft = event.target.value;
+}
+
+export function onProviderActiveModelChange(event) {
+  state.providerActiveModelDraft = event.target.value;
+  const provider = selectedProviderConfig();
+  hydrateProviderModelEditor(
+    provider?.models.find((model) => model.model_id === state.providerActiveModelDraft) ?? null
+  );
+  resetGlobalModelTestState();
+  renderWorkspace();
 }
 
 export async function onSubmitProviderConfig(event) {
@@ -123,11 +155,39 @@ export async function onSubmitProviderConfig(event) {
     await apiRequest(`/settings/providers/${encodeURIComponent(state.editingProviderId)}`, {
       method: "PATCH",
       body: JSON.stringify({
+        display_name: state.providerDisplayNameDraft.trim() || state.editingProviderId,
+        provider_kind: state.providerKindDraft.trim() || state.editingProviderId,
         enabled: state.providerEnabledDraft,
         base_url: state.providerBaseUrlDraft.trim() || null,
+        active_model: state.providerActiveModelDraft.trim() || null,
       }),
     });
     await refreshProviderSettingsData();
+    hydrateProviderEditor(
+      state.providerConfigs.find((provider) => provider.provider_id === state.editingProviderId) ??
+        null
+    );
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+export async function onDeleteProviderConfig() {
+  if (!state.editingProviderId) {
+    return;
+  }
+  try {
+    state.globalError = null;
+    await apiRequest(`/settings/providers/${encodeURIComponent(state.editingProviderId)}`, {
+      method: "DELETE",
+    });
+    await refreshProviderSettingsData();
+    hydrateProviderEditor(
+      state.providerConfigs.find((provider) => provider.provider_id === state.editingProviderId) ??
+        null
+    );
     renderWorkspace();
   } catch (error) {
     state.globalError = toApiError(error);
@@ -150,6 +210,110 @@ export async function onEditProviderConfig(event) {
   hydrateProviderEditor(provider);
   state.globalError = null;
   renderWorkspace();
+}
+
+export function onProviderModelSelect(event) {
+  const modelId = event.target.value;
+  const provider = selectedProviderConfig();
+  if (provider) {
+    hydrateProviderModelEditor(
+      provider.models.find((model) => model.model_id === modelId) ?? null
+    );
+  }
+  resetGlobalModelTestState();
+  renderWorkspace();
+}
+
+export function onProviderModelIdInput(event) {
+  state.providerModelIdDraft = event.target.value;
+}
+
+export function onProviderModelEnabledChange(event) {
+  state.providerModelEnabledDraft = event.target.checked;
+}
+
+export function onProviderModelVersionInput(event) {
+  state.providerModelVersionDraft = event.target.value;
+}
+
+export function onProviderModelBackendInput(event) {
+  state.providerModelBackendDraft = event.target.value;
+}
+
+export function onProviderModelInputTypesInput(event) {
+  state.providerModelInputTypesDraft = event.target.value;
+}
+
+export function onProviderModelVectorTypesInput(event) {
+  state.providerModelVectorTypesDraft = event.target.value;
+}
+
+export function onProviderModelSupportsMixedInputsChange(event) {
+  state.providerModelSupportsMixedInputsDraft = event.target.checked;
+}
+
+function commaList(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export async function onSubmitProviderModelConfig(event) {
+  event.preventDefault();
+  const providerId = state.editingProviderId.trim();
+  const modelId = state.providerModelIdDraft.trim();
+  if (!providerId || !modelId) {
+    return;
+  }
+  try {
+    state.globalError = null;
+    await apiRequest(
+      `/settings/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          enabled: state.providerModelEnabledDraft,
+          version: state.providerModelVersionDraft.trim() || "main",
+          backend: state.providerModelBackendDraft.trim() || null,
+          embedding_capabilities: {
+            input_types: commaList(state.providerModelInputTypesDraft),
+            vector_types: commaList(state.providerModelVectorTypesDraft),
+            supports_mixed_inputs: state.providerModelSupportsMixedInputsDraft,
+          },
+        }),
+      }
+    );
+    await refreshProviderSettingsData();
+    const provider = state.providerConfigs.find((item) => item.provider_id === providerId) ?? null;
+    hydrateProviderEditor(provider);
+    hydrateProviderModelEditor(provider?.models.find((model) => model.model_id === modelId) ?? null);
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+export async function onDeleteProviderModelConfig() {
+  const providerId = state.editingProviderId.trim();
+  const modelId = state.providerModelIdDraft.trim();
+  if (!providerId || !modelId) {
+    return;
+  }
+  try {
+    state.globalError = null;
+    await apiRequest(
+      `/settings/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`,
+      { method: "DELETE" }
+    );
+    await refreshProviderSettingsData();
+    hydrateProviderEditor(state.providerConfigs.find((item) => item.provider_id === providerId) ?? null);
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
 }
 
 export function onSettingsDiagnosticsJobsToggle(event) {
@@ -243,10 +407,30 @@ export async function onSubmitGlobalContentTypes(event) {
 
   try {
     state.globalError = null;
-    await apiRequest("/settings/content-types", {
+    const contentType = selectedGlobalContentTypeKey();
+    await apiRequest(`/settings/content-types/${encodeURIComponent(contentType)}`, {
       method: "PATCH",
-      body: JSON.stringify(state.globalContentTypes),
+      body: JSON.stringify(selectedGlobalContentTypeBinding()),
     });
+    await refreshProviderSettingsData();
+    renderWorkspace();
+  } catch (error) {
+    state.globalError = toApiError(error);
+    renderWorkspace();
+  }
+}
+
+export async function onResetGlobalContentType() {
+  const contentType = selectedGlobalContentTypeKey();
+  if (!contentType) {
+    return;
+  }
+  try {
+    state.globalError = null;
+    await apiRequest(`/settings/content-types/${encodeURIComponent(contentType)}`, {
+      method: "DELETE",
+    });
+    resetGlobalModelTestState();
     await refreshProviderSettingsData();
     renderWorkspace();
   } catch (error) {
@@ -334,10 +518,14 @@ export async function onSubmitLibraryContentTypes(event) {
 
   try {
     state.globalError = null;
-    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types`, {
-      method: "PATCH",
-      body: JSON.stringify(state.libraryContentTypes),
-    });
+    const contentType = selectedLibraryContentTypeKey();
+    await apiRequest(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types/${encodeURIComponent(contentType)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(selectedLibraryContentTypeBinding()),
+      }
+    );
     await refreshLibraryContentSettings();
     renderWorkspace();
   } catch (error) {
@@ -354,14 +542,13 @@ export async function onResetLibraryContentTypes() {
   try {
     state.globalError = null;
     const contentType = selectedLibraryContentTypeKey();
-    if (contentType) {
-      delete state.libraryContentTypes.content_types[contentType];
-    }
     resetLibraryModelTestState();
-    await apiRequest(`/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types`, {
-      method: "PATCH",
-      body: JSON.stringify(state.libraryContentTypes),
-    });
+    await apiRequest(
+      `/libraries/${encodeURIComponent(state.selectedLibraryId)}/content-types/${encodeURIComponent(contentType)}`,
+      {
+        method: "DELETE",
+      }
+    );
     await refreshLibraryContentSettings();
     renderWorkspace();
   } catch (error) {
@@ -454,50 +641,56 @@ export function onLibraryModelTestComparisonFileInput(event) {
   renderWorkspace();
 }
 
-export async function submitSettingsModelTest(scope: "global" | "library") {
+export async function submitSettingsModelTest(scope: "global" | "library" | "provider") {
   const selection =
-    scope === "global" ? selectedGlobalModelSelection() : selectedLibraryModelSelection();
+    scope === "provider"
+      ? selectedProviderModelSelection()
+      : scope === "global"
+        ? selectedGlobalModelSelection()
+        : selectedLibraryModelSelection();
   const modalityDraft =
-    scope === "global" ? state.globalModelTestModalityDraft : state.libraryModelTestModalityDraft;
+    scope === "library" ? state.libraryModelTestModalityDraft : state.globalModelTestModalityDraft;
   const inputModality =
     modalityDraft ||
-    supportedTestModalitiesForSelection(selection.provider_id, selection.model_id)[0] ||
+    (scope === "provider"
+      ? selectedProviderTestModalities()
+      : supportedTestModalitiesForSelection(selection.provider_id, selection.model_id))[0] ||
     "";
   const textDraft =
-    scope === "global" ? state.globalModelTestTextDraft : state.libraryModelTestTextDraft;
-  const file = scope === "global" ? state.globalModelTestFile : state.libraryModelTestFile;
+    scope === "library" ? state.libraryModelTestTextDraft : state.globalModelTestTextDraft;
+  const file = scope === "library" ? state.libraryModelTestFile : state.globalModelTestFile;
   const comparisonModalityDraft =
-    scope === "global"
-      ? state.globalModelTestComparisonModalityDraft
-      : state.libraryModelTestComparisonModalityDraft;
+    scope === "library"
+      ? state.libraryModelTestComparisonModalityDraft
+      : state.globalModelTestComparisonModalityDraft;
   const comparisonTextDraft =
-    scope === "global"
-      ? state.globalModelTestComparisonTextDraft
-      : state.libraryModelTestComparisonTextDraft;
+    scope === "library"
+      ? state.libraryModelTestComparisonTextDraft
+      : state.globalModelTestComparisonTextDraft;
   const comparisonFile =
-    scope === "global"
-      ? state.globalModelTestComparisonFile
-      : state.libraryModelTestComparisonFile;
+    scope === "library"
+      ? state.libraryModelTestComparisonFile
+      : state.globalModelTestComparisonFile;
   const providerDraft = activeProviderDraftForSelection(selection.provider_id);
   const setPending = (value: boolean) => {
-    if (scope === "global") {
-      state.globalModelTestPending = value;
-    } else {
+    if (scope === "library") {
       state.libraryModelTestPending = value;
+    } else {
+      state.globalModelTestPending = value;
     }
   };
   const setResult = (result: ModelTestData | null) => {
-    if (scope === "global") {
-      state.globalModelTestResult = result;
-    } else {
+    if (scope === "library") {
       state.libraryModelTestResult = result;
+    } else {
+      state.globalModelTestResult = result;
     }
   };
   const setError = (error: ApiErrorPayload | null) => {
-    if (scope === "global") {
-      state.globalModelTestError = error;
-    } else {
+    if (scope === "library") {
       state.libraryModelTestError = error;
+    } else {
+      state.globalModelTestError = error;
     }
   };
 
@@ -607,4 +800,9 @@ export async function onSubmitGlobalModelTest(event) {
 export async function onSubmitLibraryModelTest(event) {
   event.preventDefault();
   await submitSettingsModelTest("library");
+}
+
+export async function onSubmitProviderModelTest(event) {
+  event.preventDefault();
+  await submitSettingsModelTest("provider");
 }

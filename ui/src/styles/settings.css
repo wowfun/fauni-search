@@ -79,7 +79,8 @@
 }
 
 .provider-config-list-surface,
-.provider-config-editor {
+.provider-config-editor,
+.provider-model-editor {
   display: grid;
   gap: 0.85rem;
 }

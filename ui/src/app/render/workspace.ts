@@ -58,8 +58,21 @@ import {
   onOpenHitLibraryContext,
   onOpenSettingsSection,
   onProviderBaseUrlInput,
+  onProviderActiveModelChange,
   onProviderConfigSelect,
+  onProviderDisplayNameInput,
   onProviderEnabledChange,
+  onProviderKindInput,
+  onProviderModelBackendInput,
+  onProviderModelEnabledChange,
+  onProviderModelIdInput,
+  onProviderModelInputTypesInput,
+  onProviderModelSelect,
+  onProviderModelSupportsMixedInputsChange,
+  onProviderModelVectorTypesInput,
+  onProviderModelVersionInput,
+  onDeleteProviderConfig,
+  onDeleteProviderModelConfig,
   onQueryDocumentInput,
   onQueryDocumentRangeEndInput,
   onQueryDocumentRangeStartInput,
@@ -108,6 +121,9 @@ import {
   onSubmitLibraryContentTypes,
   onSubmitLibraryModelTest,
   onSubmitProviderConfig,
+  onSubmitProviderModelConfig,
+  onSubmitProviderModelTest,
+  onResetGlobalContentType,
   onSubmitSourceRoot,
   onToggleInventoryImport,
   onToggleLibraryArchive,
@@ -755,8 +771,20 @@ export function renderWorkspace() {
     .querySelector("#provider-config-reset-button")
     ?.addEventListener("click", onResetProviderConfigForm);
   document
+    .querySelector("#provider-config-delete-button")
+    ?.addEventListener("click", onDeleteProviderConfig);
+  document
     .querySelector("#provider-config-id")
     ?.addEventListener("change", onProviderConfigSelect);
+  document
+    .querySelector("#provider-config-id")
+    ?.addEventListener("input", onProviderConfigSelect);
+  document
+    .querySelector("#provider-display-name")
+    ?.addEventListener("input", onProviderDisplayNameInput);
+  document
+    .querySelector("#provider-kind")
+    ?.addEventListener("input", onProviderKindInput);
   document
     .querySelector("#provider-enabled")
     ?.addEventListener("change", onProviderEnabledChange);
@@ -764,8 +792,44 @@ export function renderWorkspace() {
     .querySelector("#provider-base-url")
     ?.addEventListener("input", onProviderBaseUrlInput);
   document
+    .querySelector("#provider-active-model")
+    ?.addEventListener("change", onProviderActiveModelChange);
+  document
+    .querySelector("#provider-model-config-form")
+    ?.addEventListener("submit", onSubmitProviderModelConfig);
+  document
+    .querySelector("#provider-model-config-delete-button")
+    ?.addEventListener("click", onDeleteProviderModelConfig);
+  document
+    .querySelector("#provider-model-select")
+    ?.addEventListener("change", onProviderModelSelect);
+  document
+    .querySelector("#provider-model-id")
+    ?.addEventListener("input", onProviderModelIdInput);
+  document
+    .querySelector("#provider-model-enabled")
+    ?.addEventListener("change", onProviderModelEnabledChange);
+  document
+    .querySelector("#provider-model-version")
+    ?.addEventListener("input", onProviderModelVersionInput);
+  document
+    .querySelector("#provider-model-backend")
+    ?.addEventListener("input", onProviderModelBackendInput);
+  document
+    .querySelector("#provider-model-input-types")
+    ?.addEventListener("input", onProviderModelInputTypesInput);
+  document
+    .querySelector("#provider-model-vector-types")
+    ?.addEventListener("input", onProviderModelVectorTypesInput);
+  document
+    .querySelector("#provider-model-supports-mixed-inputs")
+    ?.addEventListener("change", onProviderModelSupportsMixedInputsChange);
+  document
     .querySelector("#global-content-types-form")
     ?.addEventListener("submit", onSubmitGlobalContentTypes);
+  document
+    .querySelector("#global-content-types-reset-button")
+    ?.addEventListener("click", onResetGlobalContentType);
   document
     .querySelector("#global-content-type")
     ?.addEventListener("change", onGlobalContentTypeChange);
@@ -785,6 +849,9 @@ export function renderWorkspace() {
     .querySelector("#global-model-test-form")
     ?.addEventListener("submit", onSubmitGlobalModelTest);
   document
+    .querySelector("#provider-model-test-form")
+    ?.addEventListener("submit", onSubmitProviderModelTest);
+  document
     .querySelector("#global-model-test-modality")
     ?.addEventListener("change", onGlobalModelTestModalityChange);
   document
@@ -801,6 +868,24 @@ export function renderWorkspace() {
     ?.addEventListener("input", onGlobalModelTestComparisonTextInput);
   document
     .querySelector("#global-model-test-comparison-file")
+    ?.addEventListener("change", onGlobalModelTestComparisonFileInput);
+  document
+    .querySelector("#provider-model-test-modality")
+    ?.addEventListener("change", onGlobalModelTestModalityChange);
+  document
+    .querySelector("#provider-model-test-text")
+    ?.addEventListener("input", onGlobalModelTestTextInput);
+  document
+    .querySelector("#provider-model-test-file")
+    ?.addEventListener("change", onGlobalModelTestFileInput);
+  document
+    .querySelector("#provider-model-test-comparison-modality")
+    ?.addEventListener("change", onGlobalModelTestComparisonModalityChange);
+  document
+    .querySelector("#provider-model-test-comparison-text")
+    ?.addEventListener("input", onGlobalModelTestComparisonTextInput);
+  document
+    .querySelector("#provider-model-test-comparison-file")
     ?.addEventListener("change", onGlobalModelTestComparisonFileInput);
   document
     .querySelector("#library-content-types-form")

@@ -10,6 +10,7 @@ import type {
   ModelCatalogEntry,
   ModelTestData,
   ProviderConfigSnapshot,
+  ContentTypeOriginSnapshot,
   QueryAssetData,
   ResolvedContentModelsData,
   RuntimeHealthData,
@@ -42,7 +43,9 @@ export interface AppState {
   providerConfigs: ProviderConfigSnapshot[];
   modelCatalog: ModelCatalogEntry[];
   globalContentTypes: ContentTypesPayload;
+  globalContentTypeOrigins: Record<string, ContentTypeOriginSnapshot>;
   libraryContentTypes: ContentTypesPayload;
+  libraryContentTypeOrigins: Record<string, ContentTypeOriginSnapshot>;
   resolvedContentModels: ResolvedContentModelsData | null;
   vectorSpaceDiagnostics: VectorSpaceDiagnosticsData | null;
   runtimeHealth: RuntimeHealthData | null;
@@ -105,8 +108,19 @@ export interface AppState {
   searchResultLibraryFocusId: string;
   lastSearchRequest: SearchRequestSnapshot | null;
   editingProviderId: string;
+  providerDisplayNameDraft: string;
+  providerKindDraft: string;
   providerEnabledDraft: boolean;
   providerBaseUrlDraft: string;
+  providerActiveModelDraft: string;
+  editingProviderModelId: string;
+  providerModelIdDraft: string;
+  providerModelEnabledDraft: boolean;
+  providerModelVersionDraft: string;
+  providerModelBackendDraft: string;
+  providerModelInputTypesDraft: string;
+  providerModelVectorTypesDraft: string;
+  providerModelSupportsMixedInputsDraft: boolean;
   selectedGlobalContentType: string;
   selectedLibraryContentType: string;
   globalModelTestModalityDraft: ModelTestModality | "";

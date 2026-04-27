@@ -17,7 +17,6 @@ import {
   modelTestModalityDisplayName,
   providerProbePillClass,
   providerSelectionPillClass,
-  PROVIDER_ID_LOCAL_SIDECAR,
   selectedCatalogEntryForProvider,
   selectedCatalogEntryForSelection,
   selectedGlobalContentTypeBinding,
@@ -31,6 +30,8 @@ import {
   selectedLibraryModelSelection,
   selectedLibraryTestModalities,
   selectedProviderConfig,
+  selectedProviderModelSelection,
+  selectedProviderTestModalities,
   selectionFromBinding,
   settingsModelTestSupportMessage,
   settingsSectionIcon,
@@ -53,7 +54,7 @@ import { renderEmptyState, renderNotice, renderStatusTag, renderUiButton, render
 import { renderModelTestResult, renderSettingsStage } from "../render/shared/settings";
 
 export function renderSettingsModelTestPanel(options: {
-  scope: "global" | "library";
+  scope: "global" | "library" | "provider";
   selection: ModelSelectionPayload;
   supportedModalities: ModelTestModality[];
   modalityDraft: ModelTestModality | "";
@@ -93,7 +94,13 @@ export function renderSettingsModelTestPanel(options: {
       <div class="panel-head">
         <div>
           <p class="eyebrow">测试</p>
-          <h3>${scope === "global" ? "测试当前全局模型" : "测试当前库模型"}</h3>
+          <h3>${
+            scope === "provider"
+              ? "测试当前模型"
+              : scope === "global"
+                ? "测试当前全局模型"
+                : "测试当前库模型"
+          }</h3>
         </div>
       </div>
       <p class="helper" data-testid="${testIdPrefix}-draft-summary">
@@ -326,6 +333,11 @@ export function renderProviderRuntimeSummary(providerId: string, options: { edit
 
 export function renderProviderConfigsPanel() {
   const editingProvider = selectedProviderConfig();
+  const selectedModel = editingProvider?.models.find(
+    (model) => model.model_id === state.providerModelIdDraft
+  );
+  const providerSelection = selectedProviderModelSelection();
+  const providerModalities = selectedProviderTestModalities();
   const listMarkup = state.providerConfigs.length
     ? `
       <ul class="provider-profile-list" data-testid="provider-config-list">
@@ -344,6 +356,7 @@ export function renderProviderConfigsPanel() {
                   ${renderProviderRuntimeSummary(provider.provider_id)}
                 </div>
                 <div class="provider-profile-meta">
+                  ${renderUiTag(provider.origin === "runtime_overlay" ? "已覆盖" : "基线", provider.origin === "runtime_overlay" ? "ready" : "muted")}
                   ${renderStatusTag(provider.probe?.status ?? "unknown", providerProbePillClass(provider.probe?.status) as any)}
                   ${renderUiButton("编辑", {
                     tone: "secondary",
@@ -357,6 +370,24 @@ export function renderProviderConfigsPanel() {
       </ul>
     `
     : renderEmptyState("当前还没有可用连接。");
+  const providerOptions = state.providerConfigs
+    .map(
+      (provider) => `
+        <option value="${escapeHtml(provider.provider_id)}">
+          ${escapeHtml(provider.display_name)}
+        </option>
+      `
+    )
+    .join("");
+  const modelOptions = editingProvider?.models
+    .map(
+      (model) => `
+        <option value="${escapeHtml(model.model_id)}" ${model.model_id === state.providerModelIdDraft ? "selected" : ""}>
+          ${escapeHtml(`${model.model_id}@${model.version}`)}
+        </option>
+      `
+    )
+    .join("") ?? "";
 
   return `
     <section class="panel settings-panel" data-testid="provider-configs-panel">
@@ -366,21 +397,35 @@ export function renderProviderConfigsPanel() {
         </div>
         <form id="provider-config-form" class="stack-form provider-config-editor" data-testid="provider-config-form">
           <label>
-            <span>连接</span>
-            <select id="provider-config-id" data-testid="provider-config-id">
-              <option value="" ${!state.editingProviderId ? "selected" : ""}>选择一个连接</option>
-              ${state.providerConfigs
-                .map(
-                  (provider) => `
-                    <option value="${escapeHtml(provider.provider_id)}" ${provider.provider_id === state.editingProviderId ? "selected" : ""}>
-                      ${escapeHtml(provider.display_name)}
-                    </option>
-                  `
-                )
-                .join("")}
-            </select>
+            <span>Provider ID</span>
+            <input
+              id="provider-config-id"
+              data-testid="provider-config-id"
+              list="provider-config-id-options"
+              value="${escapeHtml(state.editingProviderId)}"
+              placeholder="例如：local_sidecar"
+            />
+            <datalist id="provider-config-id-options">${providerOptions}</datalist>
           </label>
           <div class="ui-form-grid settings-form-grid">
+            <label>
+              <span>显示名称</span>
+              <input
+                id="provider-display-name"
+                data-testid="provider-display-name"
+                value="${escapeHtml(state.providerDisplayNameDraft)}"
+                placeholder="Local Sidecar"
+              />
+            </label>
+            <label>
+              <span>Provider Kind</span>
+              <input
+                id="provider-kind"
+                data-testid="provider-kind"
+                value="${escapeHtml(state.providerKindDraft)}"
+                placeholder="local_sidecar"
+              />
+            </label>
             <label class="checkbox-field">
               <input
                 id="provider-enabled"
@@ -399,26 +444,26 @@ export function renderProviderConfigsPanel() {
                 type="url"
                 value="${escapeHtml(state.providerBaseUrlDraft)}"
                 placeholder="https://dashscope.aliyuncs.com"
-                ${!editingProvider || editingProvider.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
               />
+            </label>
+            <label>
+              <span>默认模型</span>
+              <select id="provider-active-model" data-testid="provider-active-model" ${editingProvider?.models.length ? "" : "disabled"}>
+                ${modelOptions || `<option value="">先添加模型</option>`}
+              </select>
             </label>
           </div>
           ${
             editingProvider
               ? `
-                  <p class="helper">${escapeHtml(editingProvider.provider_id)} · ${escapeHtml(editingProvider.provider_kind)}</p>
+                  <p class="helper">${escapeHtml(editingProvider.provider_id)} · ${escapeHtml(editingProvider.provider_kind)} · ${escapeHtml(editingProvider.origin)}</p>
                   ${renderProviderRuntimeSummary(editingProvider.provider_id, { editor: true })}
                 `
-              : `<p class="helper">先从左侧选择一个连接，再修改启用状态或连接地址。</p>`
-          }
-          ${
-            editingProvider?.readonly_reason
-              ? `<p class="helper" data-testid="provider-readonly-reason">${escapeHtml(editingProvider.readonly_reason)}</p>`
-              : ""
+              : `<p class="helper">输入 provider id 后可以创建 runtime overlay provider。</p>`
           }
           <div class="inline-actions">
-            <button type="submit" data-testid="provider-config-submit-button" ${!editingProvider ? "disabled" : ""}>
-              保存连接配置
+            <button type="submit" data-testid="provider-config-submit-button" ${state.editingProviderId ? "" : "disabled"}>
+              保存 Provider
             </button>
             <button
               type="button"
@@ -428,9 +473,118 @@ export function renderProviderConfigsPanel() {
             >
               重置
             </button>
+            ${renderUiButton("恢复基线", {
+              tone: "secondary",
+              testId: "provider-config-delete-button",
+              attrs: { id: "provider-config-delete-button" },
+              disabled: !editingProvider || editingProvider.origin !== "runtime_overlay",
+            })}
           </div>
         </form>
       </div>
+      <form id="provider-model-config-form" class="stack-form provider-model-editor" data-testid="provider-model-config-form">
+        <div class="ui-form-grid settings-form-grid">
+          <label>
+            <span>选择模型</span>
+            <select id="provider-model-select" data-testid="provider-model-select" ${editingProvider?.models.length ? "" : "disabled"}>
+              ${modelOptions || `<option value="">暂无模型</option>`}
+            </select>
+          </label>
+          <label>
+            <span>Model ID</span>
+            <input
+              id="provider-model-id"
+              data-testid="provider-model-id"
+              value="${escapeHtml(state.providerModelIdDraft)}"
+              placeholder="例如：Qwen/Qwen3-VL-Embedding-2B"
+            />
+          </label>
+          <label class="checkbox-field">
+            <input
+              id="provider-model-enabled"
+              data-testid="provider-model-enabled"
+              type="checkbox"
+              ${state.providerModelEnabledDraft ? "checked" : ""}
+            />
+            <span>启用模型</span>
+          </label>
+          <label>
+            <span>版本</span>
+            <input
+              id="provider-model-version"
+              data-testid="provider-model-version"
+              value="${escapeHtml(state.providerModelVersionDraft)}"
+              placeholder="main"
+            />
+          </label>
+          <label>
+            <span>Backend</span>
+            <input
+              id="provider-model-backend"
+              data-testid="provider-model-backend"
+              value="${escapeHtml(state.providerModelBackendDraft)}"
+              placeholder="colqwen3_5"
+            />
+          </label>
+          <label>
+            <span>输入类型</span>
+            <input
+              id="provider-model-input-types"
+              data-testid="provider-model-input-types"
+              value="${escapeHtml(state.providerModelInputTypesDraft)}"
+              placeholder="text, image"
+            />
+          </label>
+          <label>
+            <span>向量类型</span>
+            <input
+              id="provider-model-vector-types"
+              data-testid="provider-model-vector-types"
+              value="${escapeHtml(state.providerModelVectorTypesDraft)}"
+              placeholder="single_vector"
+            />
+          </label>
+          <label class="checkbox-field">
+            <input
+              id="provider-model-supports-mixed-inputs"
+              data-testid="provider-model-supports-mixed-inputs"
+              type="checkbox"
+              ${state.providerModelSupportsMixedInputsDraft ? "checked" : ""}
+            />
+            <span>支持混合输入</span>
+          </label>
+        </div>
+        <p class="helper" data-testid="provider-model-origin">
+          ${escapeHtml(selectedModel ? `当前模型 ${selectedModel.origin}` : "输入 model id 后可以创建模型覆盖。")}
+        </p>
+        <div class="inline-actions">
+          <button type="submit" data-testid="provider-model-config-submit-button" ${state.editingProviderId && state.providerModelIdDraft ? "" : "disabled"}>保存模型</button>
+          ${renderUiButton("恢复模型基线", {
+            tone: "secondary",
+            testId: "provider-model-config-delete-button",
+            attrs: { id: "provider-model-config-delete-button" },
+            disabled: !selectedModel || selectedModel.origin !== "runtime_overlay",
+          })}
+        </div>
+      </form>
+      ${
+        state.editingProviderId && state.providerModelIdDraft
+          ? renderSettingsModelTestPanel({
+              scope: "provider",
+              selection: providerSelection,
+              supportedModalities: providerModalities,
+              modalityDraft: state.globalModelTestModalityDraft,
+              textDraft: state.globalModelTestTextDraft,
+              file: state.globalModelTestFile,
+              comparisonModalityDraft: state.globalModelTestComparisonModalityDraft,
+              comparisonTextDraft: state.globalModelTestComparisonTextDraft,
+              comparisonFile: state.globalModelTestComparisonFile,
+              result: state.globalModelTestResult,
+              error: state.globalModelTestError,
+              pending: state.globalModelTestPending,
+            })
+          : ""
+      }
     </section>
   `;
 }
@@ -475,6 +629,7 @@ export function renderGlobalContentTypesPanel(includeTestPanel = true) {
   const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
   const supportedModalities = selectedGlobalTestModalities();
   const contentTypes = availableContentTypeKeys(state.globalContentTypes);
+  const origin = state.globalContentTypeOrigins[contentType];
 
   return `
     <section class="panel settings-panel" data-testid="global-content-types-panel">
@@ -504,7 +659,6 @@ export function renderGlobalContentTypesPanel(includeTestPanel = true) {
             <select
               id="global-content-type-model-id"
               data-testid="global-content-type-model-id"
-              ${selection.provider_id === PROVIDER_ID_LOCAL_SIDECAR ? "disabled" : ""}
             >
               ${renderModelIdOptions(selection.provider_id, selection.model_id)}
             </select>
@@ -531,11 +685,20 @@ export function renderGlobalContentTypesPanel(includeTestPanel = true) {
         }
         <p class="helper" data-testid="global-content-type-summary">
           ${escapeHtml(
-            `${contentTypeDisplayName(contentType)} → ${binding.model || "未配置"} · ${binding.vector_type || "未设置向量类型"} · ${binding.enabled ? "已启用" : "已停用"}`
+            `${contentTypeDisplayName(contentType)} → ${binding.model || "未配置"} · ${binding.vector_type || "未设置向量类型"} · ${binding.enabled ? "已启用" : "已停用"} · ${origin?.origin ?? "baseline"}`
           )}
         </p>
         <div class="inline-actions">
-          <button type="submit" data-testid="global-content-types-submit-button">保存全局内容类型绑定</button>
+          <button type="submit" data-testid="global-content-types-submit-button">保存覆盖</button>
+          <button
+            type="button"
+            id="global-content-types-reset-button"
+            data-testid="global-content-types-reset-button"
+            class="ui-button ui-button-secondary"
+            ${origin?.has_runtime_overlay ? "" : "disabled"}
+          >
+            恢复基线
+          </button>
         </div>
       </form>
       ${
@@ -575,6 +738,7 @@ export function renderLibraryContentTypesPanel(library: LibrarySnapshot | null, 
   const catalogEntry = selectedCatalogEntryForProvider(selection.provider_id, selection.model_id);
   const supportedModalities = selectedLibraryTestModalities();
   const hasOverride = selectedLibraryContentTypeHasOverride();
+  const origin = state.libraryContentTypeOrigins[contentType];
   const contentTypes = availableContentTypeKeys(
     state.globalContentTypes,
     state.libraryContentTypes,
@@ -634,7 +798,7 @@ export function renderLibraryContentTypesPanel(library: LibrarySnapshot | null, 
             <select
               id="library-content-type-model-id"
               data-testid="library-content-type-model-id"
-              ${hasOverride && selection.provider_id !== PROVIDER_ID_LOCAL_SIDECAR ? "" : "disabled"}
+              ${hasOverride ? "" : "disabled"}
             >
               ${renderModelIdOptions(selection.provider_id, selection.model_id)}
             </select>
@@ -659,19 +823,19 @@ export function renderLibraryContentTypesPanel(library: LibrarySnapshot | null, 
         }
         <p class="helper" data-testid="library-content-type-summary">
           ${escapeHtml(
-            `${contentTypeDisplayName(contentType)} → ${binding.model || "未配置"} · ${binding.vector_type || "未设置向量类型"} · ${binding.enabled ? "已启用" : "已停用"}`
+            `${contentTypeDisplayName(contentType)} → ${binding.model || "未配置"} · ${binding.vector_type || "未设置向量类型"} · ${binding.enabled ? "已启用" : "已停用"} · ${origin?.origin ?? "inherited"}`
           )}
         </p>
         <div class="inline-actions">
-          <button type="submit" data-testid="library-content-types-submit-button" ${hasOverride ? "" : "disabled"}>保存库级内容类型绑定</button>
+          <button type="submit" data-testid="library-content-types-submit-button" ${hasOverride ? "" : "disabled"}>保存覆盖</button>
           <button
             type="button"
             id="library-content-types-reset-button"
             data-testid="library-content-types-reset-button"
             class="ui-button ui-button-secondary"
-            ${hasOverride ? "" : "disabled"}
+            ${origin?.has_runtime_overlay || hasOverride ? "" : "disabled"}
           >
-            恢复默认
+            恢复继承
           </button>
         </div>
       </form>
@@ -959,10 +1123,9 @@ export function renderModelTestsSection(library: LibrarySnapshot | null) {
 
 export function renderSettingsNavRail() {
   const sections: SettingsSection[] = [
+    "providers",
     "content-types",
     "library-overrides",
-    "providers",
-    "model-tests",
     "diagnostics",
   ];
 
@@ -1008,8 +1171,6 @@ export function renderSettingsPanel(library: LibrarySnapshot | null) {
         ${renderResolvedContentModelsPanel(library)}
       </div>
     `;
-  } else if (state.selectedSettingsSection === "model-tests") {
-    activeSurface = renderModelTestsSection(library);
   } else if (state.selectedSettingsSection === "diagnostics") {
     activeSurface = `
       <div class="settings-stack">

@@ -70,9 +70,7 @@ export function settingsSectionLabel(section: SettingsSection) {
     case "library-overrides":
       return "当前库覆盖";
     case "providers":
-      return "连接";
-    case "model-tests":
-      return "模型测试";
+      return "模型提供方";
     case "diagnostics":
       return "诊断";
     default:
@@ -86,8 +84,6 @@ export function settingsSectionIcon(section: SettingsSection) {
       return "override";
     case "providers":
       return "providers";
-    case "model-tests":
-      return "experiment";
     case "diagnostics":
       return "diagnostics";
     default:
@@ -102,9 +98,7 @@ export function settingsSectionDescription(section: SettingsSection, library: Li
         ? `先判断 ${libraryDisplayName(library)} 是沿用默认，还是需要切到库级覆盖。`
         : "先选择一个库，再判断这一章是沿用默认还是切到库级覆盖。";
     case "providers":
-      return "把连接状态、当前精确模型和最小可编辑字段收口到同一章里。";
-    case "model-tests":
-      return "模型测试只面向当前草稿，用来验证输入模态、向量形状和相似度。";
+      return "编辑 runtime config 中的 provider 与 models，并测试当前草稿。";
     case "diagnostics":
       return "先看运行时与连接摘要，再下钻到维护动作和执行空间诊断。";
     default:
@@ -117,9 +111,7 @@ export function settingsSectionNavSummary(section: SettingsSection, library: Lib
     case "library-overrides":
       return library ? "判断当前库是否需要脱离默认。" : "先选库，再进入库级差异。";
     case "providers":
-      return "查看连接状态并编辑当前地址。";
-    case "model-tests":
-      return "基于当前草稿验证输入和结果。";
+      return "配置 provider、模型与测试。";
     case "diagnostics":
       return "汇总运行时、维护与执行空间。";
     default:
@@ -166,13 +158,6 @@ export function settingsSectionPill(section: SettingsSection, library: LibrarySn
       : { label: "运行正常", pillClass: "ready" };
   }
 
-  if (section === "model-tests") {
-    return {
-      label: "基于草稿",
-      pillClass: "muted",
-    };
-  }
-
   return {
     label: "全局默认",
     pillClass: "ready",
@@ -209,44 +194,22 @@ export function settingsMetricsForSection(section: SettingsSection, library: Lib
     const localRuntime = state.runtimeHealth?.providers.find(
       (provider) => provider.provider_id === PROVIDER_ID_LOCAL_SIDECAR
     );
-    const editableRemoteProviders = state.providerConfigs.filter(
-      (provider) => provider.provider_id !== PROVIDER_ID_LOCAL_SIDECAR
-    );
     return [
       {
-        label: "已启用连接",
+        label: "已启用",
         value: `${enabledProviders.length} / ${state.providerConfigs.length || 0}`,
       },
       {
-        label: "本地默认",
+        label: "本地模型",
         value: localRuntime?.model_id ?? "待解析",
       },
       {
-        label: "远端可编辑",
-        value: `${editableRemoteProviders.length} 个`,
+        label: "模型条目",
+        value: `${state.providerConfigs.reduce((sum, provider) => sum + provider.models.length, 0)} 个`,
       },
       {
         label: "当前编辑",
-        value: selectedProviderConfig()?.display_name ?? "先选择连接",
-      },
-    ];
-  }
-
-  if (section === "model-tests") {
-    const globalSelection = selectedGlobalModelSelection();
-    const librarySelection = selectedLibraryModelSelection();
-    return [
-      {
-        label: "全局草稿",
-        value: globalSelection.model_id || "未解析",
-      },
-      {
-        label: "当前库草稿",
-        value: library ? librarySelection.model_id || "沿用默认" : "等待库",
-      },
-      {
-        label: "原生输入",
-        value: selectedGlobalTestModalities().map((modality) => modelTestModalityDisplayName(modality)).join("、") || "未解析",
+        value: selectedProviderConfig()?.display_name ?? "先选择 provider",
       },
     ];
   }
@@ -463,6 +426,13 @@ export function selectedLibraryModelSelection(): ModelSelectionPayload {
   return selectionFromBinding(selectedLibraryContentTypeBinding());
 }
 
+export function selectedProviderModelSelection(): ModelSelectionPayload {
+  return {
+    provider_id: state.editingProviderId,
+    model_id: state.providerModelIdDraft || state.providerActiveModelDraft,
+  };
+}
+
 export function vectorTypeOptionsForSelection(selection: ModelSelectionPayload, currentValue: string) {
   const options = [
     ...(selectedCatalogEntryForSelection(selection)?.embedding_capabilities.vector_types ?? []),
@@ -527,6 +497,11 @@ export function selectedGlobalTestModalities(): ModelTestModality[] {
 
 export function selectedLibraryTestModalities(): ModelTestModality[] {
   const selection = selectionFromBinding(selectedLibraryContentTypeBinding());
+  return supportedTestModalitiesForSelection(selection.provider_id, selection.model_id);
+}
+
+export function selectedProviderTestModalities(): ModelTestModality[] {
+  const selection = selectedProviderModelSelection();
   return supportedTestModalitiesForSelection(selection.provider_id, selection.model_id);
 }
 

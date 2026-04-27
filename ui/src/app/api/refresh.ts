@@ -207,6 +207,7 @@ export async function refreshModelCatalog() {
 export async function refreshGlobalContentTypes() {
   const data = await apiRequest<GlobalContentTypesData>("/settings/content-types");
   state.globalContentTypes = data.content_types;
+  state.globalContentTypeOrigins = data.origins ?? {};
   ensureValidModelTestDrafts();
 }
 
@@ -221,6 +222,7 @@ export async function refreshLibraryContentSettings() {
     state.resolvedContentModels = null;
     state.vectorSpaceDiagnostics = null;
     resetLibraryModelTestState();
+    state.libraryContentTypeOrigins = {};
     return;
   }
 
@@ -236,6 +238,7 @@ export async function refreshLibraryContentSettings() {
     ),
   ]);
   state.libraryContentTypes = contentTypesData.content_types;
+  state.libraryContentTypeOrigins = contentTypesData.origins ?? {};
   state.resolvedContentModels = resolvedData;
   state.vectorSpaceDiagnostics = diagnosticsData;
   ensureValidModelTestDrafts();

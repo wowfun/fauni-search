@@ -5,7 +5,6 @@ export type SettingsSection =
   | "content-types"
   | "library-overrides"
   | "providers"
-  | "model-tests"
   | "diagnostics";
 export type VisualUnitKind = "image" | "document_page" | "video_segment" | string;
 export type Locator = Record<string, string | number | boolean | null | undefined>;
