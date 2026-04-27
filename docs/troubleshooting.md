@@ -100,17 +100,20 @@ uv pip install --python .venv/bin/python -e "sidecar[gpu]"
 
 ```bash
 lsof -nP -iTCP:53210 -sTCP:LISTEN
+lsof -nP -iTCP:53212 -sTCP:LISTEN
 lsof -nP -iTCP:53211 -sTCP:LISTEN
 lsof -nP -iTCP:55173 -sTCP:LISTEN
 lsof -nP -iTCP:56333 -sTCP:LISTEN
 ```
+
+`--dev` 默认端口是 app `54210`、modeld `54212`、sidecar `54211`、UI `56173`、Qdrant `57333`。
 
 处理：
 - 如果占用者是当前仓库的本地服务，优先运行：
 
 ```bash
 bash scripts/local/stop.sh --all --dry-run
-bash scripts/local/stop.sh app sidecar ui
+bash scripts/local/stop.sh app modeld sidecar ui
 ```
 
 - 如果占用者不是当前仓库的本地服务，优先切到隔离开发配置：
@@ -185,7 +188,7 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 bash scripts/local/cleanup-legacy-runtime.sh --json
 ```
 
-- 确认 app、sidecar、UI 和 Qdrant 都已停止后，再显式执行删除：
+- 确认 app、modeld、sidecar、UI 和 Qdrant 都已停止后，再显式执行删除：
 
 ```bash
 bash scripts/local/cleanup-legacy-runtime.sh --execute
@@ -205,32 +208,34 @@ bash scripts/local/cleanup-legacy-runtime.sh --execute
 ```bash
 free -h
 grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SReclaimable|Shmem):' /proc/meminfo
-tail -n 80 data/runtime/logs/sidecar.log
+tail -n 80 data/runtime/logs/modeld.log
 ```
 
 处理：
 - 先看 `available`，不要只看 `used`；Linux 会把空闲内存拿去做 page cache，这不等于应用仍然持有同等规模的不可回收内存
-- 当前 sidecar 会常驻已加载模型，因此索引完成后仍可能保留一部分模型内存，这和索引阶段的瞬时峰值不是同一个问题
+- 当前 modeld 会常驻已加载模型，sidecar 只代理请求，因此索引完成后仍可能保留一部分模型内存，这和索引阶段的瞬时峰值不是同一个问题
 - Qdrant 新建 collection 会采用 disk-backed vector 配置 `on_disk: true`，但文件缓存仍可能反映在 `free -h` 的 `buff/cache` 中
 - 如果你在 WSL2 中观察到内存长期不回收，优先检查宿主机的 WSL 内存回收配置，而不是先假设 app 仍在持续泄漏
 
 ## `run.sh` 启动失败后看哪里
 
 症状：
-- `run.sh` 在 app、sidecar 或 UI 的健康检查阶段失败
+- `run.sh` 在 app、modeld、sidecar 或 UI 的健康检查阶段失败
 
 检查：
 
 ```bash
 bash scripts/local/status.sh --json
 tail -n 50 data/runtime/logs/app.log
+tail -n 50 data/runtime/logs/modeld.log
 tail -n 50 data/runtime/logs/sidecar.log
 tail -n 50 data/runtime/logs/ui.log
 ```
 
 处理：
 - app 启不来：先看 `app.log`，常见是端口冲突或 Rust 运行失败
-- sidecar 启不来：先看 `sidecar.log`，常见是 `.venv` 缺依赖或环境变量不对
+- modeld 启不来：先看 `modeld.log`，常见是 `.venv` 缺模型运行依赖、模型加载失败或端口冲突
+- sidecar 启不来：先看 `sidecar.log`，常见是 `.venv` 缺 FastAPI/代理依赖或环境变量不对
 
 ## 检测到 legacy runtime 数据，要求先 cutover
 
@@ -374,7 +379,7 @@ tail -n 80 data/runtime/logs/ui.log
 ## `smoke-text-search.sh` 失败
 
 症状：
-- `smoke-text-search.sh` 报 app、sidecar 或 Qdrant 不可达
+- `smoke-text-search.sh` 报 app、modeld、sidecar 或 Qdrant 不可达
 - `smoke-text-search.sh` 报导入没有进入 `completed` / `activated`
 - `smoke-text-search.sh` 报结果中缺少 `image` 或 `document_page`
 - 首次冷启动时，`smoke-text-search.sh` 在一段时间内没有输出，看起来像卡住
@@ -384,22 +389,25 @@ tail -n 80 data/runtime/logs/ui.log
 ```bash
 bash scripts/local/status.sh --json
 curl -s http://127.0.0.1:53210/health
+curl -s http://127.0.0.1:53212/health
 curl -s http://127.0.0.1:53211/capabilities
 curl -s http://127.0.0.1:56333/collections
 tail -n 80 data/runtime/logs/app.log
+tail -n 120 data/runtime/logs/modeld.log
 tail -n 120 data/runtime/logs/sidecar.log
 tail -n 80 data/runtime/logs/qdrant.log
 ```
 
-如果你使用 `--dev`，对应端口来自 `.env.dev`，默认是 `54210`、`54211`、`57333`。如果你改过选中的 env 文件里的端口，`curl` 地址也要按该文件改。
+如果你使用 `--dev`，对应端口来自 `.env.dev`，默认是 `54210`、`54212`、`54211`、`57333`。如果你改过选中的 env 文件里的端口，`curl` 地址也要按该文件改。
 
 处理：
 - 先确认 `bash scripts/local/run.sh` 已经成功启动；它会自动启动或复用 Qdrant。如果使用 `--dev`，这里也要带 `--dev`
 - 如果你只想单独诊断 Qdrant，再运行 `bash scripts/local/run-qdrant.sh`；如果使用 `--dev`，这里也要带 `--dev`
-- 前台模式下 `run.sh` 退出后 app、sidecar 和 UI 会被清理；Qdrant 由 `run-qdrant.sh` 管理，不会被 `run.sh` 的清理流程隐式停止
+- 前台模式下 `run.sh` 退出后 app、modeld、sidecar 和 UI 会被清理；Qdrant 由 `run-qdrant.sh` 管理，不会被 `run.sh` 的清理流程隐式停止
 - 如果使用分离模式，确认 `bash scripts/local/run.sh --detach` 已成功返回，并用 `status.sh` 检查 pid 文件和 ready 状态
-- sidecar 首次冷启动加载 ColQwen 模型可能需要数分钟；在这一阶段，首次真实导入或 smoke 明显慢于后续热路径属于预期行为
-- 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/logs/sidecar.log`
+- modeld 首次冷启动加载 ColQwen 模型可能需要数分钟；在这一阶段，首次真实导入或 smoke 明显慢于后续热路径属于预期行为
+- 如果失败摘要里出现 `runtime_unavailable` 或 `modeld ...`，优先看 `data/runtime/logs/modeld.log`
+- 如果失败摘要里出现 `Sidecar ...`，再看 `data/runtime/logs/sidecar.log`
 - 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/logs/qdrant.log`
 
 ## `pnpm --dir ui test:e2e` 失败
@@ -416,6 +424,7 @@ tail -n 80 data/runtime/logs/qdrant.log
 ls -l .env.dev .env.dev.example
 bash scripts/local/status.sh --dev --json
 tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/modeld.log
 tail -n 120 data/runtime/dev/logs/sidecar.log
 tail -n 80 data/runtime/dev/logs/ui.log
 tail -n 80 data/runtime/dev/logs/qdrant.log
@@ -423,10 +432,10 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 
 处理：
 - 先确认你至少执行过一次 `bash scripts/local/bootstrap-linux.sh --dev`
-- 如果 `status.sh --dev --json` 显示 app、sidecar、UI 只有部分在跑，先执行 `bash scripts/local/stop.sh --dev --all` 清干净，再重新运行 `pnpm --dir ui test:e2e`
+- 如果 `status.sh --dev --json` 显示 app、modeld、sidecar、UI 只有部分在跑，先执行 `bash scripts/local/stop.sh --dev --all` 清干净，再重新运行 `pnpm --dir ui test:e2e`
 - 如果错误发生在 Chromium 启动前，而且日志里出现 `libatk-1.0.so.0`、`libgtk-3.so.0` 之类缺库信息，问题在宿主机的 Playwright 浏览器运行库，不在仓库测试代码；先按宿主机方式补齐这些系统库，再重跑
 - 这条 Playwright 命令固定只操作 `--dev` 配置；它不会复用默认 `.env` profile，也不应该去停止默认 profile 的服务
-- 如果失败发生在导入或搜索阶段，优先按 `smoke-text-search.sh` 的排障路径继续看 app / sidecar / Qdrant 日志
+- 如果失败发生在导入或搜索阶段，优先按 `smoke-text-search.sh` 的排障路径继续看 app / modeld / sidecar / Qdrant 日志
 
 ## `smoke-image-search.sh` 失败
 
@@ -440,17 +449,19 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 ```bash
 bash scripts/local/status.sh --dev --json
 tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/modeld.log
 tail -n 120 data/runtime/dev/logs/sidecar.log
 tail -n 80 data/runtime/dev/logs/qdrant.log
 ```
 
 处理：
-- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、sidecar、Qdrant 都是 ready
+- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、modeld、sidecar、Qdrant 都是 ready
 - 如果失败发生在查询图片上传阶段，优先检查 app 日志里的 `validation_failed` 或 `not_found`
 - 如果失败发生在 `library_object` 路径，优先检查返回结果里是否真的包含 `kind=image` 或 `kind=document_page` 的 visual unit；当前阶段仍不支持其他对象类型直接作为 query image
 - 如果失败发生在临时查询图片预览或再次查询阶段，也要考虑该查询图片是否已经过期并被后台清理
-- 如果失败发生在 `/search/image` 阶段，优先检查 sidecar 是否已经声明 `image_query_embedding` 能力
-- 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/dev/logs/sidecar.log`
+- 如果失败发生在 `/search/image` 阶段，优先检查 sidecar `/capabilities` 是否已经代理到 modeld 并声明 `image_query_embedding` 能力
+- 如果失败摘要里出现 `runtime_unavailable` 或 `modeld ...`，优先看 `data/runtime/dev/logs/modeld.log`
+- 如果失败摘要里出现 `Sidecar ...`，再看 `data/runtime/dev/logs/sidecar.log`
 - 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
 
 ## `smoke-video-search.sh` 失败
@@ -470,12 +481,13 @@ command -v ffmpeg
 command -v ffprobe
 ls -l data/generate_q2_report_from_csv_bank_data-720-512.local.manifest.json
 tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/modeld.log
 tail -n 120 data/runtime/dev/logs/sidecar.log
 tail -n 80 data/runtime/dev/logs/qdrant.log
 ```
 
 处理：
-- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、sidecar、Qdrant 都是 ready
+- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、modeld、sidecar、Qdrant 都是 ready
 - 当前视频 smoke 依赖本地 `ffmpeg` / `ffprobe` 做 clip 与截图派生；如果命令不存在，先在宿主机安装对应工具后再重跑
 - 如果失败发生在派生阶段，优先检查 local-only manifest 路径与视频样本路径是否仍然存在
 - 如果失败发生在查询视频上传或 `/search/video` 阶段，优先检查 app 日志中的 `validation_failed`、`not_found` 或 `not_ready`
@@ -483,7 +495,7 @@ tail -n 80 data/runtime/dev/logs/qdrant.log
 ## `smoke-runtime-health.sh` 失败
 
 症状：
-- `smoke-runtime-health.sh` 报 app / sidecar / Qdrant 本地端口不可达
+- `smoke-runtime-health.sh` 报 app / modeld / sidecar / Qdrant 本地端口不可达
 - 脚本报 `runtime-health did not include local_sidecar diagnostics`
 - 脚本报 `execution_input_types` 缺少 `document` 或 `video`
 - 脚本报 `vector-space diagnostics did not reflect the shared ColQwen execution surface`
@@ -495,6 +507,7 @@ bash scripts/local/status.sh --dev --json
 curl -s http://127.0.0.1:54210/runtime-health
 curl -s http://127.0.0.1:54210/libraries
 tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/modeld.log
 tail -n 80 data/runtime/dev/logs/sidecar.log
 ```
 
@@ -502,10 +515,11 @@ tail -n 80 data/runtime/dev/logs/sidecar.log
 - 先确认 `fauni.config.json` 中 `image`、`document`、`video` 都指向 `local_sidecar/athrael-soju/colqwen3.5-4.5B-v3`
 - 再确认 `GET /runtime-health` 中 `local_sidecar.execution_input_types` 为 `text,image,document,video`
 - 如果 `vector-space diagnostics` 为空，优先检查导入任务是否已经到达 `activated`
-- 如果只缺 `document` 或 `video`，优先检查 sidecar `/capabilities` 是否仍返回旧的 `embedding_capabilities` 语义而未包含新的执行输入层
+- 如果只缺 `document` 或 `video`，优先检查 sidecar `/capabilities` 是否已从 modeld 代理新的执行输入层，而不是旧的 `embedding_capabilities` 语义
 - 如果失败发生在 `source_id` 复用路径，优先确认对应库里确实已经导入视频，并且返回结果中包含可复用的视频源
 - 如果失败发生在指定时间范围查询，优先确认 `start_ms` / `end_ms` 没有越界，且 `start_ms < end_ms`
-- 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先看 `data/runtime/dev/logs/sidecar.log`
+- 如果失败摘要里出现 `runtime_unavailable` 或 `modeld ...`，优先看 `data/runtime/dev/logs/modeld.log`
+- 如果失败摘要里出现 `Sidecar ...`，再看 `data/runtime/dev/logs/sidecar.log`
 - 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
 
 ## `smoke-document-search.sh` 失败
@@ -521,16 +535,18 @@ tail -n 80 data/runtime/dev/logs/sidecar.log
 ```bash
 bash scripts/local/status.sh --dev --json
 tail -n 80 data/runtime/dev/logs/app.log
+tail -n 120 data/runtime/dev/logs/modeld.log
 tail -n 120 data/runtime/dev/logs/sidecar.log
 tail -n 80 data/runtime/dev/logs/qdrant.log
 ```
 
 处理：
-- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、sidecar、Qdrant 都是 ready
+- 先确认 `bash scripts/local/run.sh --dev --detach` 已成功返回，并且 `status.sh --dev --json` 中 app、modeld、sidecar、Qdrant 都是 ready
 - 如果失败发生在查询文档上传阶段，优先检查 app 日志中的 `validation_failed`；当前阶段只接受 PDF 查询上传
 - 如果失败发生在页范围查询阶段，优先确认 `start_page` / `end_page` 都存在、都从 `1` 开始，并且满足 `start_page <= end_page`
 - 如果失败发生在 `document_page` 复用路径，优先确认返回结果里确实包含 `kind=document_page` 的 visual unit；当前阶段工作区只是把它映射成 `source_id + 单页 locator`
-- 如果失败摘要里出现 `runtime_unavailable` 或 `Sidecar ...`，优先检查 sidecar 是否已经声明 `document_query_embedding` 能力
+- 如果失败摘要里出现 `runtime_unavailable` 或 `modeld ...`，优先看 `data/runtime/dev/logs/modeld.log`
+- 如果失败摘要里出现 `Sidecar ...`，再检查 sidecar 是否已经从 modeld 代理 `document_query_embedding` 能力
 - 如果失败摘要里出现 `Qdrant ...`，优先看 `data/runtime/dev/logs/qdrant.log`
 
 ## 模型下载失败

@@ -34,15 +34,15 @@ bash scripts/local/run.sh
 
 主要目录：
 - `src/`：Rust 主服务
-- `sidecar/`：Python sidecar，ML 与媒体处理
+- `sidecar/`：Python sidecar 与 modeld，模型运行和媒体处理
 - `ui/`：应用界面
 - `tests/`：共享测试与集成验证
 
 ## Development Baseline
 
 - 当前标准开发环境：`Linux/WSL2 + NVIDIA GPU`
-- 当前主链：Rust 主服务 + Python sidecar + Qdrant + 最小 UI
-- 当前模型策略：`ColQwen3.5-4.5B-v3` 权重懒加载
+- 当前主链：Rust 主服务 + modeld + Python sidecar + Qdrant + 最小 UI
+- 当前模型策略：`local_sidecar` 配置目录驱动 modeld；默认加载 `ColQwen3.5-4.5B-v3`，`Qwen3-VL-Embedding-2B` 作为第二本地 backend
 - 当前阶段不使用 Docker、devcontainer 或 Nix
 
 如果你准备修改能力边界或实现语义，先读对应 `specs/` 下的事实源；如果你只是想跑起来或排障，优先从 [docs/run-local.md](./docs/run-local.md) 和 [docs/troubleshooting.md](./docs/troubleshooting.md) 开始。

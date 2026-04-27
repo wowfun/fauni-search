@@ -1,6 +1,6 @@
 # 本地运行
 
-本文记录当前仓库的最小本地运行方式，目标是把 app、sidecar、UI 和 Qdrant 启起来，并确认当前工作台骨架可用。
+本文记录当前仓库的最小本地运行方式，目标是把 app、modeld、sidecar、UI 和 Qdrant 启起来，并确认当前工作台骨架可用。
 
 ## 当前状态
 
@@ -14,9 +14,9 @@
   - 通过本地视频上传或库内 `source_id` 复用进入视频查询链路，并可选指定时间范围
   - 通过 PDF 上传进入文档查询链路，并可选指定 `start_page/end_page` 页范围，或从库内 `document_page` 结果对象直接复用为查询文档
   - 显式 `not_ready` 反馈和真实搜索结果列表
-- 当前 sidecar 已经具备真实的 ColQwen `query_embedding`、`image_query_embedding`、`video_query_embedding`、`document_embedding` 与 `document_query_embedding` 能力，并提供 `/health`、`/capabilities`、`/embed`。
-- 当前 app 已经接通真实的 `app -> sidecar -> Qdrant` `vector_space` 搜索链，当前向量表征固定为 `multi_vector_late_interaction`，可实际命中 `image`、真实页级 `document_page` 与 `video_segment`。
-- repo 基线现在默认让 `local_sidecar/athrael-soju/colqwen3.5-4.5B-v3` 承接 `image`、`document`、`video` 三类 content types；模型原生 `EmbeddingCapabilities` 仍只声明 `text,image`，`document/video` 通过 runtime execution inputs 与 adapter 链路执行。
+- 当前 modeld 持有本地模型运行时，提供 `/health`、`/capabilities`、`/embed` 与 `/models/load`；Python sidecar 保持 app 侧稳定接口，并把 embedding 请求代理给 modeld。
+- 当前 app 已经接通真实的 `app -> sidecar -> modeld -> Qdrant` `vector_space` 搜索链，当前向量表征固定为 `multi_vector_late_interaction`，可实际命中 `image`、真实页级 `document_page` 与 `video_segment`。
+- repo 基线现在默认让 `local_sidecar/athrael-soju/colqwen3.5-4.5B-v3` 承接 `image`、`document`、`video` 三类 content types；`Qwen/Qwen3-VL-Embedding-2B` 作为第二本地 backend 可下载和配置。模型原生 `EmbeddingCapabilities` 仍只声明 `text,image`，`document/video` 通过 runtime execution inputs 与 adapter 链路执行。
 - 当前仍然是早期工作台，不包含完整产品控制面，但已经具备文本、图片、视频与文档四种查询主链。
 - 默认使用根 `.env` 作为本地运行时配置；传 `--dev` 时使用 `.env.dev`。同一次运行中，被选中的 env 文件是端口、URL、日志目录和运行时目录的单一事实源。
 
@@ -62,7 +62,7 @@ bash scripts/local/download-model.sh --hf-repo-id Qwen/Qwen3-VL-Embedding-2B
 bash scripts/local/run.sh
 ```
 
-`run.sh` 会先解析 `fauni.config.json + ${APP_RUNTIME_DIR}/runtime-config.json`，再自动启动或复用 Qdrant，并启动 app、sidecar 和 UI。
+`run.sh` 会先解析 `fauni.config.json + ${APP_RUNTIME_DIR}/runtime-config.json`，再通过 `faus serve` 启动或复用 Qdrant、modeld、Python sidecar 和 Rust app，最后启动 UI。
 
 如果当前环境仍有旧世代 runtime 数据，`run.sh` 会拒绝启动并提示先执行：
 
@@ -91,7 +91,7 @@ bash scripts/local/cleanup-legacy-runtime.sh --execute
 bash scripts/local/run.sh --dev
 ```
 
-自动化场景可以把 app、sidecar 和 UI 以分离模式启动：
+自动化场景可以把 app、modeld、sidecar 和 UI 以分离模式启动：
 
 ```bash
 bash scripts/local/run.sh --dev --detach
@@ -103,13 +103,19 @@ bash scripts/local/status.sh --dev --json
 停止命令和启动命令分开；如果只想停止部分服务，直接写服务名：
 
 ```bash
-bash scripts/local/stop.sh app sidecar
+bash scripts/local/stop.sh app modeld sidecar
 ```
 
 停止全部本地服务：
 
 ```bash
 bash scripts/local/stop.sh --all
+```
+
+如果想停止除 modeld 之外的全部本地服务：
+
+```bash
+bash scripts/local/stop.sh --all --keep-modeld
 ```
 
 如果只想确认会停止哪些进程，不实际停止：
@@ -124,17 +130,17 @@ bash scripts/local/stop.sh --all --dry-run
 bash scripts/local/stop.sh --dev --all
 ```
 
-当前支持的服务名是 `app`、`sidecar`、`ui`、`qdrant`。
+可作为参数的服务名是 `app`、`modeld`、`sidecar`、`ui`、`qdrant`。
 
 ## 启动完成后：验证真实检索链路
 
-这一步是验证命令，不属于安装或启动流程。确认 app、sidecar 与 Qdrant 都已运行后，可以执行：
+这一步是验证命令，不属于安装或启动流程。确认 app、modeld、sidecar 与 Qdrant 都已运行后，可以执行：
 
 ```bash
 bash scripts/local/smoke-text-search.sh
 ```
 
-如果 app、sidecar 和 Qdrant 是用 `--dev` 启动的，smoke 也要带 `--dev`。
+如果 app、modeld、sidecar 和 Qdrant 是用 `--dev` 启动的，smoke 也要带 `--dev`。
 
 自动化场景可以使用机器可读摘要：
 
@@ -211,7 +217,7 @@ bash scripts/local/check.sh
 pnpm --dir ui test:e2e
 ```
 
-这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。当前覆盖文本 happy path、图片查询 happy path、粘贴图片查询、库内 `image` / `document_page` 对象作为 query image、视频查询 happy path、库内 `video_segment` 作为 query video、文档查询 happy path、页范围查询、库内 `document_page` 作为查询文档、建库后直接搜索的 `not_ready`，以及无效导入路径、非图片/视频/PDF 查询上传的拒绝反馈。运行前仍需要先完成一次：
+这条命令固定使用 `--dev` 配置。若 `--dev` 服务已在运行，它会直接复用；若未运行，它会自行拉起 `--dev` 的 app、modeld、sidecar、UI 和 Qdrant，并在结束后只清理由自己启动的 `--dev` 服务。当前覆盖文本 happy path、图片查询 happy path、粘贴图片查询、库内 `image` / `document_page` 对象作为 query image、视频查询 happy path、库内 `video_segment` 作为 query video、文档查询 happy path、页范围查询、库内 `document_page` 作为查询文档、建库后直接搜索的 `not_ready`，以及无效导入路径、非图片/视频/PDF 查询上传的拒绝反馈。运行前仍需要先完成一次：
 
 ```bash
 bash scripts/local/bootstrap-linux.sh --dev
@@ -245,6 +251,7 @@ bash scripts/local/check-e2e.sh --smoke
 
 - UI: `http://127.0.0.1:55173/`
 - app health: `http://127.0.0.1:53210/health`
+- modeld health: `http://127.0.0.1:53212/health`
 - sidecar health: `http://127.0.0.1:53211/health`
 - Qdrant collections: `http://127.0.0.1:56333/collections`
 
@@ -252,6 +259,7 @@ bash scripts/local/check-e2e.sh --smoke
 
 - UI: `http://127.0.0.1:56173/`
 - app health: `http://127.0.0.1:54210/health`
+- modeld health: `http://127.0.0.1:54212/health`
 - sidecar health: `http://127.0.0.1:54211/health`
 - Qdrant collections: `http://127.0.0.1:57333/collections`
 
@@ -262,7 +270,6 @@ UI 当前包含：
 - 路径导入表单与回执区
 - TATDQA demo fixture 的填入与“导入并搜索”快捷动作
 - 最近任务列表
-- 中间列的统一搜索入口、Text / Image / Video 模式切换、错误反馈区和真实结果列表
 - 中间列的统一搜索入口、Text / Image / Video / Document 模式切换、错误反馈区和真实结果列表
 - `Image` 模式下的查询图片卡片；当前支持文件选择、粘贴图片，也支持从结果列表把库内 `image` / `document_page` 对象直接设为 query image
 - `Video` 模式下的查询视频卡片；当前支持本地视频上传、库内 `source_id` 复用、库内 `video_segment` 复用、时间范围滑块，以及对当前查询视频的即时预览
@@ -278,6 +285,7 @@ UI 当前包含：
 当前最常用的配置看本次运行选中的 env 文件：默认是根 `.env`，带 `--dev` 时是 `.env.dev`。
 
 - `APP_HOST` / `APP_PORT`
+- `MODELD_HOST` / `MODELD_PORT`
 - `SIDECAR_HOST` / `SIDECAR_PORT`
 - `UI_HOST` / `UI_PORT`
 - `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_URL`
@@ -294,19 +302,24 @@ UI 当前包含：
 常用日志文件：
 
 - `data/runtime/logs/app.log`
+- `data/runtime/logs/modeld.log`
 - `data/runtime/logs/sidecar.log`
 - `data/runtime/logs/ui.log`
 - `data/runtime/logs/qdrant.log`
+
+`modeld.log` 由 modeld 进程自身写入，运行中按 `10MiB x 5` 轮转为 `modeld.log.1` 到 `modeld.log.5`，新写入行带 UTC RFC3339 时间戳。
+
+长驻进程的 pid 文件也写在同一目录；modeld 对应 `modeld.pid`。
 
 ## 运行时说明
 
 - `bootstrap-linux.sh` 会准备 `.env`、运行目录、`.venv-test`、`.venv`、UI 依赖和 Playwright；加 `--dev` 时会准备 `.env.dev` 和对应运行目录。
 - `doctor.sh` 是第一诊断入口，用于检查工具、目录、端口、虚拟环境和 CUDA 可用性；它不是启动命令。
 - `run-qdrant.sh` 会启动或复用本地 Qdrant，也可由 `run.sh` 自动调用。
-- `run.sh` 会自动启动或复用 Qdrant，检查 app / sidecar / UI 端口是否空闲，解析 `local_sidecar.active_model + version`，并在健康检查通过后才报告启动成功；加 `--detach` 时会后台启动并写入 pid 文件。
-- sidecar 首次冷启动加载 ColQwen 模型可能需要数分钟；首次真实导入或搜索明显慢于后续热路径属于预期行为。
-- `status.sh` 会报告 app、sidecar、UI 和 Qdrant 的 URL、ready 状态、pid、日志路径与配置来源；加 `--json` 时输出机器可读 JSON。
-- `stop.sh` 会停止指定本地服务，支持 `--all` 停止 app、sidecar、UI 和 Qdrant，并会优先使用 pid 文件再回退到端口 / 命令发现。
+- `run.sh` 会通过 `faus serve` 自动启动或复用 Qdrant、modeld、sidecar 和 app，再启动 UI；它会检查 app、modeld、sidecar、UI 端口与健康状态，并在健康检查通过后才报告启动成功；加 `--detach` 时会后台启动并写入 pid 文件。
+- modeld 首次冷启动加载 ColQwen 模型可能需要数分钟；首次真实导入或搜索明显慢于后续热路径属于预期行为。
+- `status.sh` 会报告 app、modeld、sidecar、UI 和 Qdrant 的 URL、ready 状态、pid、日志路径与配置来源；加 `--json` 时输出机器可读 JSON。
+- `stop.sh` 会停止指定本地服务，支持 `--all` 停止 app、modeld、sidecar、UI 和 Qdrant，也支持 `--all --keep-modeld` 保留 modeld，并会优先使用 pid 文件再回退到端口 / 命令发现。
 - `smoke-text-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 文本搜索 smoke；加 `--json` 时输出机器可读摘要。
 - `smoke-image-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 图片搜索 smoke；加 `--json` 时输出机器可读摘要。
 - `smoke-video-search.sh` 是启动后的验证命令，用于跑真实 ColQwen + Qdrant 视频搜索 smoke；它会基于 local-only manifest 自动派生截图与 clip，并验证查询视频上传、可选时间范围、`source_id` 复用和三类对象混排结果。
@@ -321,11 +334,11 @@ UI 当前包含：
 
 - `setup`：一次性安装与初始化，入口是 `bootstrap-linux.sh`，隔离开发配置使用 `bootstrap-linux.sh --dev`
 - `diagnose`：环境诊断，入口是 `doctor.sh`
-- `run`：启动 Qdrant、app、sidecar 和 UI，入口是 `run.sh`
+- `run`：启动 Qdrant、modeld、app、sidecar 和 UI，入口是 `run.sh`
 - `status`：查看本地服务状态，入口是 `status.sh`
 - `stop`：停止本地服务，入口是 `stop.sh`
 - `test`：无 GPU 快速检查，入口是 `check.sh`
 - `ui-smoke`：最小浏览器闭环验证，入口是 `pnpm --dir ui test:e2e`
-- `smoke`：真实链路验证，入口是 `smoke-text-search.sh` / `smoke-image-search.sh` / `smoke-video-search.sh`
+- `smoke`：真实链路验证，入口是 `smoke-text-search.sh` / `smoke-image-search.sh` / `smoke-video-search.sh` / `smoke-document-search.sh`
 
 更多排障信息见 [排障](./troubleshooting.md)。
