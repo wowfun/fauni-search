@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 2026-04-27
+### Changed
+- Reworked Settings around runtime-config overlays for provider/model and content-type CRUD, including inheritance restore states and cached provider runtime probes.
+- Added modeld-backed local model orchestration with `faus serve --model`, modeld-aware local scripts/status, Qwen3-VL backend wiring, and timestamped rotating `modeld.log`.
+
 ## 2026-04-26
 ### Added
 - Added the public App OpenAPI contract and the initial `faus` product CLI covering runtime, Web, library, jobs, and import workflows.

@@ -120,6 +120,9 @@
 - 当检索命名空间的物理命名或后端兼容要求发生变化时，应通过显式兼容代际或重建路径处理，而不是直接改写结构化真相含义
 - 当前 active index reference 在应用启动时必须重新对照 stable active namespace naming 探测可用性；若 active alias 缺失、alias target 缺失，或只剩同名旧物理 collection，该引用应失活并让搜索返回 `not_ready`
 - provider configs、全局 `content_types` 与库级内容类型覆盖不再以 `state.sqlite` 为事实源；旧 `state.sqlite` 中即使残留这些字段，也不得覆盖 merged config 的解析结果
+- Settings 写入 provider configs、provider models、全局 `content_types` 与库级内容类型覆盖时，只写 `${APP_RUNTIME_DIR}/runtime-config.json`
+- 删除 runtime config 中的 provider/model/content-type 覆盖只表示回落到 repo 基线或上层继承；当前不通过 tombstone 遮蔽 repo 基线
+- `${APP_RUNTIME_DIR}/runtime-config.json.libraries` 在 Settings 中只承接库级配置覆盖，不承接库生命周期、来源根或来源清单的事实源
 - 升级过程中，`library_id`、`source_id`、`visual_unit_id`、`content_version_id` 等稳定身份不得被重写
 - 派生资产载荷、临时资产与检索命名空间若与新版本不兼容，可以按规则重建；主结构化存储中的稳定记录与持久队列记录不得依赖“删掉重建”作为默认升级手段
 - 若派生资产载荷或检索命名空间被判定为需要重建，主结构化存储中的引用、检查点与激活关系应继续作为恢复入口，而不是被隐式清空

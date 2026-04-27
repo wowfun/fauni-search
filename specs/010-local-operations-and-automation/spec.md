@@ -36,7 +36,7 @@
 - 开发隔离显式：开发或代理会话需要避开默认服务时，必须通过显式 `--dev` 选择 `.env.dev`
 - E2E / 代理数据有界：`.env.dev` 是 Playwright / E2E / 代理实测专用运行面，测试启动流程应在 Qdrant collections 过量时修剪旧测试索引，而不是每次清空全部数据
 - 自动化输出稳定：面向脚本消费的状态与 smoke 摘要必须提供稳定 JSON 输出，不依赖人类日志解析
-- 快速检查不启动长驻服务：默认快速检查不加载真实 GPU 模型、不启动 Qdrant / app / sidecar / UI 长驻进程
+- 快速检查不启动长驻服务：默认快速检查不加载真实 GPU 模型、不启动 Qdrant / modeld / app / sidecar / UI 长驻进程
 
 ## 本地配置选择
 
@@ -50,6 +50,7 @@
 - `.env*.example` 只作为模板，不承接本机实际运行状态
 - 脚本不得通过逐项端口 flag、脚本常量或 UI 常量维护与选中 env 文件并行的配置真值
 - 开发隔离配置应与默认配置使用不同端口、日志目录与运行时数据目录，避免两个本地运行面互相抢占服务或 Qdrant storage
+- `MODELD_HOST` 与 `MODELD_PORT` 定义内部 modeld 监听地址；默认 `.env` 使用 `127.0.0.1:53212`，`.env.dev` 使用 `127.0.0.1:54212`
 - `.env` / `.env.dev` 不再承接 `local_sidecar` 的正式模型事实；本地模型选择应从合并后的配置文件读取
 
 ## 本地操作入口
@@ -62,14 +63,16 @@
 - `cutover-runtime.sh` 承接 runtime 世代切换；它按当前环境单独归档旧 `app/` 与 `qdrant/`，并初始化新的 `${APP_RUNTIME_DIR}/runtime-config.json`
 - `cleanup-legacy-runtime.sh` 承接旧世代 runtime 清理；默认只扫描并报告当前环境的 legacy 归档与旧 Qdrant collections，只有显式 `--execute` 才执行删除
 - `prune-dev-qdrant-collections.sh` 承接 E2E Qdrant collections 上限控制；它只允许显式 `--dev`，在 Qdrant 启动前扫描 `${QDRANT_STORAGE_DIR}/collections`，超过阈值时按时间顺序只保留最新的 Playwright stage collections
-- `reset-dev-runtime.sh` 可以作为人工兜底重置工具；它只允许显式 `--dev`，先停止 `.env.dev` 下的 app、sidecar、UI 与 Qdrant，再清空并重建 `${APP_RUNTIME_DIR}` 与 `${QDRANT_STORAGE_DIR}`
-- `run.sh` 启动后端 runtime 时必须调用同一配置上下文下的 `faus serve`；Qdrant、Python sidecar、Rust server、provider/model 解析与 runtime 世代检查由 `faus serve` 承接
+- `reset-dev-runtime.sh` 可以作为人工兜底重置工具；它只允许显式 `--dev`，先停止 `.env.dev` 下的 app、modeld、sidecar、UI 与 Qdrant，再清空并重建 `${APP_RUNTIME_DIR}` 与 `${QDRANT_STORAGE_DIR}`
+- `run.sh` 启动后端 runtime 时必须调用同一配置上下文下的 `faus serve`；Qdrant、modeld、Python sidecar、Rust server、provider/model 解析与 runtime 世代检查由 `faus serve` 承接
 - `run.sh` 不得再直接启动 `cargo run`、`.venv/bin/python -m fauni_sidecar` 或调用 `run-qdrant.sh` 来形成第二套后端编排路径
+- `run.sh` 不得直接启动 modeld；它必须通过 `faus serve` 复用或启动选中 env 下的 modeld
 - `run.sh` 必须复用选中 env 下同一个 `APP_RUNTIME_DIR`；重启 app 不得隐式改写持久状态路径，也不得在启动时自动清理旧的 durable store
 - 若选中 env 下的 `${APP_RUNTIME_DIR}/state.sqlite` 仍是旧的单行 snapshot store，`run.sh` / `faus serve` 必须让 App 以清晰错误拒绝启动；本地脚本不得隐式迁移、归档或清空该 store
 - 当 `run.sh` 等待 app ready 失败或发现 app 进程提前退出时，应从 `app.log` 暴露明确启动失败原因；遇到旧 snapshot store 时，`.env.dev` 应提示 `reset-dev-runtime.sh --dev`，默认 `.env` 应提示显式 `cutover-runtime.sh`，不得只输出泛化超时信息
-- `run.sh` 必须先等待后端 runtime 的 app、sidecar 与 Qdrant ready，再启动 Vite UI，避免开发服务器在后端未就绪时代理 `/api/*` 请求并写入误导性的连接失败日志
-- `stop.sh` 承接 app、sidecar、UI 与 Qdrant 的停止；必须支持选中配置下的服务发现
+- `run.sh` 必须先等待后端 runtime 的 app、modeld、sidecar 与 Qdrant ready，再启动 Vite UI，避免开发服务器在后端未就绪时代理 `/api/*` 请求并写入误导性的连接失败日志
+- `stop.sh` 承接 app、modeld、sidecar、UI 与 Qdrant 的停止；必须支持选中配置下的服务发现
+- `stop.sh --all --keep-modeld` 必须停止 app、sidecar、UI 与 Qdrant，但保留选中 env 下已驻留的 modeld
 - `stop.sh --all` 只承接停进程语义，不承接数据清空、runtime wipe 或旧 collection 自动清理
 - E2E Qdrant 数据修剪必须通过 `prune-dev-qdrant-collections.sh --dev` 这类显式 prune 入口完成；全量清空必须通过 `reset-dev-runtime.sh --dev` 这类显式 reset 入口完成，不得隐式塞进 `stop.sh --all`
 - `status.sh` 承接服务状态查询；必须支持 `--json` 输出机器可读状态快照
@@ -79,11 +82,16 @@
 
 ## 日志、pid 与状态
 
-- app、sidecar、UI 与 Qdrant 的日志位置由选中 env 文件中的 `DEV_LOG_DIR` 决定
+- app、modeld、sidecar、UI 与 Qdrant 的日志位置由选中 env 文件中的 `DEV_LOG_DIR` 决定
+- modeld 的稳定日志与 pid 文件名分别为 `modeld.log` 与 `modeld.pid`
+- `modeld.log` 必须由 modeld 进程自身写入 UTC RFC3339 时间戳前缀，普通日志行格式应接近 `2026-04-26T18:01:11.637758Z  INFO logger: message`
+- `modeld.log` 必须支持运行中 size-based 轮转；默认阈值为 10 MiB，保留 `modeld.log.1` 到 `modeld.log.5`，其中 `.1` 为最新备份
+- modeld 启动时若已有 `modeld.log`，应先将旧文件滚入 `modeld.log.1`，保证新 `modeld.log` 中的新写入行具备时间戳前缀
+- app、sidecar、UI 与 Qdrant 日志当前不承接运行中轮转语义；其日志生命周期仍由各自启动方式和显式 reset/stop 操作决定
 - `${APP_RUNTIME_DIR}` 是当前 restart-persistence 事实源的一部分；停止脚本不得把它当成临时日志目录一起清掉
 - 分离运行时，app 与 UI 应将 pid 写入 `DEV_LOG_DIR` 下的稳定 pid 文件；当 app 由 `faus serve` 承接时，`app.pid` 记录 `faus serve` 进程
-- Qdrant 与 sidecar 由 `faus serve` 启动或复用时，不要求 `run.sh` 写入新的 `qdrant.pid` 或 `sidecar.pid`；`stop.sh` 的端口 / 命令发现仍作为兜底
-- `status.sh` 应报告每个服务的 URL、ready 状态、pid、日志路径与配置来源；app pid 识别必须覆盖旧 Rust server binary、`cargo run` 与 `faus serve`
+- Qdrant、modeld 与 sidecar 由 `faus serve` 启动或复用时，不要求 `run.sh` 写入新的 `qdrant.pid`、`modeld.pid` 或 `sidecar.pid`；`stop.sh` 的端口 / 命令发现仍作为兜底
+- `status.sh` 应报告每个服务的 URL、ready 状态、pid、日志路径与配置来源；app pid 识别必须覆盖旧 Rust server binary、`cargo run` 与 `faus serve`，modeld pid 识别必须覆盖 `faus serve model`，modeld 状态应展示 loaded models 摘要
 - `stop.sh` 应优先复用 pid 文件，并保留端口 / 命令发现兜底，避免 pid 文件缺失时无法停止本仓库服务
 - 旧 runtime-token Qdrant collections 的清理属于 operator/manual concern，不属于 `run.sh` / `stop.sh` 的自动职责
 - 本次 alias cutover 后，旧 `text_search_*` collection、旧“直接物理 `index_*` collection”与旧“直接物理 `vector_space_*` collection”的清理同样属于 operator/manual concern；`run.sh` / `stop.sh` 不负责自动迁移或自动删除这些 collections

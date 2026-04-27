@@ -4,7 +4,7 @@
 
 ## 角色与边界
 
-- 本文件只覆盖 `faus serve` 与最小 CLI 入口行为
+- 本文件只覆盖 `faus serve`、`faus serve model` 与最小 CLI 入口行为
 - 本文件不覆盖状态查询、Web 浏览器入口、库操作、导入、搜索或任务命令
 - 本文件不覆盖 Web 前端渲染、静态资源托管或 Vite 开发代理
 - 本文件不要求把 bootstrap、doctor、reset、smoke 或后台守护并入 CLI 测试
@@ -14,7 +14,7 @@
 - CLI 测试优先使用真实 binary 进程验证 stdout、stderr、退出码与信号处理
 - 涉及端口的测试必须使用随机可用端口，避免依赖固定本机状态
 - 涉及环境变量的测试必须在结束后恢复或隔离
-- 子进程测试必须确保结束后清理 Qdrant、sidecar 与 Rust server 进程
+- 子进程测试必须确保结束后清理 Qdrant、modeld、sidecar 与 Rust server 进程；显式 keep-modeld 场景必须在测试收尾阶段单独停止 modeld
 - 能用测试替身覆盖的启动失败场景，不依赖真实外部服务随机失败
 
 ## 默认测试入口
@@ -32,10 +32,17 @@
 | --- | --- |
 | `faus serve --host 127.0.0.1 --port <free-port>` | Rust server 在指定地址 ready，命令保持前台运行 |
 | `faus serve --dev --port <free-port>` | 使用开发运行配置启动 runtime |
+| `faus serve --model <model_id>` | 使用指定的已启用 local_sidecar 模型启动或复用 modeld |
+| `faus serve model --host 127.0.0.1 --port <free-port>` | modeld 在指定地址 ready，命令不启动 App / sidecar / Qdrant / Vite |
+| `faus serve model --model <model_id>` | modeld 健康载荷展示指定 `model_id` 与对应 `model_revision` |
+| 已有 modeld ready 时运行 `faus serve model` | 命令复用已有 modeld，并在人类输出中说明复用 |
+| 显式 `--model` 与已有 modeld 默认模型不一致 | 命令复用已有 modeld，并确保目标模型进入 loaded models 或返回明确加载失败 |
 | `scripts/local/smoke-faus-serve.sh --dev` | 构建并启动 `faus serve --dev`，探测 App / sidecar / Qdrant，确认不启动 Vite，停止后端口释放 |
 | `scripts/local/run.sh --dev --detach` | 通过 `faus serve` 启动后端，并额外启动 Vite UI |
+| `scripts/local/stop.sh --dev --all --keep-modeld` | 停止 app / sidecar / UI / Qdrant，保留 modeld |
 | 端口已被占用 | 命令返回非零退出码，并清理本次启动的子进程 |
 | Qdrant 启动失败 | 命令返回非零退出码，stderr 展示明确原因 |
+| modeld 启动失败 | 命令返回非零退出码，stderr 展示明确原因 |
 | sidecar 启动失败 | 命令返回非零退出码，stderr 展示明确原因 |
 | Rust server ready 超时 | 命令返回非零退出码，清理本次启动的子进程 |
 | 用户发送中断信号 | 命令退出，并关闭本次启动的子进程 |
@@ -46,19 +53,22 @@
 
 - Rust server ready 后，`GET /health` 可访问
 - `GET /openapi.json` 可访问，证明公开 App API 已启动
+- `faus serve model` ready 后，modeld `GET /health` 可访问
+- 显式 `--model` 后，modeld `/health` 的 default model 或 loaded models 中包含目标 `model_id` 与对应 `model_revision`
 - 命令不会创建或依赖 Vite 开发服务器
 - 命令退出后不会遗留本次启动的子进程
 - `--host`、`--port` 与 `--dev` 的行为可被测试观察
-- `smoke-faus-serve.sh --dev --json` 输出单个机器可读 JSON 摘要，包含 HTTP 探测、Vite 未启动、端口释放与关键输出行检查结果
+- `smoke-faus-serve.sh --dev --json` 输出单个机器可读 JSON 摘要，包含 HTTP 探测、Vite 未启动、modeld 复用或启动状态、端口释放与关键输出行检查结果
 
 ## 环境隔离
 
 - 测试不得依赖固定本地端口可用
 - 测试不得污染用户本机 Qdrant 数据目录
 - 测试不得复用用户长期运行的 sidecar 进程
+- 除明确的 keep-modeld 场景外，测试不得复用用户长期运行的 modeld 进程
 - 每个测试都应使用独立临时 runtime 目录或测试配置
 - 测试结束必须恢复修改过的环境变量
-- 显式 smoke 例外使用 `.env.dev` 固定端口和 runtime 目录；启动前必须确认 dev app、sidecar、Qdrant 与 UI 端口均未被占用
+- 显式 smoke 例外使用 `.env.dev` 固定端口和 runtime 目录；启动前必须确认 dev app、modeld、sidecar、Qdrant 与 UI 端口均未被占用，或明确进入 modeld 复用测试
 - 显式 smoke 只停止本次启动的 `faus serve --dev` 及其子进程，不停止默认 `.env` 运行面，不清理长期数据
 
 ## Deferred Coverage

@@ -20,6 +20,7 @@
 - 任务快照载荷（Task Snapshot Payload）
 - 健康快照载荷（Health Snapshot Payload）
 - sidecar HTTP 契约（Sidecar HTTP Contract）
+- modeld HTTP 契约（modeld HTTP Contract）
 
 ## 范围
 
@@ -28,6 +29,7 @@
 - 搜索接口与非搜索控制面接口的请求 / 响应形状
 - 公共错误载荷、分页 / 游标、资源句柄、时间戳与诊断字段的最小编码约定
 - Rust 主服务与 Python sidecar 的内部稳定 HTTP/JSON 协议边界
+- Python sidecar 与 `modeld` 之间的内部 HTTP/JSON 协议边界
 
 范围外：
 - 搜索排序、过滤规则、结果语义与默认搜索行为
@@ -35,7 +37,7 @@
 - 提供方私有远端 API、凭据字段与第三方产品协议
 - SQLite/Qdrant schema、目录布局、前端路由、视觉样式与前端实现组织
 - Web 产品体验、产品 CLI 交互体验、`scripts/local/*` 运维自动化与 Vite 开发代理语义
-- Python sidecar、Qdrant、Web 静态资产托管实现细节或本地脚本的 OpenAPI 暴露
+- Python sidecar、`modeld`、Qdrant、Web 静态资产托管实现细节或本地脚本的 OpenAPI 暴露
 
 ## 设计原则
 
@@ -77,7 +79,7 @@
   - preview / binary media 响应路由
   - `GET /health` 轻量健康入口
   - `GET /routes` 人工路由发现入口
-- OpenAPI contract 不覆盖 Python sidecar 内部协议、Qdrant 接口、`scripts/local/*`、Vite proxy、Web 静态资产托管细节或客户端本地工作流
+- OpenAPI contract 不覆盖 Python sidecar 内部协议、`modeld` 内部协议、Qdrant 接口、`scripts/local/*`、Vite proxy、Web 静态资产托管细节或客户端本地工作流
 - `GET /openapi.json` 应纳入公开 App API 路由清单；`GET /routes` 返回的人工路由列表不得作为客户端生成或兼容性判断的事实源
 - schema component 命名应面向客户端稳定含义，不泄露 Rust 模块组织、数据库表名、内部 parser 类型或 provider 私有结构
 - 公开 App API 的新增、删除或不兼容变更必须先更新本专题或对应语义专题，再更新 OpenAPI contract；客户端生成物只能视为契约消费结果
@@ -270,13 +272,26 @@
   - 可选 `embedding_capabilities`
   - 可选 `execution_input_types`
   - 可选 `runtime_adapters`
+- provider 级运行时诊断允许由后端 TTL cache 提供；`GET /settings/providers`、`GET /runtime/status`、`GET /settings/model-catalog` 与 resolved model 查询不得假定每次请求都会重新访问 sidecar `/capabilities`
+- `last_probed_at` 必须代表最近一次真实 provider runtime probe；缓存命中时响应可重复返回同一个 `last_probed_at`
+- 当前 TTL 语义固定为：稳定 provider probe 结果 15 秒，`runtime_unavailable` 结果 5 秒；provider/model 或内容类型绑定写入后的响应必须基于强制刷新或显式失效后的 probe 结果
 - `execution_input_types` 与 `runtime_adapters` 都只属于运行时诊断摘要；它们不得出现在 `model-catalog`、`resolved-content-models` 或 `EmbeddingCapabilities` 中
 - 全局与库级 `content_types` 的稳定最小编码应支持：
   - `content_types.{content_type}.enabled`
   - `content_types.{content_type}.model`
   - `content_types.{content_type}.vector_type`
-- `GET /settings/providers`、`PATCH /settings/providers/{provider_id}`、`GET /settings/content-types`、`PATCH /settings/content-types`、`GET /libraries/{library_id}/content-types` 与 `PATCH /libraries/{library_id}/content-types` 的 durable truth 固定为 merged config，而不是 `state.sqlite`
+- Settings 中 provider/model、根级 `content_types` 与库级 `libraries.<library_id>.content_types` 的 durable truth 固定为 merged config，而不是 `state.sqlite`
 - 这些 settings 接口默认只写 `${APP_RUNTIME_DIR}/runtime-config.json`；若写入后的 merged config 无效，接口必须整体拒绝而不是留下部分更新
+- 若通过 HTTP 暴露，根级内容类型覆盖接口除整包 `PATCH /settings/content-types` 外，还应包括：
+  - `PATCH /settings/content-types/{content_type}`
+  - `DELETE /settings/content-types/{content_type}`
+- 若通过 HTTP 暴露，库级内容类型覆盖接口除整包 `PATCH /libraries/{library_id}/content-types` 外，还应包括：
+  - `PATCH /libraries/{library_id}/content-types/{content_type}`
+  - `DELETE /libraries/{library_id}/content-types/{content_type}`
+- 单项 content type 接口只接受固定 `image`、`document`、`video`、`text`
+- 单项 `DELETE` 只移除 runtime overlay 条目并回落 repo 基线或上层继承；它不表示写入 `enabled=false`
+- 内容类型设置响应应能表达每个固定 content type 的 overlay/origin 状态，至少区分 `baseline`、`runtime_overlay` 与 `inherited`
+- 若通过 HTTP 暴露，provider/model runtime overlay 接口除 provider 列表与 provider 更新外，还应能创建、更新与删除 runtime overlay 中的 provider 与 provider models；删除 provider/model overlay 同样表示回落 repo 基线
 - model catalog 条目至少应支持：
   - `provider_id`
   - `provider_kind`
@@ -437,6 +452,12 @@
 
 - Rust 主服务与 Python sidecar 之间的稳定跨进程协议固定为 HTTP/JSON
 - sidecar HTTP 契约是 Rust 主服务内部消费的跨进程协议，不纳入 Rust server 公开 App API 的 OpenAPI contract
+- Rust 主服务只依赖 sidecar HTTP 契约；`modeld` 位于 sidecar 背后，不成为 Rust 主服务或公开 App API 的直接调用目标
+- sidecar 对 Rust 主服务暴露的 `/health`、`/capabilities` 与 `/embed` payload 语义必须保持稳定，即使其内部改为代理 `modeld`
+- `modeld` 可以复用同形的 `/health`、`/capabilities` 与 `/embed` 作为 sidecar 后方的内部实现契约，但该契约不纳入 App OpenAPI
+- `modeld` 可以额外提供内部 `POST /models/load` 入口，用于 `faus serve --model` 或 `faus serve model --model` 在复用既有 modeld 时确保目标模型已加载；该入口只接受 `local_sidecar.models` 中已启用且 backend 受支持的模型
+- sidecar 代理 `POST /embed` 到 `modeld` 时，必须原样转发 `provider_context.model_id` 与 `provider_context.model_version`；`modeld` 按该请求级模型选择 runtime，缺失时使用默认模型
+- `modeld` 的健康响应应能表达 default model、loaded models、每个模型的 backend、revision、加载状态与错误诊断；sidecar 可透传这些诊断，但不得改变 Rust 主服务消费的 sidecar envelope
 - 若未来需要 sidecar machine contract，应通过单独规格明确，而不是默认混入 `GET /openapi.json`
 - sidecar HTTP 契约至少覆盖以下协议面：
   - 健康探测

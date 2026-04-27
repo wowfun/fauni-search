@@ -35,15 +35,19 @@
 - 单一执行编排中心（Single Execution Coordinator）：Rust 主服务是唯一执行编排中心，负责任务创建、排队、推进、取消、恢复与本地运行时托管
 - 持久执行优先（Durable Execution First）：可能跨越单次请求生命周期的执行工作，应以可恢复的持久任务表示，而不是只存在于进程内瞬时状态
 - 前台搜索、后台摄取与维护（Foreground Search, Background Ingestion and Maintenance）：交互搜索保持前台请求路径；导入、来源根扫描、索引、刷新、重扫、清理、探测与维护类工作进入后台执行系统
-- 本地托管显式（Explicit Local Hosting）：本地 Python sidecar 与本地检索后端由 Rust 主服务托管；远端提供方不由应用托管
+- 本地托管显式（Explicit Local Hosting）：Rust 主服务托管本地 `modeld`、Python sidecar 与 Qdrant；远端提供方不由应用托管
 - 最小可观察性承诺（Minimal Observability Guarantee）：任务与运行时至少应稳定暴露状态、进度、取消能力、健康摘要与诊断摘要
 
 ## 执行编排中心与运行时归属
 
 - Rust 主服务是系统内唯一正式执行编排节点，负责统一承接执行触发、任务调度、状态推进与恢复逻辑
-- Rust 主服务托管本地 Python sidecar 与本地检索后端进程，并负责其启动、健康检查、失联处理、重连或重启，以及关闭
+- Rust 主服务负责本地 `modeld`、Python sidecar 与 Qdrant 的启动、健康检查、失联处理、重连或重启，以及关闭
 - `remote_http` 一类远端提供方只参与连接、能力校验与健康探测，不由应用负责进程托管
-- Python sidecar 不应成为前端/调用方的直接服务入口，也不应独立承担系统级任务调度职责
+- `modeld` 是本地多模型驻留进程，承载模型加载、GPU 驻留、容量压力与逐出语义；它不是前端或 sidecar 一级 CLI 的直接服务入口
+- `modeld` 按 `(model_id, version, backend)` 管理已加载模型；请求级 `provider_context` 决定本次执行目标，缺失时使用 `local_sidecar.active_model`
+- `faus serve model --model <model_id>` 或完整 `faus serve --model <model_id>` 会在启动时预加载指定模型；显式 `--model` 不改写项目配置或 runtime overlay
+- 已有 modeld ready 时，显式 `--model` 表示确保目标模型已加载或可加载；已有其他模型驻留不是失败条件
+- Python sidecar 是 Rust 主服务与 `modeld` 之间的内部 adapter，不直接驻留模型，也不独立承担系统级任务调度职责
 - 交互搜索请求保持前台请求路径，不被纳入后台任务系统
 
 ## 执行触发与任务范围
@@ -91,7 +95,7 @@
 
 ## 运行时生命周期与健康
 
-- 运行时进程是被执行系统观察与托管的正式运行时对象，至少包括：本地 Python sidecar 与本地检索后端
+- 运行时进程是被执行系统观察与托管的正式运行时对象，至少包括：`modeld`、本地 Python sidecar 与 Qdrant
 - 运行时进程必须具备稳定生命周期语义，包括：启动/连接、就绪、降级、失联、重连或重启、关闭
 - 健康快照至少应包含：可用、降级或不可用状态，最近一次探测结果与诊断摘要
 - 本地运行时失联时，执行系统应显式进入降级或恢复路径，而不是静默忽略
@@ -100,7 +104,11 @@
 ## 驻留、容量与维护执行
 
 - 驻留状态承载已加载模型或其他运行时资源、设备占用与容量状态的稳定语义
-- 本地模型可以按需懒加载并在运行期驻留；是否驻留以及何时逐出，由容量压力、健康状态与执行系统判定共同决定
+- 本地模型由 `modeld` 按需懒加载或通过 `faus serve model --model` 预加载并在运行期驻留；是否驻留以及何时逐出，由容量压力、健康状态与执行系统判定共同决定
+- `modeld` 可跨 Rust App 与 Python sidecar 重启继续驻留，减少常规 stop / run 后的模型冷加载等待
+- 同一 modeld 进程可以同时驻留多个本地模型；热切模型只表示请求路由到不同已加载或可加载模型，不要求自动卸载旧模型
+- `modeld` 的驻留状态至少应表达 default model、loaded models，以及每个模型的 `model_id`、`model_revision`、`backend`、`status`、`device`、`dtype` 与 `load_error`
+- 自动逐出不在当前最低稳定能力中固定
 - 设备占用与容量压力必须进入正式执行语义，以支持任务调度、资源隔离与运行时逐出
 - 逐出与重载是正式运行期行为：被逐出的模型或资源可以在后续任务需要时重新加载
 - 延迟清理、派生资产清理、临时资产回收与维护探测都由后台执行系统承接

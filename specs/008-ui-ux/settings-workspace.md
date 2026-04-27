@@ -7,9 +7,9 @@
 - 设置工作区（Settings Workspace）
 - 章节导航（Settings Nav Rail）
 - 活动工作面（Active Settings Surface）
+- 模型提供方（Provider Models）
 - 内容类型（Content Types）
 - 当前库覆盖（Library Overrides）
-- 连接（Providers）
 - 模型测试（Model Tests）
 - 诊断（Diagnostics）
 
@@ -17,7 +17,7 @@
 
 - 设置工作区内部的信息架构与共享布局
 - 各设置章节的职责边界与主次关系
-- provider 配置、全局内容类型、当前库覆盖、模型测试与诊断在设置工作区中的承载方式
+- provider/model 配置、全局内容类型、当前库覆盖、模型测试与诊断在设置工作区中的承载方式
 - 当前库上下文、当前生效模型与 `vector_space` 诊断摘要在设置中的展示层级
 
 范围外：
@@ -39,12 +39,12 @@
 - 设置工作区采用左侧章节导航 + 右侧活动工作面的结构
 - 左侧章节导航只负责选择章节；章节职责应通过稳定命名和必要状态标签表达，不再为每个入口常驻解释性长句
 - 章节导航顺序固定为：
+  - 模型提供方
   - 内容类型
   - 当前库覆盖
-  - 连接
-  - 模型测试
   - 诊断
 - 设置工作区中的主入口固定为：
+  - 模型提供方
   - 内容类型
   - 当前库覆盖
 - 诊断明确后置，不应与主设置流同等竞争
@@ -78,17 +78,19 @@
   - 当前绑定来源摘要
 - 当前阶段 `当前库覆盖` 章节直接把继承 / 覆盖控制、生效结果和编辑表单放在同一个工作面内，不再额外增加章节概览层
 
-## 连接
+## 模型提供方
 
-- `连接` 章节承接内建 provider 配置查看与最小编辑入口
-- `连接` 章节可以同时承接 provider 状态摘要与连接编辑面，但不应演化成新的运维控制台
+- `模型提供方` 章节承接 runtime overlay 中 provider 与 provider models 的正式编辑入口
+- `模型提供方` 章节可以同时承接 provider 状态摘要、provider 字段、模型字段与测试面，但不应演化成新的运维控制台
+- 连接地址只是 provider 的一个字段，不应成为独立用户任务或章节名称
 - 当前 exact `model_id` 与 `model_version` 必须直接可见；用户不应需要理解内部执行线字段才能知道实际模型
 - `model_revision` 应作为只读运行时事实展示
-- 当前阶段 `连接` 章节直接呈现连接列表和当前连接编辑器；健康状态仅作为每个连接的状态标签和只读运行时事实出现
+- 当前阶段 `模型提供方` 章节直接呈现 provider 列表、当前 provider 编辑器、当前 model 编辑器与测试台；健康状态仅作为状态标签和只读运行时事实出现
+- Provider 与 model 的保存只写 `${APP_RUNTIME_DIR}/runtime-config.json` 覆盖层；删除覆盖表示回落 repo 基线
 
 ## 模型测试
 
-- `模型测试` 章节固定面向当前未保存草稿，而不是已保存配置
+- 模型测试固定面向 `模型提供方` 中当前 provider + model 的未保存草稿，而不是已保存配置
 - 模型测试区必须根据当前模型的 `EmbeddingCapabilities.input_types` 动态渲染输入控件：
   - `text` 显示文本输入
   - `image` 显示单文件输入
@@ -104,7 +106,7 @@
   - 第二输入的向量结果
   - 第二输入与主输入之间的相似度
 - 当当前 provider / model 不支持测试时，设置工作区必须明确展示 `not_supported` 或等价原因，而不是静默禁用
-- 当前阶段 `模型测试` 章节直接呈现全局 / 当前库测试面板；不再额外增加“测试当前草稿”解释卡，测试目标和支持模态只保留在面板内部
+- 当前阶段不再保留独立 `模型测试` 章节；测试目标和支持模态只保留在 `模型提供方` 当前编辑面内部
 
 ## 诊断
 
@@ -119,8 +121,11 @@
 
 - Settings 工作区中的 provider / model settings 保存语义固定为：
   - 读取 repo 基线 `fauni.config.json` 与 `${APP_RUNTIME_DIR}/runtime-config.json` 的 merged 结果
-  - 用户侧写入默认只落 `${APP_RUNTIME_DIR}/runtime-config.json`
+  - 用户侧写入只落 `${APP_RUNTIME_DIR}/runtime-config.json`
   - Settings 不得把 provider config、全局 `content_types` 配置或库级内容类型覆盖重新写回 `state.sqlite`
+- `内容类型` 章节编辑 `${APP_RUNTIME_DIR}/runtime-config.json.content_types` 的固定四类覆盖，删除单项覆盖表示恢复 repo 基线
+- `当前库覆盖` 章节编辑 `${APP_RUNTIME_DIR}/runtime-config.json.libraries.<library_id>.content_types` 的固定四类覆盖，删除单项覆盖表示恢复继承
+- `libraries` 在 Settings 中只表示库级内容类型覆盖，不承接库创建、删除、归档或来源管理
 - Settings 与库摘要都必须直接展示当前 exact `model_id`
 - Settings 与库摘要都必须直接展示当前配置 `model_version`
 - Settings、model-catalog 与 resolved model 摘要只应展示模型原生向量能力；`document` / `video` 这类工程增强输入不得作为模型原生能力或原生测试模态呈现

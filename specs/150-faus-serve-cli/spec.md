@@ -7,7 +7,8 @@
 - `faus`
 - Serve CLI
 - 产品 runtime
-- Runtime 三件套
+- Headless runtime
+- modeld
 - 前台运行
 - 开发运行配置
 - 本地脚本 wrapper
@@ -17,7 +18,8 @@
 - `faus` binary 的最小可运行入口
 - `faus serve` 命令行为
 - `--host`、`--port`、`--dev` 在 `serve` 命令中的行为
-- Qdrant、Python sidecar 与 Rust server 的启动顺序和生命周期边界
+- Qdrant、modeld、Python sidecar 与 Rust server 的启动顺序和生命周期边界
+- `faus serve model` 的模型驻留服务启动边界
 - `faus serve` 与 `scripts/local/*` 的职责分界
 
 范围外：
@@ -45,28 +47,41 @@
   - `--host <host>`
   - `--port <port>`
   - `--dev`
+- `faus serve model` 至少支持：
+  - `--host <host>`
+  - `--port <port>`
+  - `--model <model_id>`
+  - `--dev`
 - 未支持的命令或参数应由 CLI 参数解析层返回非零退出码，并展示清晰错误
 
 ## `faus serve`
 
-- `faus serve` 启动 runtime 三件套：
+- `faus serve` 启动完整 headless runtime：
   - Qdrant
+  - modeld
   - Python sidecar
   - Rust server
+- `faus serve model` 只启动或复用 modeld，不启动 Qdrant、Python sidecar、Rust server 或 Vite UI
 - `faus serve` 不启动 Vite UI，不托管 `ui/dist`，也不要求前端开发服务器存在
 - `faus serve` 默认前台运行，直到用户中断或进程收到终止信号
 - 启动失败必须返回非零退出码，并清理本次命令启动的子进程
-- 正常中断时应尽量关闭本次命令启动的 sidecar 与 Qdrant 子进程，避免遗留孤儿进程
+- 正常中断时应尽量关闭本次命令启动的 sidecar 与 Qdrant 子进程；modeld 的清理由 `faus serve model` 或本地 `stop.sh modeld` 显式承接
 - `faus serve` 可以复用既有 runtime 目录、Qdrant 数据目录与本地配置，但不得改变公开 HTTP API 契约
+- `faus serve` 与 `faus serve model` 启动 modeld 时必须向 modeld 传入 `${DEV_LOG_DIR}/modeld.log`，由 modeld 自身负责带时间戳写入与运行中轮转；`faus serve` 不应直接以 Rust 文件重定向方式写入 `modeld.log`
 
 ## 地址与运行配置
 
 - `--host` 决定 Rust server 监听 host
 - `--port` 决定 Rust server 监听 port
 - 默认监听地址仍面向 `127.0.0.1:53210`
+- `faus serve model --host` 与 `--port` 只决定 modeld 监听地址
+- modeld 默认监听地址由 `MODELD_HOST` 与 `MODELD_PORT` 决定
+- `faus serve model --model <model_id>` 为本次 modeld 进程选择 `local_sidecar.models` 中已启用的模型；未指定时使用 `local_sidecar.active_model`
+- 完整 `faus serve --model <model_id>` 使用同一模型选择规则启动或复用 modeld；如果已有 modeld ready，命令必须确保目标模型已加载或可加载，不应因为已有其他模型驻留而失败
+- `--model` 不写入项目配置或 runtime overlay，只影响本次启动的 modeld 运行时绑定模型
 - `--dev` 选择本地开发运行配置；具体 env 文件、端口、日志和 runtime 目录规则由 [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md) 承接
 - `faus serve` 不使用 `--base-url` 作为监听地址输入
-- `APP_HOST`、`APP_PORT`、`FAUNI_ENV_FILE` 等运行环境变量属于运行配置层；`faus serve` 可以按本地运行规格读取它们，但 client 型命令不得用它们推导 base URL
+- `APP_HOST`、`APP_PORT`、`MODELD_HOST`、`MODELD_PORT`、`FAUNI_ENV_FILE` 等运行环境变量属于运行配置层；`faus serve` 可以按本地运行规格读取它们，但 client 型命令不得用它们推导 base URL
 
 ## 输出与错误
 
@@ -76,7 +91,7 @@
   - OpenAPI URL
 - `--debug` 可以展示子进程命令、端口选择、配置来源与 readiness 探测细节
 - `--json` 的长运行输出语义不在本切片强制固定；如果实现支持机器输出，必须避免混入人类日志
-- 启动失败、端口占用、配置无效、Qdrant 启动失败、sidecar 启动失败或 Rust server ready 超时都必须返回非零退出码
+- 启动失败、端口占用、配置无效、Qdrant 启动失败、modeld 启动失败、sidecar 启动失败或 Rust server ready 超时都必须返回非零退出码
 
 ## 与本地脚本的分界
 
@@ -95,7 +110,8 @@
 
 ## 验收标准
 
-- `faus serve` 能以前台命令形式启动 Qdrant、Python sidecar 与 Rust server
+- `faus serve` 能以前台命令形式启动 Qdrant、modeld、Python sidecar 与 Rust server
+- `faus serve model` 能以前台命令形式启动或复用 modeld
 - `--host`、`--port` 与 `--dev` 的行为有明确实现和测试覆盖
 - `faus serve` 不启动 Vite UI，不托管 `ui/dist`，也不依赖 Vite 开发服务器
 - 启动失败返回非零退出码，并清理本次启动的子进程

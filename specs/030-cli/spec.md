@@ -101,7 +101,8 @@
 ### `faus serve`
 
 - `faus serve` 是产品级 headless runtime 入口
-- `faus serve` 启动 runtime 三件套：Qdrant、Python sidecar 与 Rust server
+- `faus serve` 启动完整 headless runtime：Qdrant、modeld、Python sidecar 与 Rust server
+- `faus serve model` 只启动或复用模型驻留服务，不启动 Rust server、Python sidecar、Qdrant 或 Vite UI
 - `faus serve` 不启动 Vite UI，也不托管 `ui/dist`；它只提供 headless App API runtime
 - 默认前台运行，进程生命周期由当前终端控制
 - 后台化、pid、日志文件、stop 与运行面清理由 `scripts/local/run.sh --detach` 等 wrapper 和本地脚本承接
@@ -109,7 +110,12 @@
   - `--host <host>`
   - `--port <port>`
   - `--dev`
-- `--host` 与 `--port` 决定 Rust server 监听地址；默认仍面向 `127.0.0.1:53210`
+  - `--model <model_id>`
+- 普通 `faus serve` 的 `--host` 与 `--port` 决定 Rust server 监听地址；默认仍面向 `127.0.0.1:53210`
+- `faus serve model --host` 与 `--port` 只决定 modeld 监听地址；默认从 `MODELD_HOST` / `MODELD_PORT` 读取
+- `faus serve model --model <model_id>` 为本次 modeld 进程选择 `local_sidecar.models` 中已启用的模型；未指定时使用 `local_sidecar.active_model`
+- 完整 `faus serve --model <model_id>` 使用同一模型选择规则启动或复用 modeld
+- 已有 modeld ready 时，`--model` 应确保目标模型已加载或可加载；已有其他模型驻留不是失败条件
 - `--dev` 选择本地开发运行配置；具体 env 文件语义与本地自动化边界由 [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md) 承接
 - `faus serve` 不引入远程 auth、开放 CORS、mDNS 或局域网发现
 

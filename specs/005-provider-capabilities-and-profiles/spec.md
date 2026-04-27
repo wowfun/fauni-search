@@ -66,18 +66,25 @@ Provider Config 的最小稳定字段包括：
 - `dashscope` 的 `base_url` 是正式配置维度；即使当前不可执行，也必须作为稳定语义保留
 - 配置文件中的 model 应嵌套在 provider 下，即 `provider.<provider_id>.models.<model_id>`
 - `local_sidecar` 必须显式提供 `active_model`；其值必须指向该 provider 下某个已定义 model
+- `faus serve model --model <model_id>` 可以为本次 modeld 进程选择 `local_sidecar.models` 中已启用的模型；未显式指定时继续使用 `local_sidecar.active_model`
+- `--model` 不改写 `active_model` 或 runtime overlay，它只决定本次 modeld 的运行时绑定模型
 
 provider 下嵌套 model 的最小稳定字段包括：
 - `enabled`
 - `version`
+- `backend`
 - `embedding_capabilities`
 
 约束：
 - `version` 是模型真实执行版本，不是展示标签
 - `version` 允许自由字符串；默认值为 `main`
+- `backend` 是本地 modeld 加载器选择，不是 provider id；当前 `local_sidecar` 至少支持 `colqwen3_5` 与 `qwen3_vl_embedding`
 - 当前不支持同一 provider 下同一 `model_id` 的多版本并存
 - provider/model 的项目级基线事实源是仓库根 `fauni.config.json`
 - provider/model 的实例级覆盖事实源是 `${APP_RUNTIME_DIR}/runtime-config.json`
+- Settings 中的 provider/model 编辑只写 `${APP_RUNTIME_DIR}/runtime-config.json` 覆盖层，不直接改写仓库根 `fauni.config.json`
+- Settings 对 provider/model 覆盖的删除表示移除 runtime 覆盖并回落到 repo 基线；当前不引入 tombstone 或 `_deleted` 语义
+- Settings 可以创建、更新或移除 runtime overlay 中的 provider 与 provider 下的 model；写入后必须先完成 merged config 校验，失败时不得落盘部分更新
 
 ## 模型目录与模型选择
 
@@ -166,28 +173,29 @@ Execution Input Types 的约束：
 ## 当前切片的正式执行语义
 
 - 当前唯一正式可执行模型 provider 仍是 `local_sidecar`
-- `local_sidecar` 的真实模型事实来自配置文件中的 `active_model + version`，并由 sidecar `/health` 与 `/capabilities` 回传其真实 `model_id` / `model_revision`
-- 当前切片中，`local_sidecar` 的正式执行选择应被视为 runtime-bound，而不是任意可写模型切换入口
-- 当前 `local_sidecar` / ColQwen 运行时的 Embedding Capabilities 固定为：
-  - `input_types = ["text", "image"]`
-  - `vector_types = ["multi_vector_late_interaction"]`
-  - `supports_mixed_inputs = false`
-- 当前 `local_sidecar` / ColQwen 运行时的正式 Execution Input Types 固定为：
-  - `text`
-  - `image`
-  - `document`
-  - `video`
+- `local_sidecar` 的模型事实来自配置文件中的 model catalog、请求级模型选择和 modeld 运行时回传的 `model_id` / `model_revision`
+- `local_sidecar.active_model` 只是默认模型；正式执行应以内容类型绑定解析出的 `provider_context.model_id/model_version` 为准
+- 当前 `local_sidecar` 至少包含两个本地 modeld backend：
+  - `colqwen3_5`：多向量 late-interaction，原生 `text` / `image`，通过 adapter 支持 `document` / `video`
+  - `qwen3_vl_embedding`：单向量，多模态，原生支持 `text` / `image` / `video` 以及混合输入
+- `Qwen/Qwen3-VL-Embedding-2B` 是当前首个第二本地模型，应作为 `local_sidecar.models` 下的 `qwen3_vl_embedding` backend 存在；它不再只作为 `openai_compatible` 的未来兼容配置示例
 - `dashscope` 当前只作为配置与未来兼容字段存在；解析到它时必须显式返回 `not_supported`
 - `qdrant` 继续作为内部固定检索后端参与运行，但不再出现在 Settings 的模型配置面
 - 搜索 debug、库摘要与 Settings 摘要都必须直接暴露 exact `model_id`
 - 搜索 debug、库摘要与 Settings 摘要都必须直接暴露当前配置中的 `model_version`
+- provider runtime probe 是带 TTL 的内存缓存探测，不是每次 Settings / runtime API 请求都直接访问 sidecar 或 modeld
+- `last_probed_at` 表示最近一次真实 runtime probe 的时间；命中缓存时不得刷新该字段
+- 当前 probe TTL 固定为：稳定状态 15 秒，`runtime_unavailable` 失败状态 5 秒；显式 provider/model 或内容类型绑定写入后必须强制刷新受影响 provider
 - Settings 与库摘要中的主编辑面应以内容类型为入口，承接：
   - `enabled`
   - `model`
   - `vector_type`
+- Settings 中的根级 `content_types` 编辑只写 `${APP_RUNTIME_DIR}/runtime-config.json.content_types` 覆盖层；删除某个根级内容类型覆盖表示恢复 repo 基线
+- Settings 中的库级内容类型编辑只写 `${APP_RUNTIME_DIR}/runtime-config.json.libraries.<library_id>.content_types` 覆盖层；删除某个库级内容类型覆盖表示恢复继承，不代表禁用内容类型
+- 当前 Settings 只允许编辑固定内容类型集合 `image`、`document`、`video`、`text`，不开放任意自定义 content type key
 - `model_revision` 只作为只读运行时摘要返回
 - `vector_space_id` 只作为派生执行诊断事实返回；它不得成为用户主配置输入
-- 本地 sidecar 加载、本地主服务 fallback 摘要与本地下载脚本都应默认以 `local_sidecar.active_model` 对应 model 的 `version` 作为执行版本
+- 本地 sidecar 加载、本地主服务 fallback 摘要与本地下载脚本在没有请求级模型选择时，应默认以 `local_sidecar.active_model` 对应 model 的 `version` 作为执行版本
 - Settings 必须提供“测试当前 Provider + 模型配置”的诊断入口，用于在保存前直接验证当前草稿是否能返回 embedding
 - Settings 模型测试固定使用当前未保存草稿，而不是已持久化的 global content types / library content types 绑定
 - Settings 模型测试只应回传当前 provider 的可编辑草稿字段；`local_sidecar` 这类 runtime-bound provider 的连接信息只可展示、不可作为测试草稿重新提交
@@ -208,8 +216,9 @@ Execution Input Types 的约束：
 - `local_sidecar` 的探测至少应覆盖：
   - sidecar 可达性
   - `can_service`
-  - 当前绑定的 `model_id`
-  - 当前绑定的 `model_revision`
+  - 默认 `model_id`
+  - 已加载模型列表
+  - 每个已加载模型的 `model_revision`、`backend` 与加载状态
 - `dashscope` 当前不要求进入真实 probe 或真实执行路径；若被选中，应稳定返回 `not_supported`
 - 解析失败、provider 禁用、运行时不可达或模型不兼容时，系统不得自动切换到其他 provider 或其他模型
 
