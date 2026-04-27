@@ -48,6 +48,15 @@ for arg in "$@"; do
 done
 
 require_repo_env
+: "${MODELD_HOST:=127.0.0.1}"
+if [[ -z "${MODELD_PORT:-}" ]]; then
+  if [[ "${FAUNI_CONFIG_MODE:-}" == "dev" ]]; then
+    MODELD_PORT=54212
+  else
+    MODELD_PORT=53212
+  fi
+fi
+export MODELD_HOST MODELD_PORT
 
 APP_PID=""
 UI_PID=""
@@ -207,6 +216,12 @@ if ! wait_app_http_ok "http://$APP_HOST:$APP_PORT/health"; then
   fi
   exit 1
 fi
+
+wait_http_ok "modeld" "http://$MODELD_HOST:$MODELD_PORT/health" || {
+  echo "[error] modeld failed to start; see $DEV_LOG_DIR/modeld.log"
+  exit 1
+}
+echo "[info] Modeld: http://$MODELD_HOST:$MODELD_PORT/health"
 
 wait_http_ok "sidecar" "http://$SIDECAR_HOST:$SIDECAR_PORT/health" || {
   echo "[error] sidecar failed to start; see $DEV_LOG_DIR/sidecar.log"

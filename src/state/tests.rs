@@ -7,6 +7,59 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, process::Command};
 
 #[test]
+fn provider_probe_cache_uses_stable_status_ttl() {
+    let mut state = AppState::default();
+    state.provider_probe_cache.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        ProviderProbeSnapshot {
+            status: "available".to_string(),
+            message: "cached".to_string(),
+            last_probed_at: Some("2026-04-27T00:00:00Z".to_string()),
+        },
+    );
+    state
+        .provider_probe_checked_at_ms
+        .insert(LOCAL_SIDECAR_PROVIDER_ID.to_string(), 1_000);
+
+    assert!(state.provider_probe_cache_is_fresh(LOCAL_SIDECAR_PROVIDER_ID, 15_999));
+    assert!(!state.provider_probe_cache_is_fresh(LOCAL_SIDECAR_PROVIDER_ID, 16_000));
+}
+
+#[test]
+fn provider_probe_cache_uses_short_failure_ttl() {
+    let mut state = AppState::default();
+    state.provider_probe_cache.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        ProviderProbeSnapshot {
+            status: "runtime_unavailable".to_string(),
+            message: "cached failure".to_string(),
+            last_probed_at: Some("2026-04-27T00:00:00Z".to_string()),
+        },
+    );
+    state
+        .provider_probe_checked_at_ms
+        .insert(LOCAL_SIDECAR_PROVIDER_ID.to_string(), 1_000);
+
+    assert!(state.provider_probe_cache_is_fresh(LOCAL_SIDECAR_PROVIDER_ID, 5_999));
+    assert!(!state.provider_probe_cache_is_fresh(LOCAL_SIDECAR_PROVIDER_ID, 6_000));
+}
+
+#[test]
+fn provider_probe_cache_without_checked_at_is_stale() {
+    let mut state = AppState::default();
+    state.provider_probe_cache.insert(
+        LOCAL_SIDECAR_PROVIDER_ID.to_string(),
+        ProviderProbeSnapshot {
+            status: "available".to_string(),
+            message: "cached".to_string(),
+            last_probed_at: Some("2026-04-27T00:00:00Z".to_string()),
+        },
+    );
+
+    assert!(!state.provider_probe_cache_is_fresh(LOCAL_SIDECAR_PROVIDER_ID, 1_000));
+}
+
+#[test]
 fn durable_state_roundtrip_restores_library_source_roots_sources_visual_units_and_active_index() {
     let store_path = unique_test_file_path("durable-roundtrip.sqlite");
     let root_dir = unique_test_dir_path("durable-roundtrip");
@@ -457,6 +510,7 @@ fn apply_config_backed_model_state_prunes_unconfigured_active_vector_spaces_mark
                     ProviderModelConfigRecord {
                         enabled: true,
                         version: "main".to_string(),
+                        backend: Some("colqwen3_5".to_string()),
                         embedding_capabilities: EmbeddingCapabilities {
                             input_types: vec!["text".to_string(), "image".to_string()],
                             vector_types: vec![
@@ -1892,10 +1946,11 @@ fn build_search_response_returns_qdrant_results_after_import() {
     assert_eq!(response.results[0].cursor, "search:v1:1");
     assert_eq!(response.results[1].cursor, "search:v1:2");
     assert_eq!(response.next_cursor, None);
-    assert!(response.results.iter().all(|item| item
-        .preview
-        .url
-        .starts_with("http://127.0.0.1:53210/libraries/")));
+    assert!(response.results.iter().all(|item| {
+        item.preview
+            .url
+            .starts_with("http://127.0.0.1:53210/libraries/")
+    }));
     assert_eq!(
         response.debug.as_ref().unwrap()["vector_type"],
         "multi_vector_late_interaction"
@@ -2232,10 +2287,12 @@ fn prepare_import_groups_visual_units_by_vector_space() {
         .vector_space_batches
         .iter()
         .any(|batch| batch.visual_units.iter().all(|item| item.kind == "image")));
-    assert!(prepared.vector_space_batches.iter().any(|batch| batch
-        .visual_units
-        .iter()
-        .all(|item| item.kind == "document_page")));
+    assert!(prepared.vector_space_batches.iter().any(|batch| {
+        batch
+            .visual_units
+            .iter()
+            .all(|item| item.kind == "document_page")
+    }));
 
     let _ = fs::remove_file(pdf_path);
     let _ = fs::remove_file(image_path);

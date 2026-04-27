@@ -29,11 +29,18 @@ def env(name: str) -> str:
     return value
 
 
+def optional_env(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    return value if value not in (None, "") else default
+
+
 def endpoint_config() -> dict[str, object]:
     app_host = env("APP_HOST")
     app_port = int(env("APP_PORT"))
     sidecar_host = env("SIDECAR_HOST")
     sidecar_port = int(env("SIDECAR_PORT"))
+    modeld_host = optional_env("MODELD_HOST", "127.0.0.1")
+    modeld_port = int(optional_env("MODELD_PORT", "54212"))
     qdrant_url = env("QDRANT_URL").rstrip("/")
     ui_host = env("UI_HOST")
     ui_port = int(env("UI_PORT"))
@@ -43,10 +50,12 @@ def endpoint_config() -> dict[str, object]:
     return {
         "app_url": f"http://{app_host}:{app_port}",
         "sidecar_url": f"http://{sidecar_host}:{sidecar_port}",
+        "modeld_url": f"http://{modeld_host}:{modeld_port}",
         "qdrant_url": qdrant_url,
         "ports": {
             "app": (app_host, app_port),
             "sidecar": (sidecar_host, sidecar_port),
+            "modeld": (modeld_host, modeld_port),
             "qdrant": (qdrant_host, qdrant_port),
             "vite_ui": (ui_host, ui_port),
         },
@@ -122,12 +131,14 @@ def wait_for_ready(
 ) -> dict[str, dict]:
     app_url = str(config["app_url"])
     sidecar_url = str(config["sidecar_url"])
+    modeld_url = str(config["modeld_url"])
     qdrant_url = str(config["qdrant_url"])
     deadline = time.monotonic() + READY_TIMEOUT_SECONDS
     probes = {
         "app_health": (f"{app_url}/health", None),
         "openapi": (f"{app_url}/openapi.json", None),
         "runtime_status": (f"{app_url}/runtime/status", None),
+        "modeld_health": (f"{modeld_url}/health", None),
         "sidecar_health": (f"{sidecar_url}/health", None),
         "qdrant_collections": (f"{qdrant_url}/collections", None),
     }
@@ -167,6 +178,9 @@ def validate_payloads(payloads: dict[str, dict]) -> None:
     missing = {"app", "qdrant", "providers"} - set(runtime_status)
     if missing:
         raise RuntimeError(f"runtime/status missing keys: {sorted(missing)}")
+    modeld_health = payloads["modeld_health"]
+    if "loaded_models" not in modeld_health:
+        raise RuntimeError("modeld health did not include loaded_models")
 
 
 def terminate_process(process: subprocess.Popen[str]) -> int:
@@ -195,10 +209,23 @@ def wait_for_ports_released(ports: dict[str, tuple[str, int]]) -> dict[str, bool
     return release_state
 
 
+def run_stop(*args: str) -> None:
+    command = ["bash", str(ROOT / "scripts/local/stop.sh"), "--dev", *args]
+    subprocess.run(
+        command,
+        cwd=ROOT,
+        env=os.environ.copy(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
 def output_contains_required_lines(lines: list[str]) -> dict[str, bool]:
     required = {
         "app": "[info] App:",
         "openapi": "[info] OpenAPI:",
+        "modeld": "[info] Modeld:",
         "sidecar": "[info] Sidecar:",
         "qdrant": "[info] Qdrant:",
         "logs": "[info] Logs:",
@@ -227,6 +254,9 @@ def run_smoke(*, json_mode: bool) -> dict[str, object]:
     ports = config["ports"]  # type: ignore[assignment]
     assert isinstance(ports, dict)
     require_ports_free(ports)
+    non_modeld_ports = {
+        name: value for name, value in ports.items() if name != "modeld"
+    }
 
     command = [str(ROOT / "target/debug/faus"), "serve", "--dev"]
     emit("[info] Starting target/debug/faus serve --dev", json_mode=json_mode)
@@ -252,9 +282,19 @@ def run_smoke(*, json_mode: bool) -> dict[str, object]:
         exit_code = terminate_process(process)
         drain_output(output_queue, json_mode=json_mode)
 
-    released = wait_for_ports_released(ports)
+    released = wait_for_ports_released(non_modeld_ports)
     if not all(released.values()):
         raise RuntimeError(f"faus serve left .env.dev ports open: {released}")
+    modeld_kept = port_open(*ports["modeld"])
+    if not modeld_kept:
+        raise RuntimeError("faus serve did not leave modeld resident after shutdown")
+    run_stop("--all", "--keep-modeld")
+    if not port_open(*ports["modeld"]):
+        raise RuntimeError("stop.sh --all --keep-modeld did not preserve modeld")
+    run_stop("modeld")
+    final_release = wait_for_ports_released({"modeld": ports["modeld"]})
+    if not all(final_release.values()):
+        raise RuntimeError(f"modeld port stayed open after explicit stop: {final_release}")
 
     required_output = output_contains_required_lines(output_lines)
     if not all(required_output.values()):
@@ -265,23 +305,29 @@ def run_smoke(*, json_mode: bool) -> dict[str, object]:
 
     runtime_status = payloads["runtime_status"].get("data") or {}
     sidecar_health = payloads["sidecar_health"]
+    modeld_health = payloads["modeld_health"]
     return {
         "status": "ok",
         "command": "target/debug/faus serve --dev",
         "config": os.environ.get("FAUNI_CONFIG_SOURCE"),
         "app_url": config["app_url"],
         "sidecar_url": config["sidecar_url"],
+        "modeld_url": config["modeld_url"],
         "qdrant_url": config["qdrant_url"],
         "http": {
             "health": payloads["app_health"].get("status"),
             "openapi": payloads["openapi"].get("openapi"),
             "runtime_status_keys": sorted(runtime_status.keys()),
+            "modeld_status": modeld_health.get("status"),
+            "modeld_loaded_models": modeld_health.get("loaded_models", []),
             "sidecar_status": sidecar_health.get("status"),
             "qdrant_status": payloads["qdrant_collections"].get("status"),
         },
         "vite_ui_started": False,
         "process_exit_code": exit_code,
         "ports_released": released,
+        "modeld_kept_after_serve_stop": modeld_kept,
+        "modeld_released_after_explicit_stop": final_release,
         "output_contains": required_output,
         "output_excludes": forbidden_output,
     }

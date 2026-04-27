@@ -9,20 +9,23 @@ set -- "${FAUNI_REMAINING_ARGS[@]}"
 
 DRY_RUN=0
 ALL=0
+KEEP_MODELD=0
 SERVICES=()
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/local/stop.sh [--dev] --all [--dry-run]
+  scripts/local/stop.sh [--dev] --all [--keep-modeld] [--dry-run]
   scripts/local/stop.sh [--dev] <service> [<service> ...] [--dry-run]
 
 Options:
   --dev      Use .env.dev instead of .env
-  --dry-run  Show matched processes without stopping them
+  --keep-modeld  With --all, stop other services but leave modeld running
+  --dry-run      Show matched processes without stopping them
 
 Services:
   app       Rust app on APP_PORT
+  modeld    Python model residency daemon on MODELD_PORT
   sidecar   Python sidecar on SIDECAR_PORT
   ui        Vite dev server on UI_PORT
   qdrant    Qdrant on QDRANT_PORT
@@ -44,11 +47,14 @@ for arg in "$@"; do
     --dry-run)
       DRY_RUN=1
       ;;
+    --keep-modeld)
+      KEEP_MODELD=1
+      ;;
     -h|--help)
       usage
       exit 0
       ;;
-    app|sidecar|ui|qdrant)
+    app|modeld|sidecar|ui|qdrant)
       SERVICES+=("$arg")
       ;;
     *)
@@ -66,6 +72,9 @@ fi
 
 if [[ "$ALL" -eq 1 ]]; then
   SERVICES=(app sidecar ui qdrant)
+  if [[ "$KEEP_MODELD" -eq 0 ]]; then
+    SERVICES+=(modeld)
+  fi
 fi
 
 if [[ "${#SERVICES[@]}" -eq 0 ]]; then
@@ -74,6 +83,15 @@ if [[ "${#SERVICES[@]}" -eq 0 ]]; then
 fi
 
 require_repo_env
+: "${MODELD_HOST:=127.0.0.1}"
+if [[ -z "${MODELD_PORT:-}" ]]; then
+  if [[ "${FAUNI_CONFIG_MODE:-}" == "dev" ]]; then
+    MODELD_PORT=54212
+  else
+    MODELD_PORT=53212
+  fi
+fi
+export MODELD_HOST MODELD_PORT
 echo "[info] Config: ${FAUNI_CONFIG_SOURCE#$ROOT_DIR/}"
 
 dedupe_services() {
@@ -136,6 +154,7 @@ append_unique_pid() {
 service_port() {
   case "$1" in
     app) echo "$APP_PORT" ;;
+    modeld) echo "$MODELD_PORT" ;;
     sidecar) echo "$SIDECAR_PORT" ;;
     ui) echo "$UI_PORT" ;;
     qdrant) echo "$QDRANT_PORT" ;;
@@ -145,6 +164,7 @@ service_port() {
 service_pid_file() {
   case "$1" in
     app) echo "$DEV_LOG_DIR/app.pid" ;;
+    modeld) echo "$DEV_LOG_DIR/modeld.pid" ;;
     sidecar) echo "$DEV_LOG_DIR/sidecar.pid" ;;
     ui) echo "$DEV_LOG_DIR/ui.pid" ;;
     qdrant) echo "$DEV_LOG_DIR/qdrant.pid" ;;
@@ -157,10 +177,13 @@ cmd_matches_service() {
 
   case "$service" in
     app)
-      [[ "$cmd" == *"target/debug/fauni-search"* || "$cmd" == *"target/release/fauni-search"* || "$cmd" == *"target/debug/faus serve"* || "$cmd" == *"target/release/faus serve"* || "$cmd" == *"cargo run"* ]]
+      [[ "$cmd" == *"target/debug/fauni-search"* || "$cmd" == *"target/release/fauni-search"* || ( "$cmd" == *"target/debug/faus serve"* && "$cmd" != *"target/debug/faus serve model"* ) || ( "$cmd" == *"target/release/faus serve"* && "$cmd" != *"target/release/faus serve model"* ) || "$cmd" == *"cargo run"* ]]
+      ;;
+    modeld)
+      [[ "$cmd" == *"-m fauni_sidecar.modeld"* || "$cmd" == *"target/debug/faus serve model"* || "$cmd" == *"target/release/faus serve model"* ]]
       ;;
     sidecar)
-      [[ "$cmd" == *"-m fauni_sidecar"* ]]
+      [[ "$cmd" == *"-m fauni_sidecar"* && "$cmd" != *"-m fauni_sidecar.modeld"* ]]
       ;;
     ui)
       [[ "$cmd" == *"vite"* && "$cmd" == *"--port $UI_PORT"* ]]

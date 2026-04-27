@@ -519,6 +519,14 @@ pub(crate) fn sidecar_client() -> Client {
         .expect("sidecar client should be constructible")
 }
 
+pub(crate) fn sidecar_probe_client() -> Client {
+    Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("sidecar probe client should be constructible")
+}
+
 pub(crate) fn parse_sidecar_error_message(body: &str) -> Option<String> {
     serde_json::from_str::<SidecarErrorEnvelope>(body)
         .ok()
@@ -532,6 +540,7 @@ pub(crate) fn parse_sidecar_error_message(body: &str) -> Option<String> {
 
 pub(crate) async fn probe_local_sidecar_provider(
     _provider: &ProviderConfigRecord,
+    client: &Client,
 ) -> LocalSidecarProviderSnapshot {
     let now = current_rfc3339_timestamp();
     let fallback_runtime_model = crate::provider::fallback_local_sidecar_runtime_model();
@@ -552,15 +561,7 @@ pub(crate) async fn probe_local_sidecar_provider(
         }
     };
 
-    let response = match Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .expect("sidecar probe client should be constructible")
-        .get(format!("{base_url}/capabilities"))
-        .send()
-        .await
-    {
+    let response = match client.get(format!("{base_url}/capabilities")).send().await {
         Ok(response) => response,
         Err(error) => {
             return LocalSidecarProviderSnapshot {

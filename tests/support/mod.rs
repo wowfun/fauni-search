@@ -16,13 +16,17 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle, time::Duration};
 use tower::util::ServiceExt;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SIDECAR_CAPABILITIES_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 const TEST_ENV_KEYS: &[&str] = &[
     "APP_RUNTIME_DIR",
@@ -30,10 +34,13 @@ const TEST_ENV_KEYS: &[&str] = &[
     "APP_PORT",
     "SIDECAR_HOST",
     "SIDECAR_PORT",
+    "MODELD_HOST",
+    "MODELD_PORT",
     "QDRANT_URL",
     "FAUNI_ENV",
     "EMBEDDING_MODEL_ID",
     "EMBEDDING_MODEL_REVISION",
+    "EMBEDDING_MODEL_BACKEND",
     "FAUNI_TEST_SIDECAR_EMBED_DELAY_MS",
 ];
 
@@ -68,10 +75,13 @@ impl TestEnv {
         env::set_var("APP_PORT", "39010");
         env::set_var("SIDECAR_HOST", "127.0.0.1");
         env::set_var("SIDECAR_PORT", "39011");
+        env::set_var("MODELD_HOST", "127.0.0.1");
+        env::set_var("MODELD_PORT", "39012");
         env::set_var("QDRANT_URL", "http://127.0.0.1:63999");
         env::set_var("FAUNI_ENV", "test");
         env::set_var("EMBEDDING_MODEL_ID", "athrael-soju/colqwen3.5-4.5B-v3");
         env::set_var("EMBEDDING_MODEL_REVISION", "main");
+        env::set_var("EMBEDDING_MODEL_BACKEND", "colqwen3_5");
         let sidecar_stub = SidecarStub::start("127.0.0.1:39011").await;
         let qdrant_stub = if with_qdrant {
             Some(QdrantStub::start("127.0.0.1:63999").await)
@@ -93,6 +103,10 @@ impl TestEnv {
         TestApp {
             app: build_app(state),
         }
+    }
+
+    pub fn sidecar_capabilities_count(&self) -> usize {
+        SIDECAR_CAPABILITIES_COUNT.load(Ordering::SeqCst)
     }
 
     pub fn create_dir(&self, relative_path: &str) -> PathBuf {
@@ -388,6 +402,7 @@ struct SidecarStub {
 
 impl SidecarStub {
     async fn start(address: &str) -> Self {
+        SIDECAR_CAPABILITIES_COUNT.store(0, Ordering::SeqCst);
         let app = Router::new()
             .route("/capabilities", get(sidecar_capabilities))
             .route("/embed", post(sidecar_embed));
@@ -418,6 +433,7 @@ impl Drop for SidecarStub {
 }
 
 async fn sidecar_capabilities() -> impl IntoResponse {
+    SIDECAR_CAPABILITIES_COUNT.fetch_add(1, Ordering::SeqCst);
     Json(json!({
         "runtime_kind": "local_python",
         "status": "ok",

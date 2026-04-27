@@ -1,11 +1,19 @@
 use super::*;
 use crate::config::{
-    update_runtime_overlay_content_types, update_runtime_overlay_library_content_types,
-    update_runtime_overlay_provider_config, ContentTypeConfigRecord, ContentTypeOverrideRecord,
+    delete_runtime_overlay_content_type, delete_runtime_overlay_library_content_type,
+    delete_runtime_overlay_provider_config, delete_runtime_overlay_provider_model,
+    load_config_origin_snapshot, update_runtime_overlay_content_types,
+    update_runtime_overlay_library_content_types, upsert_runtime_overlay_content_type,
+    upsert_runtime_overlay_library_content_type, upsert_runtime_overlay_provider_config,
+    upsert_runtime_overlay_provider_model, ContentTypeConfigRecord, ContentTypeOverrideRecord,
+    ProviderConfigFileRecord, ProviderModelConfigRecord,
 };
 use crate::*;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+const PROVIDER_PROBE_STABLE_TTL_MS: u128 = 15_000;
+const PROVIDER_PROBE_FAILURE_TTL_MS: u128 = 5_000;
 
 impl AppState {
     pub(crate) fn list_provider_configs(&self) -> ProvidersListData {
@@ -140,30 +148,57 @@ impl AppState {
         provider_id: &str,
         request: UpdateProviderConfigRequest,
     ) -> Result<ProviderConfigSnapshot, ApiError> {
-        let existing = self
-            .provider_configs
+        let existing = self.provider_configs.get(provider_id).cloned();
+        let provider_models = self
+            .provider_models
             .get(provider_id)
             .cloned()
-            .ok_or_else(|| ApiError::not_found("Provider was not found."))?;
+            .unwrap_or_default();
+        let provider_kind = normalize_optional_string(request.provider_kind)
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|provider| provider.provider_kind.clone())
+            })
+            .unwrap_or_else(|| provider_id.to_string());
+        let display_name = normalize_optional_string(request.display_name)
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|provider| provider.display_name.clone())
+            })
+            .unwrap_or_else(|| provider_id.to_string());
+        let enabled = request.enabled.unwrap_or_else(|| {
+            existing
+                .as_ref()
+                .map(|provider| provider.enabled)
+                .unwrap_or(true)
+        });
+        let base_url = normalize_optional_string(request.base_url).or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|provider| provider.base_url.clone())
+        });
+        let active_model = normalize_optional_string(request.active_model)
+            .or_else(|| self.configured_active_model(provider_id))
+            .or_else(|| provider_models.keys().next().cloned());
 
-        if existing.provider_id == LOCAL_SIDECAR_PROVIDER_ID && request.base_url.is_some() {
-            return Err(ApiError::not_supported(
-                "local_sidecar connection details are derived from runtime env and cannot be edited here.",
-                Some(json!({ "provider_id": provider_id })),
-            ));
-        }
-
-        let base_url = normalize_optional_string(request.base_url).or(existing.base_url.clone());
-        let enabled = request.enabled.unwrap_or(existing.enabled);
+        let provider = ProviderConfigFileRecord {
+            kind: provider_kind,
+            display_name: Some(display_name),
+            enabled,
+            active_model,
+            base_url,
+            models: provider_models,
+        };
 
         let loaded =
-            update_runtime_overlay_provider_config(provider_id, enabled, base_url.as_deref())
-                .map_err(|error| {
-                    ApiError::runtime_unavailable(
-                        format!("Failed to write runtime config: {error}"),
-                        Some(json!({ "config": "runtime-config.json" })),
-                    )
-                })?;
+            upsert_runtime_overlay_provider_config(provider_id, &provider).map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to write runtime config: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
         self.apply_config_backed_model_state(&loaded.config)
             .map_err(|error| {
                 ApiError::runtime_unavailable(
@@ -180,43 +215,120 @@ impl AppState {
             .expect("updated provider config should be present"))
     }
 
-    pub(crate) async fn list_model_catalog(&mut self) -> ModelCatalogData {
-        if self
-            .provider_runtime_models
-            .get(LOCAL_SIDECAR_PROVIDER_ID)
-            .is_none()
-        {
-            self.refresh_provider_probe_snapshot(LOCAL_SIDECAR_PROVIDER_ID)
-                .await;
+    pub(crate) async fn delete_provider_config(
+        &mut self,
+        provider_id: &str,
+    ) -> Result<ProvidersListData, ApiError> {
+        let loaded = delete_runtime_overlay_provider_config(provider_id).map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Failed to write runtime config: {error}"),
+                Some(json!({ "config": "runtime-config.json" })),
+            )
+        })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        if self.provider_configs.contains_key(provider_id) {
+            self.refresh_provider_probe_snapshot(provider_id).await;
+        } else {
+            self.clear_provider_probe_state(provider_id);
         }
+        Ok(self.list_provider_configs())
+    }
 
-        let local_provider = self
-            .provider_configs
-            .get(LOCAL_SIDECAR_PROVIDER_ID)
-            .cloned()
-            .unwrap_or_else(|| {
-                default_provider_configs()
-                    .get(LOCAL_SIDECAR_PROVIDER_ID)
-                    .cloned()
-                    .expect("default local_sidecar provider should exist")
-            });
-        let runtime = self
-            .provider_runtime_models
-            .get(LOCAL_SIDECAR_PROVIDER_ID)
-            .cloned()
-            .unwrap_or_else(fallback_local_sidecar_runtime_model);
-        if self
-            .provider_probe_cache
-            .get(DASHSCOPE_PROVIDER_ID)
-            .is_none()
-        {
-            self.refresh_provider_probe_snapshot(DASHSCOPE_PROVIDER_ID)
-                .await;
+    pub(crate) async fn update_provider_model_config(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+        request: UpdateProviderModelConfigRequest,
+    ) -> Result<ProviderConfigSnapshot, ApiError> {
+        if !self.provider_configs.contains_key(provider_id) {
+            return Err(ApiError::not_found("Provider was not found."));
         }
-        let local_probe = self
-            .provider_probe_cache
-            .get(LOCAL_SIDECAR_PROVIDER_ID)
+        let existing = self
+            .provider_models
+            .get(provider_id)
+            .and_then(|models| models.get(model_id))
             .cloned();
+        let version = normalize_optional_string(request.version)
+            .or_else(|| existing.as_ref().map(|model| model.version.clone()))
+            .unwrap_or_else(default_model_version);
+        let backend = normalize_optional_string(request.backend)
+            .or_else(|| existing.as_ref().and_then(|model| model.backend.clone()));
+        let embedding_capabilities = request
+            .embedding_capabilities
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|model| model.embedding_capabilities.clone())
+            })
+            .unwrap_or_default();
+        let model = ProviderModelConfigRecord {
+            enabled: request
+                .enabled
+                .unwrap_or_else(|| existing.as_ref().map(|model| model.enabled).unwrap_or(true)),
+            version,
+            backend,
+            embedding_capabilities,
+        };
+        let loaded = upsert_runtime_overlay_provider_model(provider_id, model_id, &model).map_err(
+            |error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to write runtime config: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            },
+        )?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        self.refresh_provider_probe_snapshot(provider_id).await;
+        Ok(self
+            .provider_configs
+            .get(provider_id)
+            .map(|provider| self.provider_config_snapshot(provider))
+            .expect("updated provider config should be present"))
+    }
+
+    pub(crate) async fn delete_provider_model_config(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<ProviderConfigSnapshot, ApiError> {
+        let loaded =
+            delete_runtime_overlay_provider_model(provider_id, model_id).map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to write runtime config: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        self.refresh_provider_probe_snapshot(provider_id).await;
+        self.provider_configs
+            .get(provider_id)
+            .map(|provider| self.provider_config_snapshot(provider))
+            .ok_or_else(|| ApiError::not_found("Provider was not found."))
+    }
+
+    pub(crate) async fn list_model_catalog(&mut self) -> ModelCatalogData {
+        self.refresh_provider_probe_snapshot_if_stale(LOCAL_SIDECAR_PROVIDER_ID)
+            .await;
+        self.refresh_provider_probe_snapshot_if_stale(DASHSCOPE_PROVIDER_ID)
+            .await;
         let dashscope_provider = self
             .provider_configs
             .get(DASHSCOPE_PROVIDER_ID)
@@ -232,30 +344,48 @@ impl AppState {
             .get(DASHSCOPE_PROVIDER_ID)
             .cloned();
 
-        let runtime_model_id = runtime.model_id.clone();
-        let runtime_model_version =
-            self.configured_model_version(LOCAL_SIDECAR_PROVIDER_ID, &runtime_model_id);
-        let mut entries = vec![ModelCatalogEntry {
-            provider_id: LOCAL_SIDECAR_PROVIDER_ID.to_string(),
-            provider_kind: local_provider.provider_kind,
-            model_id: runtime.model_id,
-            model_version: runtime_model_version,
-            model_revision: runtime.model_revision,
-            embedding_capabilities: self
-                .provider_embedding_capabilities
-                .get(LOCAL_SIDECAR_PROVIDER_ID)
-                .cloned()
-                .unwrap_or_else(local_sidecar_embedding_capabilities),
-            editable: false,
-            status: local_probe
-                .as_ref()
-                .map(|item| item.status.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
-            message: local_probe
-                .as_ref()
-                .map(|item| item.message.clone())
-                .unwrap_or_else(|| "Model metadata is derived from the local runtime.".to_string()),
-        }];
+        let mut entries = Vec::new();
+        for (provider_id, models) in &self.provider_models {
+            let Some(provider) = self.provider_configs.get(provider_id) else {
+                continue;
+            };
+            let probe = self.provider_probe_cache.get(provider_id).cloned();
+            let runtime = self.provider_runtime_models.get(provider_id).cloned();
+            for (model_id, model) in models {
+                let status = if !provider.enabled || !model.enabled {
+                    "not_enabled".to_string()
+                } else {
+                    probe
+                        .as_ref()
+                        .map(|item| item.status.clone())
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+                let message = if !provider.enabled {
+                    format!("Provider {} is disabled.", provider.provider_id)
+                } else if !model.enabled {
+                    format!("Model {model_id} is disabled.")
+                } else {
+                    probe
+                        .as_ref()
+                        .map(|item| item.message.clone())
+                        .unwrap_or_else(|| "Model metadata is available from config.".to_string())
+                };
+                entries.push(ModelCatalogEntry {
+                    provider_id: provider_id.clone(),
+                    provider_kind: provider.provider_kind.clone(),
+                    model_id: model_id.clone(),
+                    model_version: model.version.clone(),
+                    model_revision: runtime
+                        .as_ref()
+                        .filter(|runtime| runtime.model_id == *model_id)
+                        .and_then(|runtime| runtime.model_revision.clone()),
+                    embedding_capabilities: model.embedding_capabilities.clone(),
+                    editable: true,
+                    status,
+                    message,
+                });
+            }
+        }
 
         let dashscope_status = if !dashscope_provider.enabled {
             "not_enabled".to_string()
@@ -275,6 +405,11 @@ impl AppState {
         };
 
         for model_id in dashscope_supported_content_model_ids() {
+            if entries.iter().any(|entry| {
+                entry.provider_id == DASHSCOPE_PROVIDER_ID && entry.model_id == *model_id
+            }) {
+                continue;
+            }
             entries.push(ModelCatalogEntry {
                 provider_id: DASHSCOPE_PROVIDER_ID.to_string(),
                 provider_kind: dashscope_provider.provider_kind.clone(),
@@ -292,6 +427,7 @@ impl AppState {
     }
 
     pub(crate) fn get_global_content_types(&self) -> GlobalContentTypesData {
+        let origins = load_config_origin_snapshot().unwrap_or_default();
         GlobalContentTypesData {
             content_types: ContentTypesPayload {
                 content_types: self
@@ -309,6 +445,12 @@ impl AppState {
                     })
                     .collect(),
             },
+            origins: content_type_origin_map(
+                self.global_content_types.keys(),
+                &origins.repo_content_types,
+                &origins.runtime_content_types,
+                false,
+            ),
         }
     }
 
@@ -340,6 +482,72 @@ impl AppState {
         Ok(self.get_global_content_types())
     }
 
+    pub(crate) async fn update_global_content_type(
+        &mut self,
+        content_type: &str,
+        binding: ContentTypeBindingPayload,
+    ) -> Result<GlobalContentTypesData, ApiError> {
+        validate_settings_content_type_key(content_type)?;
+        let normalized = normalize_content_type_binding(content_type, binding)?;
+        self.validate_content_type_binding(content_type, &normalized)?;
+        let config_binding = ContentTypeConfigRecord {
+            enabled: normalized.enabled,
+            model: normalized.model.clone(),
+            vector_type: normalized.vector_type.clone(),
+        };
+        let loaded = upsert_runtime_overlay_content_type(content_type, &config_binding).map_err(
+            |error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to write runtime config: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            },
+        )?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        for provider_id in referenced_content_type_provider_ids(&BTreeMap::from([(
+            content_type.to_string(),
+            normalized,
+        )])) {
+            self.refresh_provider_probe_snapshot(&provider_id).await;
+        }
+        Ok(self.get_global_content_types())
+    }
+
+    pub(crate) async fn delete_global_content_type(
+        &mut self,
+        content_type: &str,
+    ) -> Result<GlobalContentTypesData, ApiError> {
+        validate_settings_content_type_key(content_type)?;
+        let loaded = delete_runtime_overlay_content_type(content_type).map_err(|error| {
+            ApiError::runtime_unavailable(
+                format!("Failed to write runtime config: {error}"),
+                Some(json!({ "config": "runtime-config.json" })),
+            )
+        })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        let provider_id = self
+            .global_content_types
+            .get(content_type)
+            .and_then(|binding| split_model_reference(&binding.model))
+            .map(|(provider_id, _)| provider_id.to_string());
+        if let Some(provider_id) = provider_id {
+            self.refresh_provider_probe_snapshot(&provider_id).await;
+        }
+        Ok(self.get_global_content_types())
+    }
+
     pub(crate) fn get_library_content_types(
         &self,
         library_id: &str,
@@ -354,6 +562,25 @@ impl AppState {
                     &self.global_content_types,
                     &library.content_type_overrides,
                 ),
+            },
+            origins: {
+                let origins = load_config_origin_snapshot().unwrap_or_default();
+                let repo_keys = origins
+                    .repo_library_content_types
+                    .get(library_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let runtime_keys = origins
+                    .runtime_library_content_types
+                    .get(library_id)
+                    .cloned()
+                    .unwrap_or_default();
+                content_type_origin_map(
+                    self.global_content_types.keys(),
+                    &repo_keys,
+                    &runtime_keys,
+                    true,
+                )
             },
         })
     }
@@ -386,6 +613,87 @@ impl AppState {
             self.refresh_provider_probe_snapshot(&provider_id).await;
         }
 
+        self.get_library_content_types(library_id)
+    }
+
+    pub(crate) async fn update_library_content_type(
+        &mut self,
+        library_id: &str,
+        content_type: &str,
+        binding: ContentTypeBindingPayload,
+    ) -> Result<LibraryContentTypesData, ApiError> {
+        self.validate_library_exists(library_id)?;
+        validate_settings_content_type_key(content_type)?;
+        let normalized = normalize_content_type_binding(content_type, binding)?;
+        self.validate_content_type_binding(content_type, &normalized)?;
+        let override_record = ContentTypeOverrideRecord {
+            enabled: Some(normalized.enabled),
+            model: Some(normalized.model.clone()),
+            vector_type: Some(normalized.vector_type.clone()),
+        };
+        let loaded =
+            upsert_runtime_overlay_library_content_type(library_id, content_type, &override_record)
+                .map_err(|error| {
+                    ApiError::runtime_unavailable(
+                        format!("Failed to write runtime config: {error}"),
+                        Some(json!({ "config": "runtime-config.json" })),
+                    )
+                })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        for provider_id in referenced_content_type_provider_ids(&BTreeMap::from([(
+            content_type.to_string(),
+            normalized,
+        )])) {
+            self.refresh_provider_probe_snapshot(&provider_id).await;
+        }
+        self.get_library_content_types(library_id)
+    }
+
+    pub(crate) async fn delete_library_content_type(
+        &mut self,
+        library_id: &str,
+        content_type: &str,
+    ) -> Result<LibraryContentTypesData, ApiError> {
+        self.validate_library_exists(library_id)?;
+        validate_settings_content_type_key(content_type)?;
+        let loaded = delete_runtime_overlay_library_content_type(library_id, content_type)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to write runtime config: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        self.apply_config_backed_model_state(&loaded.config)
+            .map_err(|error| {
+                ApiError::runtime_unavailable(
+                    format!("Failed to reload merged config state: {error}"),
+                    Some(json!({ "config": "runtime-config.json" })),
+                )
+            })?;
+        let provider_id = self
+            .libraries
+            .get(library_id)
+            .map(|library| {
+                effective_library_content_type_bindings(
+                    &self.global_content_types,
+                    &library.content_type_overrides,
+                )
+            })
+            .and_then(|bindings| {
+                bindings
+                    .get(content_type)
+                    .and_then(|binding| split_model_reference(&binding.model))
+                    .map(|(provider_id, _)| provider_id.to_string())
+            });
+        if let Some(provider_id) = provider_id {
+            self.refresh_provider_probe_snapshot(&provider_id).await;
+        }
         self.get_library_content_types(library_id)
     }
 
@@ -650,14 +958,8 @@ impl AppState {
 
         match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
-                if self
-                    .provider_probe_cache
-                    .get(LOCAL_SIDECAR_PROVIDER_ID)
-                    .is_none()
-                {
-                    self.refresh_provider_probe_snapshot(LOCAL_SIDECAR_PROVIDER_ID)
-                        .await;
-                }
+                self.refresh_provider_probe_snapshot_if_stale(LOCAL_SIDECAR_PROVIDER_ID)
+                    .await;
                 let probe = self
                     .provider_probe_cache
                     .get(LOCAL_SIDECAR_PROVIDER_ID)
@@ -852,7 +1154,8 @@ impl AppState {
     pub(crate) async fn refresh_boot_provider_probe_cache(&mut self) {
         let provider_ids = self.provider_configs.keys().cloned().collect::<Vec<_>>();
         for provider_id in provider_ids {
-            self.refresh_provider_probe_snapshot(&provider_id).await;
+            self.refresh_provider_probe_snapshot_if_stale(&provider_id)
+                .await;
         }
     }
 
@@ -860,10 +1163,33 @@ impl AppState {
         &mut self,
         provider_id: &str,
     ) -> Option<ProviderProbeSnapshot> {
+        let checked_at_ms = current_unix_ms();
+        self.force_refresh_provider_probe_snapshot_at(provider_id, checked_at_ms)
+            .await
+    }
+
+    async fn refresh_provider_probe_snapshot_if_stale(
+        &mut self,
+        provider_id: &str,
+    ) -> Option<ProviderProbeSnapshot> {
+        let now_ms = current_unix_ms();
+        if self.provider_probe_cache_is_fresh(provider_id, now_ms) {
+            return self.provider_probe_cache.get(provider_id).cloned();
+        }
+        self.force_refresh_provider_probe_snapshot_at(provider_id, now_ms)
+            .await
+    }
+
+    async fn force_refresh_provider_probe_snapshot_at(
+        &mut self,
+        provider_id: &str,
+        checked_at_ms: u128,
+    ) -> Option<ProviderProbeSnapshot> {
         let provider = self.provider_configs.get(provider_id)?.clone();
         let (probe, runtime_model) = match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
-                let snapshot = probe_local_sidecar_provider(&provider).await;
+                let snapshot =
+                    probe_local_sidecar_provider(&provider, &self.provider_probe_client).await;
                 self.provider_embedding_capabilities.insert(
                     provider_id.to_string(),
                     snapshot.embedding_capabilities.clone(),
@@ -905,6 +1231,8 @@ impl AppState {
         };
         self.provider_probe_cache
             .insert(provider_id.to_string(), probe.clone());
+        self.provider_probe_checked_at_ms
+            .insert(provider_id.to_string(), checked_at_ms);
         if let Some(runtime_model) = runtime_model {
             self.provider_runtime_models
                 .insert(provider_id.to_string(), runtime_model);
@@ -912,16 +1240,75 @@ impl AppState {
         Some(probe)
     }
 
+    pub(super) fn provider_probe_cache_is_fresh(&self, provider_id: &str, now_ms: u128) -> bool {
+        let Some(probe) = self.provider_probe_cache.get(provider_id) else {
+            return false;
+        };
+        let Some(checked_at_ms) = self.provider_probe_checked_at_ms.get(provider_id) else {
+            return false;
+        };
+        now_ms.saturating_sub(*checked_at_ms) < provider_probe_ttl_ms(probe)
+    }
+
+    fn clear_provider_probe_state(&mut self, provider_id: &str) {
+        self.provider_probe_cache.remove(provider_id);
+        self.provider_probe_checked_at_ms.remove(provider_id);
+        self.provider_runtime_models.remove(provider_id);
+        self.provider_embedding_capabilities.remove(provider_id);
+        self.provider_execution_input_types.remove(provider_id);
+        self.provider_runtime_adapters.remove(provider_id);
+    }
+
     fn provider_config_snapshot(&self, provider: &ProviderConfigRecord) -> ProviderConfigSnapshot {
         let mut snapshot = provider.snapshot();
         if provider.provider_id == LOCAL_SIDECAR_PROVIDER_ID {
             snapshot.base_url = sidecar_base_url().ok();
         }
+        let origins = load_config_origin_snapshot().unwrap_or_default();
+        snapshot.origin = origin_label(
+            origins.repo_providers.contains(&provider.provider_id),
+            origins.runtime_providers.contains(&provider.provider_id),
+            false,
+        );
+        snapshot.active_model = self.configured_active_model(&provider.provider_id);
+        snapshot.models = self
+            .provider_models
+            .get(&provider.provider_id)
+            .map(|models| {
+                models
+                    .iter()
+                    .map(|(model_id, model)| ProviderModelConfigSnapshot {
+                        model_id: model_id.clone(),
+                        enabled: model.enabled,
+                        version: model.version.clone(),
+                        backend: model.backend.clone(),
+                        embedding_capabilities: model.embedding_capabilities.clone(),
+                        origin: origin_label(
+                            origins
+                                .repo_provider_models
+                                .get(&provider.provider_id)
+                                .map(|items| items.contains(model_id))
+                                .unwrap_or(false),
+                            origins
+                                .runtime_provider_models
+                                .get(&provider.provider_id)
+                                .map(|items| items.contains(model_id))
+                                .unwrap_or(false),
+                            false,
+                        ),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         snapshot.probe = self
             .provider_probe_cache
             .get(&provider.provider_id)
             .cloned();
         snapshot
+    }
+
+    fn configured_active_model(&self, provider_id: &str) -> Option<String> {
+        self.provider_active_models.get(provider_id).cloned()
     }
 
     fn validate_library_exists(&self, library_id: &str) -> Result<(), ApiError> {
@@ -979,12 +1366,14 @@ impl AppState {
             &format!("content_types.{content_type}.model"),
         )?;
 
-        let vector_types = if provider_id == LOCAL_SIDECAR_PROVIDER_ID {
-            self.provider_embedding_capabilities
-                .get(provider_id)
-                .cloned()
-                .unwrap_or_else(local_sidecar_embedding_capabilities)
-                .vector_types
+        let vector_types = if let Some(model) = self
+            .provider_models
+            .get(provider_id)
+            .and_then(|models| models.get(model_id))
+        {
+            model.embedding_capabilities.vector_types.clone()
+        } else if provider_id == LOCAL_SIDECAR_PROVIDER_ID {
+            local_sidecar_embedding_capabilities().vector_types
         } else if provider_id == DASHSCOPE_PROVIDER_ID {
             dashscope_embedding_capabilities(model_id).vector_types
         } else {
@@ -1017,17 +1406,19 @@ impl AppState {
     ) -> Result<(), ApiError> {
         match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
-                let runtime_model = self
-                    .provider_runtime_models
+                let configured_model = self
+                    .provider_models
                     .get(LOCAL_SIDECAR_PROVIDER_ID)
-                    .cloned()
-                    .unwrap_or_else(fallback_local_sidecar_runtime_model);
-                if selection.model_id != runtime_model.model_id {
+                    .and_then(|models| models.get(&selection.model_id));
+                if configured_model.is_none() {
                     return Err(ApiError::validation_failed(
-                        "local_sidecar model_id is derived from the active runtime and cannot be changed here.",
+                        "local_sidecar model_id is not configured in provider.local_sidecar.models.",
                         Some(json!({
                             "field": field,
-                            "expected": runtime_model.model_id,
+                            "supported": self.provider_models
+                                .get(LOCAL_SIDECAR_PROVIDER_ID)
+                                .map(|models| models.keys().cloned().collect::<Vec<_>>())
+                                .unwrap_or_default(),
                             "received": selection.model_id,
                         })),
                     ));
@@ -1112,19 +1503,27 @@ impl AppState {
 
         match provider.provider_id.as_str() {
             LOCAL_SIDECAR_PROVIDER_ID => {
-                if self
-                    .provider_probe_cache
-                    .get(&provider.provider_id)
-                    .is_none()
-                {
-                    self.refresh_provider_probe_snapshot(&provider.provider_id)
-                        .await;
-                }
+                self.refresh_provider_probe_snapshot_if_stale(&provider.provider_id)
+                    .await;
                 let runtime_model = self
                     .provider_runtime_models
                     .get(&provider.provider_id)
                     .cloned()
                     .unwrap_or_else(fallback_local_sidecar_runtime_model);
+                let model_config = self
+                    .provider_models
+                    .get(&provider.provider_id)
+                    .and_then(|models| models.get(&selection.model_id))
+                    .cloned();
+                let embedding_capabilities = model_config
+                    .as_ref()
+                    .map(|model| model.embedding_capabilities.clone())
+                    .unwrap_or_else(local_sidecar_embedding_capabilities);
+                let model_revision = if runtime_model.model_id == selection.model_id {
+                    runtime_model.model_revision.clone()
+                } else {
+                    Some(self.configured_model_version(&provider.provider_id, &selection.model_id))
+                };
                 let probe = self
                     .provider_probe_cache
                     .get(&provider.provider_id)
@@ -1135,17 +1534,13 @@ impl AppState {
                             binding_source: binding_source.to_string(),
                             provider_id: provider.provider_id.clone(),
                             provider_kind: provider.provider_kind.clone(),
-                            model_id: runtime_model.model_id,
+                            model_id: selection.model_id.clone(),
                             model_version: self.configured_model_version(
                                 &provider.provider_id,
                                 &selection.model_id,
                             ),
-                            model_revision: runtime_model.model_revision,
-                            embedding_capabilities: self
-                                .provider_embedding_capabilities
-                                .get(&provider.provider_id)
-                                .cloned()
-                                .unwrap_or_else(local_sidecar_embedding_capabilities),
+                            model_revision,
+                            embedding_capabilities,
                             status: probe.status.clone(),
                             message: probe.message.clone(),
                             last_probed_at: probe.last_probed_at.clone(),
@@ -1157,17 +1552,11 @@ impl AppState {
                     binding_source: binding_source.to_string(),
                     provider_id: provider.provider_id.clone(),
                     provider_kind: provider.provider_kind.clone(),
-                    model_id: runtime_model.model_id,
-                    model_version: self.configured_model_version(
-                        &provider.provider_id,
-                        &selection.model_id,
-                    ),
-                    model_revision: runtime_model.model_revision,
-                    embedding_capabilities: self
-                        .provider_embedding_capabilities
-                        .get(&provider.provider_id)
-                        .cloned()
-                        .unwrap_or_else(local_sidecar_embedding_capabilities),
+                    model_id: selection.model_id.clone(),
+                    model_version: self
+                        .configured_model_version(&provider.provider_id, &selection.model_id),
+                    model_revision,
+                    embedding_capabilities,
                     status: "available".to_string(),
                     message: format!(
                         "Resolved runtime-bound model for target={selection_target} via local_sidecar."
@@ -1255,12 +1644,83 @@ fn normalize_content_types_payload(
 ) -> Result<ContentTypesPayload, ApiError> {
     let mut content_types = BTreeMap::new();
     for (content_type, binding) in payload.content_types {
+        validate_settings_content_type_key(&content_type)?;
         content_types.insert(
             content_type.clone(),
             normalize_content_type_binding(&content_type, binding)?,
         );
     }
     Ok(ContentTypesPayload { content_types })
+}
+
+fn validate_settings_content_type_key(content_type: &str) -> Result<(), ApiError> {
+    if [
+        QUERY_KIND_IMAGE,
+        QUERY_KIND_DOCUMENT,
+        QUERY_KIND_VIDEO,
+        QUERY_KIND_TEXT,
+    ]
+    .contains(&content_type)
+    {
+        return Ok(());
+    }
+    Err(ApiError::validation_failed(
+        "content_type is not supported by Settings runtime config CRUD.",
+        Some(json!({
+            "field": "content_type",
+            "received": content_type,
+            "supported": [
+                QUERY_KIND_IMAGE,
+                QUERY_KIND_DOCUMENT,
+                QUERY_KIND_VIDEO,
+                QUERY_KIND_TEXT,
+            ],
+        })),
+    ))
+}
+
+fn provider_probe_ttl_ms(probe: &ProviderProbeSnapshot) -> u128 {
+    if probe.status == "runtime_unavailable" {
+        PROVIDER_PROBE_FAILURE_TTL_MS
+    } else {
+        PROVIDER_PROBE_STABLE_TTL_MS
+    }
+}
+
+fn origin_label(repo_has_value: bool, runtime_has_value: bool, inherited: bool) -> String {
+    if runtime_has_value {
+        "runtime_overlay".to_string()
+    } else if inherited {
+        "inherited".to_string()
+    } else if repo_has_value {
+        "baseline".to_string()
+    } else {
+        "builtin".to_string()
+    }
+}
+
+fn content_type_origin_map<'a>(
+    keys: impl Iterator<Item = &'a String>,
+    repo_keys: &BTreeSet<String>,
+    runtime_keys: &BTreeSet<String>,
+    inherited_when_absent: bool,
+) -> BTreeMap<String, ContentTypeOriginSnapshot> {
+    keys.map(|content_type| {
+        let runtime_has_value = runtime_keys.contains(content_type);
+        let repo_has_value = repo_keys.contains(content_type);
+        (
+            content_type.clone(),
+            ContentTypeOriginSnapshot {
+                origin: origin_label(
+                    repo_has_value,
+                    runtime_has_value,
+                    inherited_when_absent && !runtime_has_value && !repo_has_value,
+                ),
+                has_runtime_overlay: runtime_has_value,
+            },
+        )
+    })
+    .collect()
 }
 
 fn normalize_content_type_binding(

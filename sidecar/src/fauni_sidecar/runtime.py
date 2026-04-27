@@ -7,6 +7,7 @@ import json
 import subprocess
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,19 +21,44 @@ class EmbeddingRuntime(Protocol):
     def capabilities_snapshot(self) -> dict[str, Any]:
         ...
 
-    def embed_queries(self, queries: list[str], debug: bool = False) -> dict[str, Any]:
+    def embed_queries(
+        self,
+        queries: list[str],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ...
 
-    def embed_image_queries(self, images: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+    def embed_image_queries(
+        self,
+        images: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ...
 
-    def embed_video_queries(self, videos: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+    def embed_video_queries(
+        self,
+        videos: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ...
 
-    def embed_document_queries(self, documents: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+    def embed_document_queries(
+        self,
+        documents: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ...
 
-    def embed_documents(self, documents: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+    def embed_documents(
+        self,
+        documents: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ...
 
 
@@ -41,6 +67,15 @@ class RuntimeLoadState:
     loaded_at: str | None = None
     last_load_ms: float | None = None
     load_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalSidecarModelConfig:
+    model_id: str
+    version: str
+    backend: str
+    enabled: bool
+    embedding_capabilities: dict[str, Any]
 
 
 class ColQwenRuntime:
@@ -164,7 +199,12 @@ class ColQwenRuntime:
             ],
         }
 
-    def embed_queries(self, queries: list[str], debug: bool = False) -> dict[str, Any]:
+    def embed_queries(
+        self,
+        queries: list[str],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         model, processor = self._ensure_loaded()
 
         import torch
@@ -208,7 +248,12 @@ class ColQwenRuntime:
 
         return payload
 
-    def embed_image_queries(self, images: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+    def embed_image_queries(
+        self,
+        images: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         model, processor = self._ensure_loaded()
 
         import torch
@@ -258,7 +303,12 @@ class ColQwenRuntime:
 
         return payload
 
-    def embed_video_queries(self, videos: list[dict[str, Any]], debug: bool = False) -> dict[str, Any]:
+    def embed_video_queries(
+        self,
+        videos: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         model, processor = self._ensure_loaded()
 
         import torch
@@ -319,7 +369,10 @@ class ColQwenRuntime:
         return payload
 
     def embed_document_queries(
-        self, documents: list[dict[str, Any]], debug: bool = False
+        self,
+        documents: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         model, processor = self._ensure_loaded()
 
@@ -381,7 +434,10 @@ class ColQwenRuntime:
         return payload
 
     def embed_documents(
-        self, documents: list[dict[str, Any]], debug: bool = False
+        self,
+        documents: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         model, processor = self._ensure_loaded()
 
@@ -498,7 +554,7 @@ class ColQwenRuntime:
         return {
             "model_id": self.model_id,
             "revision": self.model_revision,
-            "backend": "colqwen3.5",
+            "backend": "colqwen3_5",
             "loaded": loaded,
             "device": device,
             "dtype": dtype,
@@ -528,11 +584,621 @@ class ColQwenRuntime:
         }
 
 
+class Qwen3VlEmbeddingRuntime:
+    def __init__(
+        self,
+        model_id: str,
+        model_revision: str,
+        *,
+        torch_dtype: str = "bfloat16",
+        attn_implementation: str | None = None,
+        default_instruction: str = "Represent the user's input.",
+    ) -> None:
+        self.model_id = model_id
+        self.model_revision = model_revision
+        self.torch_dtype = torch_dtype
+        self.attn_implementation = attn_implementation
+        self.default_instruction = default_instruction
+
+        self._load_lock = threading.Lock()
+        self._model: Any | None = None
+        self._processor: Any | None = None
+        self._load_state = RuntimeLoadState()
+
+    def health_snapshot(self) -> dict[str, Any]:
+        probe_at = utc_now()
+        torch_state = self._torch_state()
+        dependency_state = self._dependency_state()
+
+        status = "ok"
+        if (
+            not dependency_state["torch_available"]
+            or not dependency_state["transformers_available"]
+            or not dependency_state["qwen_vl_utils_available"]
+            or not torch_state["cuda_available"]
+        ):
+            status = "degraded"
+        if self._load_state.load_error is not None:
+            status = "degraded"
+
+        return {
+            "runtime_kind": "local_python",
+            "status": status,
+            "last_probe_at": probe_at,
+            "diagnostics": {
+                "model_id": self.model_id,
+                "model_revision": self.model_revision,
+                "model_loaded": self._model is not None,
+                "backend": "qwen3_vl_embedding",
+                "torch_dtype": self.torch_dtype,
+                "attn_implementation": self.attn_implementation,
+                "hf_endpoint": os.environ.get("HF_ENDPOINT"),
+                "hf_transfer_enabled": os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "0") == "1",
+                "dependencies": dependency_state,
+                "torch": torch_state,
+                "load_state": {
+                    "loaded_at": self._load_state.loaded_at,
+                    "last_load_ms": self._load_state.last_load_ms,
+                    "load_error": self._load_state.load_error,
+                },
+            },
+        }
+
+    def capabilities_snapshot(self) -> dict[str, Any]:
+        health = self.health_snapshot()
+        diagnostics = health["diagnostics"]
+        dependencies = diagnostics["dependencies"]
+        torch_state = diagnostics["torch"]
+        can_service = bool(
+            dependencies["torch_available"]
+            and dependencies["transformers_available"]
+            and dependencies["qwen_vl_utils_available"]
+            and torch_state["cuda_available"]
+        )
+
+        return {
+            "runtime_kind": "local_python",
+            "status": health["status"],
+            "availability": {
+                "can_service": can_service,
+                "model_loaded": diagnostics["model_loaded"],
+                "load_error": diagnostics["load_state"]["load_error"],
+            },
+            "embedding_capabilities": {
+                "input_types": ["text", "image", "video"],
+                "vector_types": ["single_vector"],
+                "supports_mixed_inputs": True,
+            },
+            "execution_input_types": ["text", "image", "document", "video"],
+            "runtime_adapters": [
+                "document_query_via_page_images",
+                "video_query_via_frame_images",
+            ],
+            "operations": [
+                {
+                    "operation_kind": operation_kind,
+                    "supported": can_service,
+                    "input_kind": input_kind,
+                    "model": self._model_metadata(),
+                }
+                for operation_kind, input_kind in [
+                    ("query_embedding", "text"),
+                    ("image_query_embedding", "local_file"),
+                    ("video_query_embedding", "local_file"),
+                    ("document_query_embedding", "local_file"),
+                    ("document_embedding", "local_file"),
+                ]
+            ],
+        }
+
+    def embed_queries(
+        self,
+        queries: list[str],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        vectors = self._embed_inputs([{"text": query} for query in queries])
+        items = [
+            self._single_vector_item(index, vector, text=text)
+            for index, (text, vector) in enumerate(zip(queries, vectors))
+        ]
+        return self._embedding_payload("query_embedding", items, started_at, debug)
+
+    def embed_image_queries(
+        self,
+        images: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        qwen_inputs = []
+        metadata = []
+        for image_input in images:
+            image, source_type, kind, locator = load_query_input_image(image_input)
+            qwen_inputs.append({"image": image})
+            metadata.append((image_input["path"], source_type, kind, locator))
+        vectors = self._embed_inputs(qwen_inputs)
+        items = [
+            self._single_vector_item(
+                index,
+                vector,
+                path=path,
+                source_type=source_type,
+                kind=kind,
+                locator=locator,
+            )
+            for index, (vector, (path, source_type, kind, locator)) in enumerate(
+                zip(vectors, metadata)
+            )
+        ]
+        return self._embedding_payload("image_query_embedding", items, started_at, debug)
+
+    def embed_video_queries(
+        self,
+        videos: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        qwen_inputs = []
+        metadata = []
+        for video_input in videos:
+            frames, source_type, kind, locator = load_query_input_video(video_input)
+            qwen_inputs.append({"video": frames})
+            metadata.append((video_input["path"], source_type, kind, locator, len(frames)))
+        vectors = self._embed_inputs(qwen_inputs)
+        items = []
+        for index, (vector, (path, source_type, kind, locator, frame_count)) in enumerate(
+            zip(vectors, metadata)
+        ):
+            item = self._single_vector_item(
+                index,
+                vector,
+                path=path,
+                source_type=source_type,
+                kind=kind,
+                locator=locator,
+            )
+            item["frame_count"] = frame_count
+            items.append(item)
+        return self._embedding_payload("video_query_embedding", items, started_at, debug)
+
+    def embed_document_queries(
+        self,
+        documents: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        qwen_inputs = []
+        metadata = []
+        for document in documents:
+            pages, locator = load_document_query_pages(document)
+            qwen_inputs.append({"image": pages})
+            metadata.append((document["path"], locator, len(pages)))
+        vectors = self._embed_inputs(qwen_inputs)
+        items = []
+        for index, (vector, (path, locator, page_count)) in enumerate(zip(vectors, metadata)):
+            item = self._single_vector_item(
+                index,
+                vector,
+                path=path,
+                source_type="pdf",
+                kind="document",
+                locator=locator,
+            )
+            item["page_count"] = page_count
+            items.append(item)
+        return self._embedding_payload("document_query_embedding", items, started_at, debug)
+
+    def embed_documents(
+        self,
+        documents: list[dict[str, Any]],
+        debug: bool = False,
+        provider_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        qwen_inputs = []
+        metadata = []
+        for document in documents:
+            image, source_type, kind, locator = load_document_image(document)
+            qwen_inputs.append({"image": image})
+            metadata.append((document["path"], source_type, kind, locator))
+        vectors = self._embed_inputs(qwen_inputs)
+        items = [
+            self._single_vector_item(
+                index,
+                vector,
+                path=path,
+                source_type=source_type,
+                kind=kind,
+                locator=locator,
+            )
+            for index, (vector, (path, source_type, kind, locator)) in enumerate(
+                zip(vectors, metadata)
+            )
+        ]
+        return self._embedding_payload("document_embedding", items, started_at, debug)
+
+    def _embed_inputs(self, inputs: list[dict[str, Any]]) -> list[list[float]]:
+        model, processor = self._ensure_loaded()
+
+        import torch
+        import torch.nn.functional as F
+        from qwen_vl_utils.vision_process import process_vision_info
+
+        conversations = [
+            self._format_model_input(
+                text=item.get("text"),
+                image=item.get("image"),
+                video=item.get("video"),
+                instruction=item.get("instruction"),
+            )
+            for item in inputs
+        ]
+        text = processor.apply_chat_template(
+            conversations,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        images, video_inputs, video_kwargs = process_vision_info(
+            conversations,
+            image_patch_size=16,
+            return_video_metadata=True,
+            return_video_kwargs=True,
+        )
+        if video_inputs is not None:
+            videos, video_metadata = zip(*video_inputs)
+            videos = list(videos)
+            video_metadata = list(video_metadata)
+        else:
+            videos = None
+            video_metadata = None
+
+        processed_inputs = processor(
+            text=text,
+            images=images,
+            videos=videos,
+            video_metadata=video_metadata,
+            truncation=True,
+            max_length=8192,
+            padding=True,
+            do_resize=False,
+            return_tensors="pt",
+            **video_kwargs,
+        )
+        processed_inputs = {
+            key: value.to(self._model_device(model))
+            for key, value in processed_inputs.items()
+        }
+
+        with torch.inference_mode():
+            outputs = model(**processed_inputs)
+            embeddings = self._pooling_last(
+                outputs.last_hidden_state,
+                processed_inputs["attention_mask"],
+            )
+            embeddings = F.normalize(embeddings, p=2, dim=-1)
+
+        return embeddings.to(torch.float32).cpu().tolist()
+
+    def _ensure_loaded(self) -> tuple[Any, Any]:
+        if self._model is not None and self._processor is not None:
+            return self._model, self._processor
+
+        with self._load_lock:
+            if self._model is not None and self._processor is not None:
+                return self._model, self._processor
+
+            dependencies = self._dependency_state()
+            missing = [
+                name
+                for name, available in dependencies.items()
+                if not available
+            ]
+            if missing:
+                message = f"Qwen3-VL embedding dependencies are unavailable: {', '.join(missing)}."
+                self._load_state.load_error = message
+                raise RuntimeError(message)
+
+            import torch
+            from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+                Qwen3VLConfig,
+                Qwen3VLModel,
+                Qwen3VLPreTrainedModel,
+            )
+            from transformers.models.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
+            from transformers.modeling_outputs import ModelOutput
+
+            if not torch.cuda.is_available():
+                message = "CUDA is unavailable in the current GPU environment."
+                self._load_state.load_error = message
+                raise RuntimeError(message)
+
+            @dataclass
+            class Qwen3VLForEmbeddingOutput(ModelOutput):
+                last_hidden_state: Any | None = None
+
+            class Qwen3VLForEmbedding(Qwen3VLPreTrainedModel):
+                _checkpoint_conversion_mapping = {}
+                accepts_loss_kwargs = False
+
+                def __init__(self, config: Qwen3VLConfig) -> None:
+                    super().__init__(config)
+                    self.model = Qwen3VLModel(config)
+                    self.post_init()
+
+                def get_input_embeddings(self) -> Any:
+                    return self.model.get_input_embeddings()
+
+                def set_input_embeddings(self, value: Any) -> None:
+                    self.model.set_input_embeddings(value)
+
+                def set_decoder(self, decoder: Any) -> None:
+                    self.model.set_decoder(decoder)
+
+                def get_decoder(self) -> Any:
+                    return self.model.get_decoder()
+
+                def get_video_features(self, pixel_values_videos: Any, video_grid_thw: Any = None) -> Any:
+                    return self.model.get_video_features(pixel_values_videos, video_grid_thw)
+
+                def get_image_features(self, pixel_values: Any, image_grid_thw: Any = None) -> Any:
+                    return self.model.get_image_features(pixel_values, image_grid_thw)
+
+                @property
+                def language_model(self) -> Any:
+                    return self.model.language_model
+
+                @property
+                def visual(self) -> Any:
+                    return self.model.visual
+
+                def forward(self, **kwargs: Any) -> Any:
+                    outputs = self.model(**kwargs)
+                    return Qwen3VLForEmbeddingOutput(last_hidden_state=outputs.last_hidden_state)
+
+            dtype = getattr(torch, self.torch_dtype)
+            started_at = time.perf_counter()
+            try:
+                model_kwargs: dict[str, Any] = {
+                    "revision": self.model_revision,
+                    "trust_remote_code": True,
+                    "torch_dtype": dtype,
+                }
+                if self.attn_implementation:
+                    model_kwargs["attn_implementation"] = self.attn_implementation
+                model = Qwen3VLForEmbedding.from_pretrained(
+                    self.model_id,
+                    **model_kwargs,
+                ).to("cuda")
+                processor = Qwen3VLProcessor.from_pretrained(
+                    self.model_id,
+                    revision=self.model_revision,
+                    padding_side="right",
+                )
+                model.eval()
+            except Exception as exc:  # pragma: no cover - exercised in runtime smoke.
+                self._load_state.load_error = f"{type(exc).__name__}: {exc}"
+                raise
+
+            self._model = model
+            self._processor = processor
+            self._load_state.load_error = None
+            self._load_state.loaded_at = utc_now()
+            self._load_state.last_load_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            return model, processor
+
+    def _format_model_input(
+        self,
+        *,
+        text: Any = None,
+        image: Any = None,
+        video: Any = None,
+        instruction: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if instruction:
+            instruction = instruction.strip()
+            if instruction and not unicodedata.category(instruction[-1]).startswith("P"):
+                instruction = f"{instruction}."
+
+        content: list[dict[str, Any]] = []
+        conversation = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": instruction or self.default_instruction}],
+            },
+            {"role": "user", "content": content},
+        ]
+
+        texts = [] if text is None else ([text] if isinstance(text, str) else list(text))
+        images = [] if image is None else (image if isinstance(image, list) else [image])
+        videos = [] if video is None else (video if self._is_video_collection(video) else [video])
+
+        if not texts and not images and not videos:
+            content.append({"type": "text", "text": "NULL"})
+            return conversation
+
+        for item in videos:
+            content.append({"type": "video", "video": item, "total_pixels": 10 * 768 * 32 * 32})
+        for item in images:
+            content.append({"type": "image", "image": item, "min_pixels": 4 * 32 * 32, "max_pixels": 1800 * 32 * 32})
+        for item in texts:
+            content.append({"type": "text", "text": item})
+        return conversation
+
+    def _is_video_collection(self, value: Any) -> bool:
+        if isinstance(value, list) and value:
+            first = value[0]
+            return not isinstance(first, (str, bytes)) and not hasattr(first, "mode")
+        return False
+
+    def _single_vector_item(self, index: int, vector: list[float], **metadata: Any) -> dict[str, Any]:
+        item = {
+            "index": index,
+            "vector_count": 1,
+            "dim": len(vector),
+            "vectors": [vector],
+            "pooled_vector": vector,
+        }
+        item.update({key: value for key, value in metadata.items() if value is not None})
+        return item
+
+    def _embedding_payload(
+        self,
+        operation_kind: str,
+        items: list[dict[str, Any]],
+        started_at: float,
+        debug: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "operation_kind": operation_kind,
+            "model": self._model_metadata(loaded=True),
+            "embeddings": items,
+        }
+        if debug:
+            payload["debug"] = {
+                "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                "loaded_at": self._load_state.loaded_at,
+                "last_load_ms": self._load_state.last_load_ms,
+            }
+        return payload
+
+    def _dependency_state(self) -> dict[str, bool]:
+        return {
+            "torch_available": module_available("torch"),
+            "transformers_available": module_available("transformers"),
+            "qwen_vl_utils_available": module_available("qwen_vl_utils"),
+        }
+
+    def _model_metadata(self, *, loaded: bool | None = None) -> dict[str, Any]:
+        if loaded is None:
+            loaded = self._model is not None
+
+        device = None
+        dtype = None
+        if self._model is not None:
+            device = str(self._model_device(self._model))
+            dtype = str(self._model_dtype(self._model))
+
+        return {
+            "model_id": self.model_id,
+            "revision": self.model_revision,
+            "backend": "qwen3_vl_embedding",
+            "loaded": loaded,
+            "device": device,
+            "dtype": dtype,
+        }
+
+    def _torch_state(self) -> dict[str, Any]:
+        if not module_available("torch"):
+            return {
+                "cuda_available": False,
+                "device_count": 0,
+                "device_name": None,
+                "version": None,
+                "cuda_version": None,
+            }
+
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+        device_count = torch.cuda.device_count() if cuda_available else 0
+        device_name = torch.cuda.get_device_name(0) if cuda_available and device_count > 0 else None
+        return {
+            "cuda_available": cuda_available,
+            "device_count": device_count,
+            "device_name": device_name,
+            "version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+        }
+
+    @staticmethod
+    def _pooling_last(hidden_state: Any, attention_mask: Any) -> Any:
+        import torch
+
+        flipped_tensor = attention_mask.flip(dims=[1])
+        last_one_positions = flipped_tensor.argmax(dim=1)
+        col = attention_mask.shape[1] - last_one_positions - 1
+        row = torch.arange(hidden_state.shape[0], device=hidden_state.device)
+        return hidden_state[row, col]
+
+    @staticmethod
+    def _model_device(model: Any) -> Any:
+        try:
+            return next(model.parameters()).device
+        except StopIteration:
+            return "unknown"
+
+    @staticmethod
+    def _model_dtype(model: Any) -> Any:
+        try:
+            return next(model.parameters()).dtype
+        except StopIteration:
+            return "unknown"
+
+
 def module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def resolve_local_sidecar_model_from_runtime_config() -> tuple[str, str]:
+def resolve_local_sidecar_model_config_from_runtime_config(
+    selected_model_id: str | None = None,
+) -> LocalSidecarModelConfig:
+    config_path = os.environ.get("FAUNI_CONFIG_PATH")
+    repo_path = Path(config_path) if config_path else Path.cwd() / "fauni.config.json"
+    runtime_dir = os.environ.get("APP_RUNTIME_DIR")
+    if not runtime_dir:
+        raise RuntimeError(
+            "Missing required environment variable APP_RUNTIME_DIR; source .env or use scripts/local/run.sh"
+        )
+
+    repo_config = load_json_config(repo_path, required=True)
+    runtime_config = load_json_config(Path(runtime_dir) / "runtime-config.json", required=False)
+    merged = deep_merge_config(repo_config, runtime_config)
+    providers = merged.get("provider")
+    if not isinstance(providers, dict):
+        raise RuntimeError("Fauni config must define provider.local_sidecar.")
+    provider = providers.get("local_sidecar")
+    if not isinstance(provider, dict):
+        raise RuntimeError("Fauni config must define provider.local_sidecar.")
+    model_id = (
+        selected_model_id.strip()
+        if selected_model_id is not None
+        else str(provider.get("active_model", "")).strip()
+    )
+    if not model_id:
+        raise RuntimeError("provider.local_sidecar.active_model must be a non-empty string.")
+    models = provider.get("models")
+    if not isinstance(models, dict):
+        raise RuntimeError("provider.local_sidecar.models must be an object.")
+    model = models.get(model_id)
+    if not isinstance(model, dict):
+        raise RuntimeError(
+            f"provider.local_sidecar.models does not define model {model_id}."
+        )
+    if not bool(model.get("enabled", True)):
+        raise RuntimeError(f"provider.local_sidecar.models.{model_id} is disabled.")
+    version = str(model.get("version", "main")).strip() or "main"
+    backend = str(model.get("backend", "colqwen3_5")).strip() or "colqwen3_5"
+    if backend not in {"colqwen3_5", "qwen3_vl_embedding"}:
+        raise RuntimeError(
+            f"provider.local_sidecar.models.{model_id}.backend is not supported: {backend}."
+        )
+    embedding_capabilities = model.get("embedding_capabilities")
+    if not isinstance(embedding_capabilities, dict):
+        embedding_capabilities = {}
+    return LocalSidecarModelConfig(
+        model_id=model_id,
+        version=version,
+        backend=backend,
+        enabled=True,
+        embedding_capabilities=embedding_capabilities,
+    )
+
+
+def list_local_sidecar_model_configs_from_runtime_config() -> tuple[str, dict[str, LocalSidecarModelConfig]]:
     config_path = os.environ.get("FAUNI_CONFIG_PATH")
     repo_path = Path(config_path) if config_path else Path.cwd() / "fauni.config.json"
     runtime_dir = os.environ.get("APP_RUNTIME_DIR")
@@ -556,13 +1222,30 @@ def resolve_local_sidecar_model_from_runtime_config() -> tuple[str, str]:
     models = provider.get("models")
     if not isinstance(models, dict):
         raise RuntimeError("provider.local_sidecar.models must be an object.")
-    model = models.get(active_model)
-    if not isinstance(model, dict):
-        raise RuntimeError(
-            f"provider.local_sidecar.active_model points to missing model {active_model}."
+
+    resolved = {}
+    for model_id, model in models.items():
+        if not isinstance(model, dict):
+            continue
+        enabled = bool(model.get("enabled", True))
+        version = str(model.get("version", "main")).strip() or "main"
+        backend = str(model.get("backend", "colqwen3_5")).strip() or "colqwen3_5"
+        embedding_capabilities = model.get("embedding_capabilities")
+        if not isinstance(embedding_capabilities, dict):
+            embedding_capabilities = {}
+        resolved[str(model_id)] = LocalSidecarModelConfig(
+            model_id=str(model_id),
+            version=version,
+            backend=backend,
+            enabled=enabled,
+            embedding_capabilities=embedding_capabilities,
         )
-    version = str(model.get("version", "main")).strip() or "main"
-    return active_model, version
+    return active_model, resolved
+
+
+def resolve_local_sidecar_model_from_runtime_config() -> tuple[str, str]:
+    model = resolve_local_sidecar_model_config_from_runtime_config()
+    return model.model_id, model.version
 
 
 def load_json_config(path: Path, *, required: bool) -> dict[str, Any]:

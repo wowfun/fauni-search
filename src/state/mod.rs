@@ -46,8 +46,11 @@ pub struct AppState {
     next_temp_asset_seq: u64,
     provider_configs: BTreeMap<String, ProviderConfigRecord>,
     provider_models: BTreeMap<String, BTreeMap<String, ProviderModelConfigRecord>>,
+    provider_active_models: BTreeMap<String, String>,
     global_content_types: BTreeMap<String, ContentTypeConfigRecord>,
     provider_probe_cache: BTreeMap<String, ProviderProbeSnapshot>,
+    provider_probe_checked_at_ms: BTreeMap<String, u128>,
+    provider_probe_client: reqwest::Client,
     provider_runtime_models: BTreeMap<String, ProviderRuntimeModelSnapshot>,
     provider_embedding_capabilities: BTreeMap<String, EmbeddingCapabilities>,
     provider_execution_input_types: BTreeMap<String, Vec<String>>,
@@ -70,8 +73,11 @@ impl Default for AppState {
             next_temp_asset_seq: 0,
             provider_configs: default_provider_configs(),
             provider_models: BTreeMap::new(),
+            provider_active_models: BTreeMap::new(),
             global_content_types: BTreeMap::new(),
             provider_probe_cache: BTreeMap::new(),
+            provider_probe_checked_at_ms: BTreeMap::new(),
+            provider_probe_client: crate::sidecar::sidecar_probe_client(),
             provider_runtime_models: BTreeMap::new(),
             provider_embedding_capabilities: BTreeMap::new(),
             provider_execution_input_types: BTreeMap::new(),
@@ -274,27 +280,72 @@ impl AppState {
         let mut durable_changed = false;
         let mut provider_configs = default_provider_configs();
         for (provider_id, provider) in &config.provider {
-            let Some(existing) = provider_configs.get_mut(provider_id) else {
-                continue;
+            let default = provider_configs.get(provider_id).cloned();
+            let provider_kind = provider
+                .kind
+                .trim()
+                .to_string()
+                .is_empty()
+                .then(|| default.as_ref().map(|record| record.provider_kind.clone()))
+                .flatten()
+                .unwrap_or_else(|| provider.kind.trim().to_string());
+            let provider_kind = if provider_kind.is_empty() {
+                provider_id.clone()
+            } else {
+                provider_kind
             };
-            existing.enabled = provider.enabled;
             if let Some(display_name) = provider
                 .display_name
                 .as_ref()
                 .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
             {
-                existing.display_name = display_name.to_string();
+                provider_configs
+                    .entry(provider_id.clone())
+                    .and_modify(|existing| {
+                        existing.display_name = display_name.to_string();
+                    })
+                    .or_insert_with(|| ProviderConfigRecord {
+                        provider_id: provider_id.clone(),
+                        display_name: display_name.to_string(),
+                        provider_kind: provider_kind.clone(),
+                        enabled: provider.enabled,
+                        base_url: provider.base_url.clone(),
+                        readonly_reason: None,
+                    });
             }
-            if provider_id == DASHSCOPE_PROVIDER_ID {
-                existing.base_url = provider.base_url.clone();
-            }
+            let existing = provider_configs
+                .entry(provider_id.clone())
+                .or_insert_with(|| ProviderConfigRecord {
+                    provider_id: provider_id.clone(),
+                    display_name: provider
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| provider_id.clone()),
+                    provider_kind: provider_kind.clone(),
+                    enabled: provider.enabled,
+                    base_url: provider.base_url.clone(),
+                    readonly_reason: None,
+                });
+            existing.provider_kind = provider_kind;
+            existing.enabled = provider.enabled;
+            existing.base_url = provider.base_url.clone();
         }
         self.provider_configs = provider_configs;
         self.provider_models = config
             .provider
             .iter()
             .map(|(provider_id, provider)| (provider_id.clone(), provider.models.clone()))
+            .collect();
+        self.provider_active_models = config
+            .provider
+            .iter()
+            .filter_map(|(provider_id, provider)| {
+                provider
+                    .active_model
+                    .as_ref()
+                    .map(|model_id| (provider_id.clone(), model_id.clone()))
+            })
             .collect();
         self.global_content_types = config.content_types.clone();
 
@@ -397,6 +448,7 @@ impl AppState {
         self.job_order.clear();
         self.temp_query_assets.clear();
         self.provider_probe_cache.clear();
+        self.provider_probe_checked_at_ms.clear();
         self.provider_runtime_models.clear();
         self.provider_execution_input_types.clear();
         self.provider_runtime_adapters.clear();

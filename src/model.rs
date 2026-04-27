@@ -34,9 +34,12 @@ impl ProviderConfigRecord {
             display_name: self.display_name.clone(),
             provider_kind: self.provider_kind.clone(),
             enabled: self.enabled,
+            active_model: None,
             base_url: self.base_url.clone(),
             readonly_reason: self.readonly_reason.clone(),
             probe: None,
+            origin: "baseline".to_string(),
+            models: Vec::new(),
         }
     }
 }

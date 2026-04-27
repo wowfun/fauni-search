@@ -52,10 +52,19 @@ pub fn build_app(state: SharedState) -> Router {
         .routes(routes!(get_runtime_status))
         .routes(routes!(list_provider_configs))
         .routes(routes!(update_provider_config))
+        .routes(routes!(delete_provider_config))
+        .routes(routes!(
+            update_provider_model_config,
+            delete_provider_model_config
+        ))
         .routes(routes!(get_model_catalog))
         .routes(routes!(
             get_global_content_types,
             update_global_content_types
+        ))
+        .routes(routes!(
+            update_global_content_type,
+            delete_global_content_type
         ))
         .routes(routes!(test_model_selection))
         .routes(routes!(list_libraries, create_library))
@@ -65,6 +74,10 @@ pub fn build_app(state: SharedState) -> Router {
         .routes(routes!(
             get_library_content_types,
             update_library_content_types
+        ))
+        .routes(routes!(
+            update_library_content_type,
+            delete_library_content_type
         ))
         .routes(routes!(get_resolved_content_models))
         .routes(routes!(get_vector_space_diagnostics))
@@ -135,9 +148,14 @@ async fn route_discovery() -> Json<RootPayload> {
             "GET /runtime/status",
             "GET /settings/providers",
             "PATCH /settings/providers/{provider_id}",
+            "DELETE /settings/providers/{provider_id}",
+            "PATCH /settings/providers/{provider_id}/models/{model_id}",
+            "DELETE /settings/providers/{provider_id}/models/{model_id}",
             "GET /settings/model-catalog",
             "GET /settings/content-types",
             "PATCH /settings/content-types",
+            "PATCH /settings/content-types/{content_type}",
+            "DELETE /settings/content-types/{content_type}",
             "POST /settings/model-tests",
             "GET /libraries",
             "POST /libraries",
@@ -146,6 +164,8 @@ async fn route_discovery() -> Json<RootPayload> {
             "DELETE /libraries/{library_id}",
             "GET /libraries/{library_id}/content-types",
             "PATCH /libraries/{library_id}/content-types",
+            "PATCH /libraries/{library_id}/content-types/{content_type}",
+            "DELETE /libraries/{library_id}/content-types/{content_type}",
             "GET /libraries/{library_id}/resolved-content-models",
             "GET /libraries/{library_id}/vector-space-diagnostics",
             "GET /libraries/{library_id}/source-roots",
@@ -269,6 +289,75 @@ async fn update_provider_config(
 }
 
 #[utoipa::path(
+    delete,
+    path = "/settings/providers/{provider_id}",
+    params(("provider_id" = String, Path, description = "Provider id")),
+    responses(
+        (status = 200, description = "Provider configuration list after deleting runtime overlay", body = SuccessEnvelope<ProvidersListData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
+async fn delete_provider_config(
+    State(state): State<SharedState>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<ProvidersListData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.delete_provider_config(&provider_id).await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/settings/providers/{provider_id}/models/{model_id}",
+    params(
+        ("provider_id" = String, Path, description = "Provider id"),
+        ("model_id" = String, Path, description = "Model id"),
+    ),
+    request_body = UpdateProviderModelConfigRequest,
+    responses(
+        (status = 200, description = "Updated provider model configuration", body = SuccessEnvelope<ProviderConfigSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
+async fn update_provider_model_config(
+    State(state): State<SharedState>,
+    Path((provider_id, model_id)): Path<(String, String)>,
+    Json(request): Json<UpdateProviderModelConfigRequest>,
+) -> Result<Json<SuccessEnvelope<ProviderConfigSnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state
+        .update_provider_model_config(&provider_id, &model_id, request)
+        .await?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/settings/providers/{provider_id}/models/{model_id}",
+    params(
+        ("provider_id" = String, Path, description = "Provider id"),
+        ("model_id" = String, Path, description = "Model id"),
+    ),
+    responses(
+        (status = 200, description = "Updated provider after deleting model runtime overlay", body = SuccessEnvelope<ProviderConfigSnapshot>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
+async fn delete_provider_model_config(
+    State(state): State<SharedState>,
+    Path((provider_id, model_id)): Path<(String, String)>,
+) -> Result<Json<SuccessEnvelope<ProviderConfigSnapshot>>, ApiError> {
+    let mut state = state.write().await;
+    let snapshot = state
+        .delete_provider_model_config(&provider_id, &model_id)
+        .await?;
+    Ok(Json(SuccessEnvelope { data: snapshot }))
+}
+
+#[utoipa::path(
     get,
     path = "/settings/model-catalog",
     responses(
@@ -320,6 +409,48 @@ async fn update_global_content_types(
 ) -> Result<Json<SuccessEnvelope<GlobalContentTypesData>>, ApiError> {
     let mut state = state.write().await;
     let data = state.update_global_content_types(request).await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/settings/content-types/{content_type}",
+    params(("content_type" = String, Path, description = "Content type key")),
+    request_body = ContentTypeBindingPayload,
+    responses(
+        (status = 200, description = "Updated global content type overlay", body = SuccessEnvelope<GlobalContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
+async fn update_global_content_type(
+    State(state): State<SharedState>,
+    Path(content_type): Path<String>,
+    Json(request): Json<ContentTypeBindingPayload>,
+) -> Result<Json<SuccessEnvelope<GlobalContentTypesData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state
+        .update_global_content_type(&content_type, request)
+        .await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/settings/content-types/{content_type}",
+    params(("content_type" = String, Path, description = "Content type key")),
+    responses(
+        (status = 200, description = "Global content type bindings after deleting runtime overlay", body = SuccessEnvelope<GlobalContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "settings",
+)]
+async fn delete_global_content_type(
+    State(state): State<SharedState>,
+    Path(content_type): Path<String>,
+) -> Result<Json<SuccessEnvelope<GlobalContentTypesData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.delete_global_content_type(&content_type).await?;
     Ok(Json(SuccessEnvelope { data }))
 }
 
@@ -855,6 +986,56 @@ async fn update_library_content_types(
     let mut state = state.write().await;
     let data = state
         .update_library_content_types(&library_id, request)
+        .await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/libraries/{library_id}/content-types/{content_type}",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("content_type" = String, Path, description = "Content type key"),
+    ),
+    request_body = ContentTypeBindingPayload,
+    responses(
+        (status = 200, description = "Updated library content type overlay", body = SuccessEnvelope<LibraryContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
+async fn update_library_content_type(
+    State(state): State<SharedState>,
+    Path((library_id, content_type)): Path<(String, String)>,
+    Json(request): Json<ContentTypeBindingPayload>,
+) -> Result<Json<SuccessEnvelope<LibraryContentTypesData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state
+        .update_library_content_type(&library_id, &content_type, request)
+        .await?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/libraries/{library_id}/content-types/{content_type}",
+    params(
+        ("library_id" = String, Path, description = "Library id"),
+        ("content_type" = String, Path, description = "Content type key"),
+    ),
+    responses(
+        (status = 200, description = "Library content type bindings after deleting runtime overlay", body = SuccessEnvelope<LibraryContentTypesData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "libraries",
+)]
+async fn delete_library_content_type(
+    State(state): State<SharedState>,
+    Path((library_id, content_type)): Path<(String, String)>,
+) -> Result<Json<SuccessEnvelope<LibraryContentTypesData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state
+        .delete_library_content_type(&library_id, &content_type)
         .await?;
     Ok(Json(SuccessEnvelope { data }))
 }

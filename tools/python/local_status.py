@@ -21,6 +21,17 @@ def http_ok(url: str, timeout: float = 1.0) -> bool:
         return False
 
 
+def http_json(url: str, timeout: float = 1.0) -> dict | None:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            if response.status < 200 or response.status >= 500:
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+            return payload if isinstance(payload, dict) else None
+    except (URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
 def pid_is_alive(pid: int) -> bool:
     return (Path("/proc") / str(pid)).is_dir()
 
@@ -67,12 +78,14 @@ def cmd_matches_service(service: str, cmd: str, ui_port: str) -> bool:
         return (
             "target/debug/fauni-search" in cmd
             or "target/release/fauni-search" in cmd
-            or "target/debug/faus serve" in cmd
-            or "target/release/faus serve" in cmd
+            or ("target/debug/faus serve" in cmd and "target/debug/faus serve model" not in cmd)
+            or ("target/release/faus serve" in cmd and "target/release/faus serve model" not in cmd)
             or "cargo run" in cmd
         )
     if service == "sidecar":
-        return "-m fauni_sidecar" in cmd
+        return "-m fauni_sidecar" in cmd and "-m fauni_sidecar.modeld" not in cmd
+    if service == "modeld":
+        return "-m fauni_sidecar.modeld" in cmd or "target/debug/faus serve model" in cmd or "target/release/faus serve model" in cmd
     if service == "ui":
         return "vite" in cmd and f"--port {ui_port}" in cmd
     if service == "qdrant":
@@ -117,6 +130,11 @@ def env(name: str) -> str:
     return value
 
 
+def optional_env(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    return value if value not in (None, "") else default
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
@@ -126,6 +144,9 @@ def main() -> int:
     app_port = env("APP_PORT")
     sidecar_host = env("SIDECAR_HOST")
     sidecar_port = env("SIDECAR_PORT")
+    default_modeld_port = "54212" if os.environ.get("FAUNI_CONFIG_MODE") == "dev" else "53212"
+    modeld_host = optional_env("MODELD_HOST", "127.0.0.1")
+    modeld_port = optional_env("MODELD_PORT", default_modeld_port)
     ui_host = env("UI_HOST")
     ui_port = env("UI_PORT")
     qdrant_host = env("QDRANT_HOST")
@@ -146,6 +167,12 @@ def main() -> int:
             "pid_file": log_dir / "sidecar.pid",
             "log": log_dir / "sidecar.log",
         },
+        "modeld": {
+            "url": f"http://{modeld_host}:{modeld_port}/health",
+            "port": int(modeld_port),
+            "pid_file": log_dir / "modeld.pid",
+            "log": log_dir / "modeld.log",
+        },
         "ui": {
             "url": f"http://{ui_host}:{ui_port}/",
             "port": int(ui_port),
@@ -163,6 +190,7 @@ def main() -> int:
     services = {}
     for name, config in service_defs.items():
         pids = discover_pids(name, str(config["port"]), config["pid_file"], ui_port)
+        health = http_json(config["url"]) if name == "modeld" else None
         services[name] = {
             "url": config["url"],
             "ready": http_ok(config["url"]),
@@ -171,6 +199,9 @@ def main() -> int:
             "pid_file": str(config["pid_file"]),
             "log": str(config["log"]),
         }
+        if health is not None:
+            services[name]["loaded_models"] = health.get("loaded_models", [])
+            services[name]["default_model"] = health.get("default_model")
 
     payload = {
         "config_source": os.environ.get("FAUNI_CONFIG_SOURCE", ""),
@@ -186,7 +217,13 @@ def main() -> int:
     for name, service in services.items():
         state = "ready" if service["ready"] else "not_ready"
         pids = ",".join(str(pid) for pid in service["pids"]) or "-"
-        print(f"{name}: {state} {service['url']} pid={pids} log={service['log']}")
+        suffix = ""
+        if name == "modeld":
+            loaded_models = service.get("loaded_models") or []
+            if isinstance(loaded_models, list) and loaded_models:
+                loaded = ",".join(str(model.get("model_id", "")) for model in loaded_models if isinstance(model, dict))
+                suffix = f" loaded={loaded or '-'}"
+        print(f"{name}: {state} {service['url']} pid={pids} log={service['log']}{suffix}")
     return 0
 
 

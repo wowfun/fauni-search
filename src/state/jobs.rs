@@ -771,7 +771,10 @@ impl AppState {
         job.snapshot.progress.completed = if outcome.status == "completed" {
             job.snapshot.progress.total
         } else if job.snapshot.progress.unit == "visual_unit" {
-            job.snapshot.progress.completed.min(job.snapshot.progress.total)
+            job.snapshot
+                .progress
+                .completed
+                .min(job.snapshot.progress.total)
         } else {
             outcome.completed.min(job.snapshot.progress.total)
         };
@@ -1192,7 +1195,10 @@ impl AppState {
         job.snapshot.progress.completed = if outcome.status == "completed" {
             job.snapshot.progress.total
         } else if job.snapshot.progress.unit == "visual_unit" {
-            job.snapshot.progress.completed.min(job.snapshot.progress.total)
+            job.snapshot
+                .progress
+                .completed
+                .min(job.snapshot.progress.total)
         } else {
             outcome.completed.min(job.snapshot.progress.total)
         };

@@ -1,9 +1,12 @@
 use crate::error::invalid_input;
-use clap::Args;
+use clap::{Args, Subcommand};
 use fauni_search::{
-    build_app, new_state, resolve_local_sidecar_active_model_from_env, spawn_runtime_maintenance,
+    build_app, new_state, resolve_local_sidecar_model_from_env, spawn_runtime_maintenance,
 };
 use reqwest::Client;
+use serde_json::json;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::{
     env,
     error::Error,
@@ -12,13 +15,17 @@ use std::{
     io,
     path::{Path, PathBuf},
     pin::Pin,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     time::Duration,
 };
 
 const DEFAULT_APP_HOST: &str = "127.0.0.1";
 const DEFAULT_APP_PORT: u16 = 53210;
+const DEFAULT_MODELD_HOST: &str = "127.0.0.1";
+const DEFAULT_MODELD_PORT: u16 = 53212;
+const DEFAULT_DEV_MODELD_PORT: u16 = 54212;
 const HTTP_READY_ATTEMPTS: usize = 30;
+const MODELD_READY_ATTEMPTS: usize = 900;
 
 pub(crate) type CliResult<T> = Result<T, Box<dyn Error>>;
 pub(crate) type ReadyHook =
@@ -44,6 +51,39 @@ pub(crate) struct ServeArgs {
     pub(crate) port: Option<u16>,
     #[arg(long, help = "Use the isolated .env.dev runtime profile")]
     pub(crate) dev: bool,
+    #[arg(
+        long,
+        value_name = "MODEL_ID",
+        help = "Preload or select a local_sidecar model for this run"
+    )]
+    pub(crate) model: Option<String>,
+    #[command(subcommand)]
+    pub(crate) command: Option<ServeCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ServeCommand {
+    #[command(
+        about = "Start or reuse the model residency daemon only",
+        long_about = "Start or reuse modeld, the internal model residency daemon behind the Python sidecar. This command does not start the Rust App API, Python sidecar, Qdrant, Vite, or Web."
+    )]
+    Model(ModelArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ModelArgs {
+    #[arg(long, value_name = "HOST", help = "modeld listen host")]
+    pub(crate) host: Option<String>,
+    #[arg(long, value_name = "PORT", help = "modeld listen port")]
+    pub(crate) port: Option<u16>,
+    #[arg(
+        long,
+        value_name = "MODEL_ID",
+        help = "Preload or select a local_sidecar model"
+    )]
+    pub(crate) model: Option<String>,
+    #[arg(long, help = "Use the isolated .env.dev runtime profile")]
+    pub(crate) dev: bool,
 }
 
 impl ServeArgs {
@@ -52,11 +92,16 @@ impl ServeArgs {
             host: None,
             port: None,
             dev: false,
+            model: None,
+            command: None,
         }
     }
 }
 
 pub(crate) async fn run_serve(args: ServeArgs, debug: bool) -> CliResult<()> {
+    if let Some(ServeCommand::Model(model_args)) = args.command {
+        return run_serve_model(model_args, debug, ServeOutput::Stdout).await;
+    }
     run_serve_with_ready_hook(args, debug, ServeOutput::Stdout, None).await
 }
 
@@ -73,8 +118,9 @@ pub(crate) async fn run_serve_with_ready_hook(
     let loaded_env = load_selected_env(&repo_root, args.dev)?;
     apply_serve_overrides(&args);
     ensure_default_app_bind_env();
+    ensure_default_modeld_bind_env();
     ensure_runtime_generation_ready(&repo_root)?;
-    ensure_local_sidecar_model_env()?;
+    ensure_local_sidecar_model_env(args.model.as_deref())?;
 
     let app_host = required_env("APP_HOST")?;
     let app_port = required_env("APP_PORT")?;
@@ -113,6 +159,15 @@ pub(crate) async fn run_serve_with_ready_hook(
         output,
     )
     .await?;
+    ensure_modeld_ready_persistent(
+        &repo_root,
+        &dev_log_dir,
+        &client,
+        args.model.is_some(),
+        debug,
+        output,
+    )
+    .await?;
     ensure_sidecar_ready(
         &repo_root,
         &dev_log_dir,
@@ -145,6 +200,7 @@ pub(crate) async fn run_serve_with_ready_hook(
         output,
         format!("[info] OpenAPI: {app_base_url}/openapi.json"),
     );
+    serve_log(output, format!("[info] Modeld:  {}", modeld_health_url()?));
     serve_log(output, format!("[info] Sidecar: {}", sidecar_health_url()?));
     serve_log(
         output,
@@ -175,6 +231,272 @@ pub(crate) async fn run_serve_with_ready_hook(
     })??;
     children.shutdown();
     Ok(())
+}
+
+async fn run_serve_model(args: ModelArgs, debug: bool, output: ServeOutput) -> CliResult<()> {
+    let repo_root = find_repo_root(&env::current_dir()?)?;
+    env::set_current_dir(&repo_root)?;
+    prepend_local_bin_to_path(&repo_root)?;
+
+    let loaded_env = load_selected_env(&repo_root, args.dev)?;
+    apply_modeld_overrides(&args);
+    ensure_default_modeld_bind_env();
+    ensure_runtime_generation_ready(&repo_root)?;
+    ensure_local_sidecar_model_env(args.model.as_deref())?;
+
+    let dev_log_dir = resolve_env_path(&repo_root, &required_env("DEV_LOG_DIR")?);
+    fs::create_dir_all(&dev_log_dir).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Failed to create log directory {}: {error}",
+                dev_log_dir.display()
+            ),
+        )
+    })?;
+
+    if debug {
+        serve_log(
+            output,
+            format!("[debug] Config: {}", loaded_env.source.display()),
+        );
+        serve_log(output, format!("[debug] Mode:   {}", loaded_env.mode));
+        serve_log(output, format!("[debug] Logs:   {}", dev_log_dir.display()));
+    }
+
+    let client = Client::new();
+    let health_url = modeld_health_url()?;
+    if modeld_ok(&client, &health_url).await {
+        ensure_modeld_target_loaded(&client).await?;
+        serve_log(
+            output,
+            format!("[info] Reusing existing modeld at {health_url}"),
+        );
+        serve_log(
+            output,
+            format!("[info] Config:  {}", loaded_env.source.display()),
+        );
+        serve_log(output, format!("[info] Modeld:  {health_url}"));
+        serve_log(output, format!("[info] Logs:    {}", dev_log_dir.display()));
+        return Ok(());
+    }
+
+    let log_path = dev_log_dir.join("modeld.log");
+    let mut child = start_modeld_child(&repo_root, &log_path, debug, output)?;
+    fs::write(dev_log_dir.join("modeld.pid"), child.id().to_string()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Failed to write modeld pid file {}: {error}",
+                dev_log_dir.join("modeld.pid").display()
+            ),
+        )
+    })?;
+    if let Err(error) = wait_modeld_ok(&client, &health_url, MODELD_READY_ATTEMPTS).await {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = ensure_modeld_target_loaded(&client).await {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    serve_log(output, format!("[ok] modeld is ready at {health_url}"));
+    serve_log(
+        output,
+        format!("[info] Config:  {}", loaded_env.source.display()),
+    );
+    serve_log(output, format!("[info] Modeld:  {health_url}"));
+    serve_log(
+        output,
+        format!(
+            "[info] Model:   {}@{}",
+            required_env("EMBEDDING_MODEL_ID")?,
+            required_env("EMBEDDING_MODEL_REVISION")?
+        ),
+    );
+    serve_log(output, format!("[info] Logs:    {}", dev_log_dir.display()));
+
+    loop {
+        tokio::select! {
+            _ = shutdown_signal() => {
+                let mut managed = ManagedChild { label: "modeld", child };
+                managed.kill_and_wait();
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                if let Some(status) = child.try_wait()? {
+                    if status.success() || is_expected_modeld_stop(status) {
+                        break;
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("modeld exited with {status}; see {}", log_path.display()),
+                    ).into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_modeld_ready_persistent(
+    repo_root: &Path,
+    dev_log_dir: &Path,
+    client: &Client,
+    preload_target: bool,
+    debug: bool,
+    output: ServeOutput,
+) -> CliResult<()> {
+    let health_url = modeld_health_url()?;
+    if modeld_ok(client, &health_url).await {
+        if preload_target {
+            ensure_modeld_target_loaded(client).await?;
+        }
+        serve_log(
+            output,
+            format!("[info] Reusing existing modeld at {health_url}"),
+        );
+        return Ok(());
+    }
+
+    let log_path = dev_log_dir.join("modeld.log");
+    let mut child = start_modeld_child(repo_root, &log_path, debug, output)?;
+    fs::write(dev_log_dir.join("modeld.pid"), child.id().to_string()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Failed to write modeld pid file {}: {error}",
+                dev_log_dir.join("modeld.pid").display()
+            ),
+        )
+    })?;
+    if let Err(error) = wait_modeld_ok(client, &health_url, MODELD_READY_ATTEMPTS).await {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if preload_target {
+        if let Err(error) = ensure_modeld_target_loaded(client).await {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    serve_log(output, format!("[ok] modeld is ready at {health_url}"));
+    drop(child);
+    Ok(())
+}
+
+async fn ensure_modeld_target_loaded(client: &Client) -> CliResult<()> {
+    let load_url = modeld_load_url()?;
+    let response = client
+        .post(&load_url)
+        .json(&json!({
+            "model_id": required_env("EMBEDDING_MODEL_ID")?,
+            "model_version": required_env("EMBEDDING_MODEL_REVISION")?,
+            "backend": required_env("EMBEDDING_MODEL_BACKEND")?,
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("modeld load request failed at {load_url}: {error}"),
+            )
+        })?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.trim().to_string());
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!("modeld failed to load target model with {status}: {message}"),
+    )
+    .into())
+}
+
+fn start_modeld_child(
+    repo_root: &Path,
+    log_path: &Path,
+    debug: bool,
+    output: ServeOutput,
+) -> CliResult<Child> {
+    let python = repo_root.join(".venv/bin/python");
+    if !python.exists() {
+        return Err(invalid_input(format!(
+            ".venv is missing; run scripts/local/bootstrap-linux.sh{} first",
+            env_arg_hint()
+        ))
+        .into());
+    }
+
+    let sidecar_src = repo_root.join("sidecar/src");
+    let health_url = modeld_health_url()?;
+    let command = modeld_command(&python, &sidecar_src, log_path);
+
+    if debug {
+        serve_log(
+            output,
+            format!(
+                "[debug] Starting modeld with {}; PYTHONPATH={}; log={}",
+                python.display(),
+                sidecar_src.display(),
+                log_path.display()
+            ),
+        );
+    } else {
+        serve_log(output, format!("[info] Starting modeld at {health_url}"));
+    }
+
+    spawn_modeld_child(command, log_path)
+}
+
+fn modeld_command(python: &Path, sidecar_src: &Path, log_path: &Path) -> Command {
+    let mut command = Command::new(python);
+    command
+        .arg("-m")
+        .arg("fauni_sidecar.modeld")
+        .env("PYTHONPATH", sidecar_src)
+        .env("FAUNI_MODELD_LOG_PATH", log_path)
+        .env("PYTHONUNBUFFERED", "1");
+    command
+}
+
+fn spawn_modeld_child(mut command: Command, log_path: &Path) -> CliResult<Child> {
+    command.spawn().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Failed to start modeld; see {}: {error}",
+                log_path.display()
+            ),
+        )
+        .into()
+    })
+}
+
+fn is_expected_modeld_stop(status: ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(status.signal(), Some(15) | Some(2))
+    }
+    #[cfg(not(unix))]
+    {
+        status.success()
+    }
 }
 
 async fn ensure_qdrant_ready(
@@ -310,6 +632,22 @@ async fn http_ok(client: &Client, url: &str) -> bool {
     }
 }
 
+async fn modeld_ok(client: &Client, url: &str) -> bool {
+    let Ok(response) = client.get(url).timeout(Duration::from_secs(1)).send().await else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(payload) = response.json::<serde_json::Value>().await else {
+        return false;
+    };
+    payload
+        .get("runtime_kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("local_python_modeld")
+}
+
 async fn wait_http_ok(client: &Client, label: &str, url: &str, attempts: usize) -> CliResult<()> {
     for _ in 0..attempts {
         if http_ok(client, url).await {
@@ -320,6 +658,20 @@ async fn wait_http_ok(client: &Client, label: &str, url: &str, attempts: usize) 
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!("{label} did not become ready at {url}"),
+    )
+    .into())
+}
+
+async fn wait_modeld_ok(client: &Client, url: &str, attempts: usize) -> CliResult<()> {
+    for _ in 0..attempts {
+        if modeld_ok(client, url).await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("modeld did not become ready at {url}"),
     )
     .into())
 }
@@ -533,12 +885,35 @@ fn apply_serve_overrides(args: &ServeArgs) {
     }
 }
 
+fn apply_modeld_overrides(args: &ModelArgs) {
+    if let Some(host) = &args.host {
+        env::set_var("MODELD_HOST", host);
+    }
+    if let Some(port) = args.port {
+        env::set_var("MODELD_PORT", port.to_string());
+    }
+}
+
 fn ensure_default_app_bind_env() {
     if env::var_os("APP_HOST").is_none() {
         env::set_var("APP_HOST", DEFAULT_APP_HOST);
     }
     if env::var_os("APP_PORT").is_none() {
         env::set_var("APP_PORT", DEFAULT_APP_PORT.to_string());
+    }
+}
+
+fn ensure_default_modeld_bind_env() {
+    if env::var_os("MODELD_HOST").is_none() {
+        env::set_var("MODELD_HOST", DEFAULT_MODELD_HOST);
+    }
+    if env::var_os("MODELD_PORT").is_none() {
+        let port = if env::var("FAUNI_CONFIG_MODE").ok().as_deref() == Some("dev") {
+            DEFAULT_DEV_MODELD_PORT
+        } else {
+            DEFAULT_MODELD_PORT
+        };
+        env::set_var("MODELD_PORT", port.to_string());
     }
 }
 
@@ -574,10 +949,12 @@ fn ensure_runtime_generation_ready(repo_root: &Path) -> CliResult<()> {
     Ok(())
 }
 
-fn ensure_local_sidecar_model_env() -> CliResult<()> {
-    let (model_id, model_revision) = resolve_local_sidecar_active_model_from_env()?;
+fn ensure_local_sidecar_model_env(selected_model_id: Option<&str>) -> CliResult<()> {
+    let (model_id, model_revision, backend) =
+        resolve_local_sidecar_model_from_env(selected_model_id)?;
     env::set_var("EMBEDDING_MODEL_ID", &model_id);
     env::set_var("EMBEDDING_MODEL_REVISION", &model_revision);
+    env::set_var("EMBEDDING_MODEL_BACKEND", &backend);
     Ok(())
 }
 
@@ -606,6 +983,22 @@ fn sidecar_health_url() -> Result<String, io::Error> {
         "http://{}:{}/health",
         required_env("SIDECAR_HOST")?,
         required_env("SIDECAR_PORT")?
+    ))
+}
+
+fn modeld_health_url() -> Result<String, io::Error> {
+    Ok(format!(
+        "http://{}:{}/health",
+        required_env("MODELD_HOST")?,
+        required_env("MODELD_PORT")?
+    ))
+}
+
+fn modeld_load_url() -> Result<String, io::Error> {
+    Ok(format!(
+        "http://{}:{}/models/load",
+        required_env("MODELD_HOST")?,
+        required_env("MODELD_PORT")?
     ))
 }
 
@@ -726,6 +1119,8 @@ mod tests {
             host: Some("0.0.0.0".to_string()),
             port: Some(39099),
             dev: false,
+            model: None,
+            command: None,
         });
 
         assert_eq!(env::var("APP_HOST").unwrap(), "0.0.0.0");
@@ -755,6 +1150,34 @@ mod tests {
         restore.restore();
     }
 
+    #[test]
+    fn modeld_command_passes_modeld_log_environment() {
+        let command = modeld_command(
+            Path::new("/tmp/python"),
+            Path::new("/repo/sidecar/src"),
+            Path::new("/repo/data/runtime/logs/modeld.log"),
+        );
+
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(command.get_program(), Path::new("/tmp/python").as_os_str());
+        assert_eq!(args, vec!["-m", "fauni_sidecar.modeld"]);
+        assert_eq!(
+            command_env_value(&command, "PYTHONPATH"),
+            Some("/repo/sidecar/src".to_string())
+        );
+        assert_eq!(
+            command_env_value(&command, "FAUNI_MODELD_LOG_PATH"),
+            Some("/repo/data/runtime/logs/modeld.log".to_string())
+        );
+        assert_eq!(
+            command_env_value(&command, "PYTHONUNBUFFERED"),
+            Some("1".to_string())
+        );
+    }
+
     struct EnvRestore {
         values: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
@@ -777,5 +1200,12 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn command_env_value(command: &Command, key: &str) -> Option<String> {
+        command
+            .get_envs()
+            .find(|(env_key, _)| *env_key == std::ffi::OsStr::new(key))
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
     }
 }

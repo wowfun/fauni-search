@@ -10,23 +10,17 @@
         "athrael-soju/colqwen3.5-4.5B-v3": {
           "enabled": true,
           "version": "main",
+          "backend": "colqwen3_5",
           "embedding_capabilities": {
             "input_types": ["text", "image"],
             "vector_types": ["multi_vector_late_interaction"],
             "supports_mixed_inputs": false
           }
-        }
-      }
-    },
-    "openai_compatible": {
-      "kind": "openai_compatible",
-      "display_name": "OpenAI-Compatible",
-      "enabled": true,
-      "base_url": "http://127.0.0.1:8000/v1",
-      "models": {
+        },
         "Qwen/Qwen3-VL-Embedding-2B": {
           "enabled": true,
           "version": "main",
+          "backend": "qwen3_vl_embedding",
           "embedding_capabilities": {
             "input_types": ["text", "image", "video"],
             "vector_types": ["single_vector"],
@@ -54,7 +48,7 @@
     },
     "text": {
       "enabled": false,
-      "model": "openai_compatible/Qwen/Qwen3-VL-Embedding-2B",
+      "model": "local_sidecar/Qwen/Qwen3-VL-Embedding-2B",
       "vector_type": "single_vector"
     }
   },

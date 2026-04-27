@@ -75,17 +75,54 @@ pub(crate) struct ProviderConfigSnapshot {
     pub(crate) provider_kind: String,
     pub(crate) enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) active_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) readonly_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) probe: Option<ProviderProbeSnapshot>,
+    pub(crate) origin: String,
+    #[serde(default)]
+    pub(crate) models: Vec<ProviderModelConfigSnapshot>,
+}
+
+#[derive(ToSchema, Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ProviderModelConfigSnapshot {
+    pub(crate) model_id: String,
+    pub(crate) enabled: bool,
+    pub(crate) version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) backend: Option<String>,
+    #[serde(default)]
+    pub(crate) embedding_capabilities: EmbeddingCapabilities,
+    pub(crate) origin: String,
 }
 
 #[derive(ToSchema, Debug, Deserialize)]
 pub(crate) struct UpdateProviderConfigRequest {
+    #[serde(default)]
+    pub(crate) display_name: Option<String>,
+    #[serde(default)]
+    pub(crate) provider_kind: Option<String>,
+    #[serde(default)]
     pub(crate) enabled: Option<bool>,
+    #[serde(default)]
     pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) active_model: Option<String>,
+}
+
+#[derive(ToSchema, Debug, Deserialize)]
+pub(crate) struct UpdateProviderModelConfigRequest {
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) version: Option<String>,
+    #[serde(default)]
+    pub(crate) backend: Option<String>,
+    #[serde(default)]
+    pub(crate) embedding_capabilities: Option<EmbeddingCapabilities>,
 }
 
 #[derive(ToSchema, Debug, Serialize)]
@@ -142,11 +179,21 @@ pub(crate) struct ContentTypesPayload {
 #[derive(ToSchema, Debug, Serialize)]
 pub(crate) struct GlobalContentTypesData {
     pub(crate) content_types: ContentTypesPayload,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) origins: BTreeMap<String, ContentTypeOriginSnapshot>,
 }
 
 #[derive(ToSchema, Debug, Serialize)]
 pub(crate) struct LibraryContentTypesData {
     pub(crate) content_types: ContentTypesPayload,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) origins: BTreeMap<String, ContentTypeOriginSnapshot>,
+}
+
+#[derive(ToSchema, Clone, Debug, Serialize)]
+pub(crate) struct ContentTypeOriginSnapshot {
+    pub(crate) origin: String,
+    pub(crate) has_runtime_overlay: bool,
 }
 
 #[derive(ToSchema, Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]

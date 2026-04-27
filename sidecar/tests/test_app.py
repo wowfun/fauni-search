@@ -4,8 +4,12 @@ import json
 
 import pytest
 
-from fauni_sidecar.app import EmbedRequest, SidecarApiError, create_app
-from fauni_sidecar.runtime import resolve_local_sidecar_model_from_runtime_config
+from fauni_sidecar.app import EmbedRequest, ModeldRuntimeClient, SidecarApiError, create_app
+from fauni_sidecar.modeld import ModelLoadRequest, ModeldRuntimeManager, create_modeld_app
+from fauni_sidecar.runtime import (
+    LocalSidecarModelConfig,
+    resolve_local_sidecar_model_from_runtime_config,
+)
 
 
 class FakeRuntime:
@@ -47,7 +51,7 @@ class FakeRuntime:
                     "model": {
                         "model_id": "fake/model",
                         "revision": "main",
-                        "backend": "colqwen3.5",
+                        "backend": "colqwen3_5",
                         "loaded": False,
                         "device": None,
                         "dtype": None,
@@ -60,7 +64,7 @@ class FakeRuntime:
                     "model": {
                         "model_id": "fake/model",
                         "revision": "main",
-                        "backend": "colqwen3.5",
+                        "backend": "colqwen3_5",
                         "loaded": False,
                         "device": None,
                         "dtype": None,
@@ -73,7 +77,7 @@ class FakeRuntime:
                     "model": {
                         "model_id": "fake/model",
                         "revision": "main",
-                        "backend": "colqwen3.5",
+                        "backend": "colqwen3_5",
                         "loaded": False,
                         "device": None,
                         "dtype": None,
@@ -86,7 +90,7 @@ class FakeRuntime:
                     "model": {
                         "model_id": "fake/model",
                         "revision": "main",
-                        "backend": "colqwen3.5",
+                        "backend": "colqwen3_5",
                         "loaded": False,
                         "device": None,
                         "dtype": None,
@@ -99,7 +103,7 @@ class FakeRuntime:
                     "model": {
                         "model_id": "fake/model",
                         "revision": "main",
-                        "backend": "colqwen3.5",
+                        "backend": "colqwen3_5",
                         "loaded": False,
                         "device": None,
                         "dtype": None,
@@ -108,13 +112,18 @@ class FakeRuntime:
             ],
         }
 
-    def embed_queries(self, queries: list[str], debug: bool = False) -> dict[str, object]:
+    def embed_queries(
+        self,
+        queries: list[str],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "operation_kind": "query_embedding",
             "model": {
                 "model_id": "fake/model",
                 "revision": "main",
-                "backend": "colqwen3.5",
+                "backend": "colqwen3_5",
                 "loaded": True,
                 "device": "cuda:0",
                 "dtype": "torch.bfloat16",
@@ -134,13 +143,18 @@ class FakeRuntime:
             payload["debug"] = {"elapsed_ms": 1.23}
         return payload
 
-    def embed_image_queries(self, images: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
+    def embed_image_queries(
+        self,
+        images: list[dict[str, object]],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "operation_kind": "image_query_embedding",
             "model": {
                 "model_id": "fake/model",
                 "revision": "main",
-                "backend": "colqwen3.5",
+                "backend": "colqwen3_5",
                 "loaded": True,
                 "device": "cuda:0",
                 "dtype": "torch.bfloat16",
@@ -164,13 +178,18 @@ class FakeRuntime:
             payload["debug"] = {"elapsed_ms": 1.89}
         return payload
 
-    def embed_video_queries(self, videos: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
+    def embed_video_queries(
+        self,
+        videos: list[dict[str, object]],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "operation_kind": "video_query_embedding",
             "model": {
                 "model_id": "fake/model",
                 "revision": "main",
-                "backend": "colqwen3.5",
+                "backend": "colqwen3_5",
                 "loaded": True,
                 "device": "cuda:0",
                 "dtype": "torch.bfloat16",
@@ -195,13 +214,18 @@ class FakeRuntime:
             payload["debug"] = {"elapsed_ms": 2.11}
         return payload
 
-    def embed_document_queries(self, documents: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
+    def embed_document_queries(
+        self,
+        documents: list[dict[str, object]],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "operation_kind": "document_query_embedding",
             "model": {
                 "model_id": "fake/model",
                 "revision": "main",
-                "backend": "colqwen3.5",
+                "backend": "colqwen3_5",
                 "loaded": True,
                 "device": "cuda:0",
                 "dtype": "torch.bfloat16",
@@ -226,13 +250,18 @@ class FakeRuntime:
             payload["debug"] = {"elapsed_ms": 2.23}
         return payload
 
-    def embed_documents(self, documents: list[dict[str, object]], debug: bool = False) -> dict[str, object]:
+    def embed_documents(
+        self,
+        documents: list[dict[str, object]],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "operation_kind": "document_embedding",
             "model": {
                 "model_id": "fake/model",
                 "revision": "main",
-                "backend": "colqwen3.5",
+                "backend": "colqwen3_5",
                 "loaded": True,
                 "device": "cuda:0",
                 "dtype": "torch.bfloat16",
@@ -258,12 +287,98 @@ class FakeRuntime:
 
 
 class FailingRuntime(FakeRuntime):
-    def embed_queries(self, queries: list[str], debug: bool = False) -> dict[str, object]:
+    def embed_queries(
+        self,
+        queries: list[str],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         raise RuntimeError("CUDA is unavailable in the current GPU environment.")
+
+
+class RecordingRuntime(FakeRuntime):
+    def __init__(self) -> None:
+        self.provider_context: dict[str, object] | None = None
+
+    def embed_queries(
+        self,
+        queries: list[str],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.provider_context = provider_context
+        return super().embed_queries(queries, debug=debug, provider_context=provider_context)
+
+
+class LoadableNamedRuntime(FakeRuntime):
+    def __init__(self, config: LocalSidecarModelConfig) -> None:
+        self.config = config
+        self.loaded = False
+
+    def _ensure_loaded(self) -> None:
+        self.loaded = True
+
+    def capabilities_snapshot(self) -> dict[str, object]:
+        payload = super().capabilities_snapshot()
+        for operation in payload["operations"]:  # type: ignore[index]
+            operation["model"] = {  # type: ignore[index]
+                "model_id": self.config.model_id,
+                "revision": self.config.version,
+                "backend": self.config.backend,
+                "loaded": self.loaded,
+                "device": "cuda:0" if self.loaded else None,
+                "dtype": "torch.bfloat16" if self.loaded else None,
+            }
+        payload["availability"]["model_loaded"] = self.loaded  # type: ignore[index]
+        return payload
+
+    def embed_queries(
+        self,
+        queries: list[str],
+        debug: bool = False,
+        provider_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.loaded = True
+        payload = super().embed_queries(queries, debug=debug, provider_context=provider_context)
+        payload["model"] = {
+            "model_id": self.config.model_id,
+            "revision": self.config.version,
+            "backend": self.config.backend,
+            "loaded": True,
+            "device": "cuda:0",
+            "dtype": "torch.bfloat16",
+        }
+        return payload
+
+
+class FakeModeldManager(ModeldRuntimeManager):
+    def _create_runtime(self, config: LocalSidecarModelConfig) -> LoadableNamedRuntime:
+        return LoadableNamedRuntime(config)
+
+
+def model_config(
+    model_id: str,
+    *,
+    version: str = "main",
+    backend: str = "colqwen3_5",
+    enabled: bool = True,
+) -> LocalSidecarModelConfig:
+    return LocalSidecarModelConfig(
+        model_id=model_id,
+        version=version,
+        backend=backend,
+        enabled=enabled,
+        embedding_capabilities={},
+    )
 
 
 def build_route_map(runtime: object) -> dict[str, object]:
     app = create_app(runtime=runtime)
+    return {route.path: route.endpoint for route in app.router.routes if hasattr(route, "endpoint")}
+
+
+def build_modeld_route_map(runtime: object) -> dict[str, object]:
+    app = create_modeld_app(runtime=runtime)
     return {route.path: route.endpoint for route in app.router.routes if hasattr(route, "endpoint")}
 
 
@@ -309,6 +424,67 @@ def test_embed_returns_query_vectors() -> None:
     assert payload["operation_kind"] == "query_embedding"
     assert payload["embeddings"][0]["vector_count"] == 2
     assert payload["debug"]["elapsed_ms"] == 1.23
+
+
+def test_embed_forwards_provider_context_to_runtime() -> None:
+    runtime = RecordingRuntime()
+    routes = build_route_map(runtime)
+    request = EmbedRequest.model_validate(
+        {
+            "operation_kind": "query_embedding",
+            "inputs": {"queries": ["what is the revenue?"]},
+            "provider_context": {
+                "provider_id": "local_sidecar",
+                "model_id": "Qwen/Qwen3-VL-Embedding-2B",
+                "model_version": "main",
+                "vector_type": "single_vector",
+            },
+        }
+    )
+
+    routes["/embed"](request)
+
+    assert runtime.provider_context == {
+        "provider_id": "local_sidecar",
+        "model_id": "Qwen/Qwen3-VL-Embedding-2B",
+        "model_version": "main",
+        "vector_type": "single_vector",
+    }
+
+
+def test_modeld_runtime_client_forwards_provider_context() -> None:
+    client = ModeldRuntimeClient(base_url="http://modeld.test")
+    captured: dict[str, object] = {}
+
+    def fake_request_json(
+        method: str,
+        path: str,
+        *,
+        json: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        captured["method"] = method
+        captured["path"] = path
+        captured["json"] = json
+        return {"data": {"embeddings": []}}
+
+    client._request_json = fake_request_json  # type: ignore[method-assign]
+    provider_context = {
+        "provider_id": "local_sidecar",
+        "model_id": "Qwen/Qwen3-VL-Embedding-2B",
+        "model_version": "main",
+        "vector_type": "single_vector",
+    }
+
+    client.embed_queries(["what is the revenue?"], provider_context=provider_context)
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/embed"
+    assert captured["json"] == {
+        "operation_kind": "query_embedding",
+        "inputs": {"queries": ["what is the revenue?"]},
+        "debug": False,
+        "provider_context": provider_context,
+    }
 
 
 def test_embed_returns_document_vectors() -> None:
@@ -480,6 +656,60 @@ def test_embed_runtime_failure_maps_to_runtime_unavailable() -> None:
     assert excinfo.value.status_code == 503
     assert excinfo.value.code == "runtime_unavailable"
     assert "CUDA is unavailable" in excinfo.value.message
+
+
+def test_modeld_manager_caches_and_loads_multiple_models() -> None:
+    catalog = {
+        "model-a": model_config("model-a", version="a1"),
+        "model-b": model_config("model-b", version="b1", backend="qwen3_vl_embedding"),
+    }
+    manager = FakeModeldManager(default_model=catalog["model-a"], catalog=catalog)
+
+    manager.ensure_model_loaded("model-a", "a1", "colqwen3_5")
+    response = manager.embed_queries(
+        ["hello"],
+        provider_context={"model_id": "model-b", "model_version": "b1"},
+    )
+    health = manager.health_snapshot()
+
+    assert response["model"]["model_id"] == "model-b"
+    assert sorted(model["model_id"] for model in health["loaded_models"]) == ["model-a", "model-b"]
+
+
+def test_modeld_models_load_route_loads_requested_model() -> None:
+    catalog = {
+        "model-a": model_config("model-a", version="a1"),
+        "model-b": model_config("model-b", version="b1", backend="qwen3_vl_embedding"),
+    }
+    manager = FakeModeldManager(default_model=catalog["model-a"], catalog=catalog)
+    routes = build_modeld_route_map(manager)
+
+    response = routes["/models/load"](
+        ModelLoadRequest(
+            model_id="model-b",
+            model_version="b1",
+            backend="qwen3_vl_embedding",
+        )
+    )
+
+    assert response["data"]["model"]["model_id"] == "model-b"
+    assert response["data"]["model"]["loaded"] is True
+    assert manager.health_snapshot()["default_model"]["model_id"] == "model-b"
+
+
+def test_modeld_manager_rejects_unknown_disabled_and_backend_mismatch() -> None:
+    catalog = {
+        "model-a": model_config("model-a", version="a1"),
+        "model-disabled": model_config("model-disabled", enabled=False),
+    }
+    manager = FakeModeldManager(default_model=catalog["model-a"], catalog=catalog)
+
+    with pytest.raises(RuntimeError, match="does not define model"):
+        manager.ensure_model_loaded("missing")
+    with pytest.raises(RuntimeError, match="is disabled"):
+        manager.ensure_model_loaded("model-disabled")
+    with pytest.raises(RuntimeError, match="configured backend"):
+        manager.ensure_model_loaded("model-a", "a1", "qwen3_vl_embedding")
 
 
 def test_runtime_model_falls_back_to_merged_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,7 +13,7 @@ Usage:
   bash scripts/local/reset-dev-runtime.sh --dev
 
 Behavior:
-  - Stops the .env.dev app, sidecar, UI, and Qdrant services
+  - Stops the .env.dev app, modeld, sidecar, UI, and Qdrant services
   - Deletes and recreates APP_RUNTIME_DIR and QDRANT_STORAGE_DIR from .env.dev
   - Keeps DEV_LOG_DIR but removes stale pid files
   - Reinitializes APP_RUNTIME_DIR/runtime-config.json
@@ -76,7 +76,7 @@ bash "$ROOT_DIR/scripts/local/stop.sh" --dev --all
 
 rm -rf "$APP_RUNTIME_PATH" "$QDRANT_STORAGE_PATH"
 mkdir -p "$APP_RUNTIME_PATH" "$QDRANT_STORAGE_PATH" "$DEV_LOG_PATH"
-rm -f "$DEV_LOG_PATH/app.pid" "$DEV_LOG_PATH/sidecar.pid" "$DEV_LOG_PATH/ui.pid" "$DEV_LOG_PATH/qdrant.pid"
+rm -f "$DEV_LOG_PATH/app.pid" "$DEV_LOG_PATH/modeld.pid" "$DEV_LOG_PATH/sidecar.pid" "$DEV_LOG_PATH/ui.pid" "$DEV_LOG_PATH/qdrant.pid"
 printf '{}\n' >"$APP_RUNTIME_PATH/runtime-config.json"
 
 echo "[ok] Reset .env.dev disposable runtime"

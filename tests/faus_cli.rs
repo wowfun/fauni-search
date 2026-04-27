@@ -52,8 +52,25 @@ fn serve_help_exposes_runtime_flags() {
     let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
     assert!(stdout.contains("--host"));
     assert!(stdout.contains("--port"));
+    assert!(stdout.contains("--model"));
     assert!(stdout.contains("--dev"));
     assert!(!stdout.to_lowercase().contains("vite"));
+}
+
+#[test]
+fn serve_model_help_exposes_modeld_flags() {
+    let output = faus()
+        .args(["serve", "model", "--help"])
+        .output()
+        .expect("faus serve model help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    assert!(stdout.contains("--host"));
+    assert!(stdout.contains("--port"));
+    assert!(stdout.contains("--model"));
+    assert!(stdout.contains("--dev"));
+    assert!(stdout.contains("modeld"));
 }
 
 #[test]

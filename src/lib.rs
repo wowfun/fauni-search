@@ -39,7 +39,9 @@ pub(crate) use source_roots::*;
 #[allow(unused_imports)]
 pub(crate) use state::*;
 
-pub use config::resolve_local_sidecar_active_model_from_env;
+pub use config::{
+    resolve_local_sidecar_active_model_from_env, resolve_local_sidecar_model_from_env,
+};
 pub use http::build_app;
 pub use runtime::spawn_runtime_maintenance;
 pub use state::new_state;

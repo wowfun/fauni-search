@@ -23,6 +23,7 @@ gpu = [
   "huggingface-hub>=1.0,<2",
   "pillow>=10.4,<11",
   "pypdfium2>=4.30,<5",
+  "qwen-vl-utils>=0.0.14,<1",
   "safetensors>=0.4,<1",
   "sentencepiece>=0.2,<1",
   "transformers>=5.0,<6",

@@ -172,12 +172,15 @@ async fn model_catalog_exposes_runtime_model_versions_and_supported_entries() {
 
     let local_entry = entries
         .iter()
-        .find(|entry| entry["provider_id"] == LOCAL_SIDECAR_PROVIDER_ID)
+        .find(|entry| {
+            entry["provider_id"] == LOCAL_SIDECAR_PROVIDER_ID
+                && entry["model_id"] == DEFAULT_MODEL_ID
+        })
         .expect("local sidecar catalog entry should exist");
     assert_eq!(local_entry["model_id"], DEFAULT_MODEL_ID);
     assert_eq!(local_entry["model_version"], "main");
     assert_eq!(local_entry["model_revision"], "main");
-    assert_eq!(local_entry["editable"], false);
+    assert_eq!(local_entry["editable"], true);
     assert_eq!(
         local_entry["embedding_capabilities"],
         json!({
@@ -186,6 +189,11 @@ async fn model_catalog_exposes_runtime_model_versions_and_supported_entries() {
             "supports_mixed_inputs": false,
         })
     );
+    assert!(entries.iter().any(|entry| {
+        entry["provider_id"] == LOCAL_SIDECAR_PROVIDER_ID
+            && entry["model_id"] == "Qwen/Qwen3-VL-Embedding-2B"
+            && entry["embedding_capabilities"]["vector_types"] == json!(["single_vector"])
+    }));
 
     let dashscope_entries = entries
         .iter()
@@ -197,6 +205,212 @@ async fn model_catalog_exposes_runtime_model_versions_and_supported_entries() {
         .collect::<Vec<_>>();
     assert!(dashscope_models.contains(&DASHSCOPE_MODEL_ID));
     assert!(!dashscope_models.contains(&"text-embedding-v4"));
+}
+
+#[tokio::test]
+async fn provider_probe_cache_coalesces_capabilities_requests_until_forced_refresh() {
+    let env = TestEnv::new("provider-probe-cache-coalesces").await;
+    let app = env.boot().await;
+    let boot_probe_count = env.sidecar_capabilities_count();
+    assert_eq!(boot_probe_count, 1);
+
+    let providers = app.get_json("/settings/providers").await;
+    assert_eq!(providers.status, StatusCode::OK);
+    let runtime_status = app.get_json("/runtime/status").await;
+    assert_eq!(runtime_status.status, StatusCode::OK);
+    let providers_again = app.get_json("/settings/providers").await;
+    assert_eq!(providers_again.status, StatusCode::OK);
+    assert_eq!(env.sidecar_capabilities_count(), boot_probe_count);
+
+    let provider = app
+        .patch_json(
+            &format!("/settings/providers/{LOCAL_SIDECAR_PROVIDER_ID}"),
+            json!({
+                "display_name": "Local Sidecar",
+                "provider_kind": "local_sidecar",
+                "enabled": true,
+                "active_model": DEFAULT_MODEL_ID
+            }),
+        )
+        .await;
+    assert_eq!(provider.status, StatusCode::OK);
+    assert_eq!(env.sidecar_capabilities_count(), boot_probe_count + 1);
+
+    let runtime_status = app.get_json("/runtime/status").await;
+    assert_eq!(runtime_status.status, StatusCode::OK);
+    assert_eq!(env.sidecar_capabilities_count(), boot_probe_count + 1);
+}
+
+#[tokio::test]
+async fn provider_runtime_overlay_crud_manages_provider_models() {
+    let env = TestEnv::new("provider-runtime-overlay-crud").await;
+    let app = env.boot().await;
+    let provider_id = "custom_provider";
+    let model_id = "custom-model";
+
+    let provider = app
+        .patch_json(
+            &format!("/settings/providers/{provider_id}"),
+            json!({
+                "display_name": "Custom Provider",
+                "provider_kind": "custom",
+                "enabled": true,
+                "base_url": "http://localhost:9999"
+            }),
+        )
+        .await;
+    assert_eq!(provider.status, StatusCode::OK);
+    assert_eq!(provider.json()["data"]["origin"], "runtime_overlay");
+
+    let model = app
+        .patch_json(
+            &format!("/settings/providers/{provider_id}/models/{model_id}"),
+            json!({
+                "enabled": true,
+                "version": "v1",
+                "embedding_capabilities": {
+                    "input_types": ["text"],
+                    "vector_types": ["single_vector"],
+                    "supports_mixed_inputs": false
+                }
+            }),
+        )
+        .await;
+    assert_eq!(model.status, StatusCode::OK);
+    assert_eq!(
+        model.json()["data"]["models"][0]["origin"],
+        "runtime_overlay"
+    );
+
+    let runtime_config = runtime_config_json(&env);
+    assert_eq!(
+        runtime_config["provider"][provider_id]["models"][model_id]["version"],
+        json!("v1")
+    );
+
+    let catalog = app.get_json("/settings/model-catalog").await.json();
+    assert!(catalog["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["provider_id"] == provider_id && entry["model_id"] == model_id));
+
+    let delete_model = app
+        .delete(&format!(
+            "/settings/providers/{provider_id}/models/{model_id}"
+        ))
+        .await;
+    assert_eq!(delete_model.status, StatusCode::OK);
+    let runtime_config = runtime_config_json(&env);
+    assert!(runtime_config["provider"][provider_id]["models"][model_id].is_null());
+
+    let delete_provider = app
+        .delete(&format!("/settings/providers/{provider_id}"))
+        .await;
+    assert_eq!(delete_provider.status, StatusCode::OK);
+    let runtime_config = runtime_config_json(&env);
+    assert!(runtime_config["provider"][provider_id].is_null());
+}
+
+#[tokio::test]
+async fn content_type_runtime_overlay_single_item_crud_restores_baseline_and_inheritance() {
+    let env = TestEnv::new("content-type-runtime-overlay-crud").await;
+    let app = env.boot().await;
+
+    let global_patch = app
+        .patch_json(
+            "/settings/content-types/image",
+            json!({
+                "enabled": true,
+                "model": "local_sidecar/Qwen/Qwen3-VL-Embedding-2B",
+                "vector_type": "single_vector"
+            }),
+        )
+        .await;
+    assert_eq!(global_patch.status, StatusCode::OK);
+    assert_eq!(
+        global_patch.json()["data"]["origins"]["image"]["origin"],
+        "runtime_overlay"
+    );
+    let runtime_config = runtime_config_json(&env);
+    assert_eq!(
+        runtime_config["content_types"]["image"]["model"],
+        json!("local_sidecar/Qwen/Qwen3-VL-Embedding-2B")
+    );
+
+    let global_delete = app.delete("/settings/content-types/image").await;
+    assert_eq!(global_delete.status, StatusCode::OK);
+    let global_delete_body = global_delete.json();
+    assert_eq!(
+        global_delete_body["data"]["content_types"]["content_types"]["image"]["model"],
+        json!(format!("{LOCAL_SIDECAR_PROVIDER_ID}/{DEFAULT_MODEL_ID}"))
+    );
+    assert_eq!(
+        global_delete_body["data"]["origins"]["image"]["origin"],
+        "baseline"
+    );
+    let runtime_config = runtime_config_json(&env);
+    assert!(runtime_config["content_types"]["image"].is_null());
+
+    let invalid_content_type = app
+        .patch_json(
+            "/settings/content-types/custom",
+            json!({
+                "enabled": true,
+                "model": format!("{LOCAL_SIDECAR_PROVIDER_ID}/{DEFAULT_MODEL_ID}"),
+                "vector_type": "multi_vector_late_interaction"
+            }),
+        )
+        .await;
+    assert_eq!(
+        invalid_content_type.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let invalid_vector_type = app
+        .patch_json(
+            "/settings/content-types/text",
+            json!({
+                "enabled": true,
+                "model": "local_sidecar/Qwen/Qwen3-VL-Embedding-2B",
+                "vector_type": "multi_vector_late_interaction"
+            }),
+        )
+        .await;
+    assert_eq!(invalid_vector_type.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let library_id = create_library(&app, "content-type-overlay-crud").await;
+    let library_patch = app
+        .patch_json(
+            &format!("/libraries/{library_id}/content-types/image"),
+            json!({
+                "enabled": true,
+                "model": "local_sidecar/Qwen/Qwen3-VL-Embedding-2B",
+                "vector_type": "single_vector"
+            }),
+        )
+        .await;
+    assert_eq!(library_patch.status, StatusCode::OK);
+    assert_eq!(
+        library_patch.json()["data"]["origins"]["image"]["origin"],
+        "runtime_overlay"
+    );
+    let runtime_config = runtime_config_json(&env);
+    assert_eq!(
+        runtime_config["libraries"][library_id.as_str()]["content_types"]["image"]["model"],
+        json!("local_sidecar/Qwen/Qwen3-VL-Embedding-2B")
+    );
+
+    let library_delete = app
+        .delete(&format!("/libraries/{library_id}/content-types/image"))
+        .await;
+    assert_eq!(library_delete.status, StatusCode::OK);
+    assert_eq!(
+        library_delete.json()["data"]["origins"]["image"]["origin"],
+        "inherited"
+    );
+    let runtime_config = runtime_config_json(&env);
+    assert!(runtime_config["libraries"][library_id.as_str()].is_null());
 }
 
 #[tokio::test]
