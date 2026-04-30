@@ -2,8 +2,10 @@ import { expect, test } from "@playwright/test";
 import fs from "node:fs";
 import {
   createLibrary,
+  createMockMatchedUnits,
   createTempDocumentSearchFixtures,
   expectSearchRequiresContent,
+  fileSourceUri,
   fixtureImagePath,
   invalidQueryUploadPath,
   importFixtureIntoCurrentLibrary,
@@ -86,20 +88,21 @@ export function registerSearchImageScenarios() {
       await expect(page.getByTestId("query-image-preview")).toBeVisible();
       await mockImageSearchResults(page, [
         {
-          visual_unit_id: "vu_image_document_page_mock_0",
+          asset_id: "asset_image_document_page_mock_0",
           source_id: "src_image_document_page_mock_0",
           preview: {
             url: "http://127.0.0.1:54210/mock-preview/document-page-image-0.png",
           },
-          source_path: fixtures.pdfPath,
+          source_uri: fileSourceUri(fixtures.pdfPath),
           source_type: "pdf",
-          kind: "document_page",
+          asset_type: "document_page",
           locator: {
             page: 1,
             page_label: "1",
           },
           cursor: "search:v1:image-document-page:1",
           score: 100,
+          matched_units: createMockMatchedUnits(0),
         },
       ]);
       await page.getByTestId("search-submit-button").click();

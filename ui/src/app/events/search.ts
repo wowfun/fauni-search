@@ -46,7 +46,7 @@ import {
   selectedGlobalContentTypeKey,
   selectedGlobalModelSelection,
   selectedInventoryRepresentativePreview,
-  selectedInventoryRepresentativeVisualUnit,
+  selectedInventoryRepresentativeAsset,
   selectedInventorySource,
   selectedLibrary,
   selectedLibraryContentTypeBinding,
@@ -54,11 +54,11 @@ import {
   selectedLibraryContentTypeKey,
   selectedLibraryModelSelection,
   selectedProviderConfig,
-  selectedVisualUnitId,
-  selectedVisualUnitOriginLibraryId,
-  setLibraryQueryDocumentVisualUnit,
+  selectedAssetId,
+  selectedAssetOriginLibraryId,
+  setLibraryQueryDocumentAsset,
   setLibraryQueryVideoSource,
-  setLibraryQueryVideoVisualUnit,
+  setLibraryQueryVideoAsset,
   setPendingQueryDocumentFile,
   setPendingQueryImageFile,
   setPendingQueryVideoFile,
@@ -92,12 +92,12 @@ import {
   type SearchScopeKind,
   type SettingsSection,
   type SourceActionData,
-  type VisualUnitDetailData,
+  type AssetDetailData,
   type WorkspaceKind,
 } from "../core";
 import { renderWorkspace } from "../render/workspace";
 import { uploadQueryDocument, uploadQueryImage, uploadQueryVideo } from "./query-assets";
-import { loadVisualUnit } from "./workspace";
+import { loadAsset } from "./workspace";
 import { visibleSearchResults } from "../workspaces/search";
 
 export function onImportPathsInput(event) {
@@ -109,7 +109,7 @@ export function onSearchTextInput(event) {
 }
 
 export function onSearchFilterKindChange(event) {
-  state.searchFilters.visualUnitKind = event.target.value;
+  state.searchFilters.assetType = event.target.value;
 }
 
 export function onSearchFilterSourceTypeChange(event) {
@@ -169,16 +169,16 @@ export async function onSelectSearchResultLibraryFocus(event) {
     return;
   }
 
-  const currentSelection = selectedVisualUnitId();
+  const currentSelection = selectedAssetId();
   const currentStillVisible = results.some(
-    (item) => `${item.library_id}:${item.visual_unit_id}` === currentSelection
+    (item) => `${item.library_id}:${item.asset_id}` === currentSelection
   );
   if (currentStillVisible) {
     renderWorkspace();
     return;
   }
 
-  await loadVisualUnit(results[0].library_id, results[0].visual_unit_id);
+  await loadAsset(results[0].library_id, results[0].asset_id);
 }
 
 export async function onSearchSubmit(event) {
@@ -283,8 +283,8 @@ export async function executeSearchRequest(
   };
   state.lastSearchRequest = request;
   renderWorkspace();
-  if (!options.append && data.results?.[0]?.visual_unit_id) {
-    await loadVisualUnit(data.results[0].library_id, data.results[0].visual_unit_id);
+  if (!options.append && data.results?.[0]?.asset_id) {
+    await loadAsset(data.results[0].library_id, data.results[0].asset_id);
   }
   return state.searchOutcome;
 }
@@ -334,7 +334,7 @@ export async function runImageSearch() {
   if (state.queryImageLibraryObject) {
     await searchImage({
       kind: "library_object",
-      visual_unit_id: state.queryImageLibraryObject.visual_unit_id,
+      asset_id: state.queryImageLibraryObject.asset_id,
     });
   }
 }
@@ -382,7 +382,7 @@ export async function runVideoSearch() {
   if (state.queryVideoLibraryObject) {
     await searchVideo({
       kind: "library_object",
-      visual_unit_id: state.queryVideoLibraryObject.visual_unit_id,
+      asset_id: state.queryVideoLibraryObject.asset_id,
     });
   }
 }

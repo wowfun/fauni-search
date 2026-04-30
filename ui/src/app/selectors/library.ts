@@ -43,7 +43,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import { state } from "../state/store";
@@ -60,8 +60,8 @@ export function libraryById(libraryId: string | null | undefined): LibrarySnapsh
   return state.libraries.find((library) => library.id === libraryId) ?? null;
 }
 
-export function selectedVisualUnitOriginLibraryId(): string {
-  return state.selectedVisualUnitLibraryId || state.selectedLibraryId || "";
+export function selectedAssetOriginLibraryId(): string {
+  return state.selectedAssetLibraryId || state.selectedLibraryId || "";
 }
 
 export function allLibrariesTextScopeActive() {

@@ -915,13 +915,28 @@ export function renderVectorSpaceDiagnosticsPanel(library: LibrarySnapshot | nul
         vectorSpace.content_types.length
           ? `内容类型 ${vectorSpace.content_types.map((contentType) => contentTypeDisplayName(contentType)).join("、")}`
           : null,
-        typeof vectorSpace.retired_at_ms === "number"
-          ? `停用时间 ${new Date(vectorSpace.retired_at_ms).toLocaleString()}`
-          : null,
       ]
         .filter(Boolean)
         .map((value) => `<span class="helper">${escapeHtml(String(value))}</span>`)
         .join("");
+      const summary = vectorSpace.unit_index_summary ?? {
+        active: 0,
+        retired: 0,
+        failed: 0,
+        not_ready: 0,
+      };
+      const e2eSummary = vectorSpace.content_e2e_index_summary ?? {
+        completed: 0,
+        missing: 0,
+      };
+      const summaryLabel = [
+        `unit active ${summary.active}`,
+        `retired ${summary.retired}`,
+        `failed ${summary.failed}`,
+        `not_ready ${summary.not_ready}`,
+        `content completed ${e2eSummary.completed}`,
+        `missing ${e2eSummary.missing}`,
+      ].join(" · ");
 
       return `
         <li class="provider-resolution-row">
@@ -929,10 +944,7 @@ export function renderVectorSpaceDiagnosticsPanel(library: LibrarySnapshot | nul
             <strong>${escapeHtml(vectorSpace.vector_space_id)}</strong>
             ${details}
           </div>
-          ${renderStatusTag(
-            vectorSpace.lifecycle_state,
-            providerSelectionPillClass(vectorSpace.lifecycle_state === "active" ? "available" : "degraded") as any
-          )}
+          ${renderStatusTag(summaryLabel, summary.active ? "ready" : "muted")}
         </li>
       `;
     })

@@ -43,7 +43,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import { state } from "../state/store";
@@ -112,7 +112,7 @@ export function sourceTypeDisplayName(sourceType: string) {
   }
 }
 
-export function visualUnitKindDisplayName(kind: string) {
+export function assetTypeDisplayName(kind: string) {
   switch (kind) {
     case "image":
       return "图片";

@@ -43,20 +43,20 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import { state } from "../state/store";
 import { formatDurationMs, sourceName } from "./common";
-import { selectedVisualUnitOriginLibraryId } from "./library";
+import { selectedAssetOriginLibraryId } from "./library";
 
-export function selectedVisualUnitId() {
-  const visualUnitId = state.selectedVisualUnit?.visual_unit?.visual_unit_id ?? null;
-  const libraryId = selectedVisualUnitOriginLibraryId();
-  if (!visualUnitId || !libraryId) {
-    return visualUnitId;
+export function selectedAssetId() {
+  const assetId = state.selectedAsset?.asset?.asset_id ?? null;
+  const libraryId = selectedAssetOriginLibraryId();
+  if (!assetId || !libraryId) {
+    return assetId;
   }
-  return `${libraryId}:${visualUnitId}`;
+  return `${libraryId}:${assetId}`;
 }
 
 export function queryImagePreviewUrl() {
@@ -70,7 +70,7 @@ export function queryImagePreviewUrl() {
 
 export function queryImageStatusLabel() {
   if (state.queryImageLibraryObject) {
-    return `库内对象 · ${state.queryImageLibraryObject.visual_unit_id}`;
+    return `库内对象 · ${state.queryImageLibraryObject.asset_id}`;
   }
   if (state.queryImageAsset) {
     return `已上传 · ${state.queryImageAsset.temp_asset_id}`;
@@ -88,8 +88,8 @@ export function queryImageDisplayName() {
   if (state.queryImageAsset?.original_filename) {
     return state.queryImageAsset.original_filename;
   }
-  if (state.queryImageLibraryObject?.source_path) {
-    return sourceName(state.queryImageLibraryObject.source_path);
+  if (state.queryImageLibraryObject?.source_uri) {
+    return sourceName(state.queryImageLibraryObject.source_uri);
   }
   return null;
 }
@@ -99,7 +99,7 @@ export function activeQueryImagePreview(): PreviewReference | null {
 }
 
 export function isDocumentPageQueryImage() {
-  return state.queryImageLibraryObject?.kind === "document_page";
+  return state.queryImageLibraryObject?.asset_type === "document_page";
 }
 
 export function queryVideoPreviewUrl() {
@@ -114,7 +114,7 @@ export function queryVideoPreviewUrl() {
 
 export function queryVideoStatusLabel() {
   if (state.queryVideoLibraryObject) {
-    return `库内片段 · ${state.queryVideoLibraryObject.visual_unit_id}`;
+    return `库内片段 · ${state.queryVideoLibraryObject.asset_id}`;
   }
   if (state.queryVideoSource) {
     return `库内视频 · ${state.queryVideoSource.source_id}`;
@@ -135,11 +135,11 @@ export function queryVideoDisplayName() {
   if (state.queryVideoAsset?.original_filename) {
     return state.queryVideoAsset.original_filename;
   }
-  if (state.queryVideoLibraryObject?.source_path) {
-    return sourceName(state.queryVideoLibraryObject.source_path);
+  if (state.queryVideoLibraryObject?.source_uri) {
+    return sourceName(state.queryVideoLibraryObject.source_uri);
   }
-  if (state.queryVideoSource?.source_path) {
-    return sourceName(state.queryVideoSource.source_path);
+  if (state.queryVideoSource?.source_uri) {
+    return sourceName(state.queryVideoSource.source_uri);
   }
   return null;
 }
@@ -231,7 +231,7 @@ export function queryDocumentPreviewUrl() {
 
 export function queryDocumentStatusLabel() {
   if (state.queryDocumentLibraryObject) {
-    return `库内页面 · ${state.queryDocumentLibraryObject.visual_unit_id}`;
+    return `库内页面 · ${state.queryDocumentLibraryObject.asset_id}`;
   }
   if (state.queryDocumentAsset) {
     return `已上传 · ${state.queryDocumentAsset.temp_asset_id}`;
@@ -249,8 +249,8 @@ export function queryDocumentDisplayName() {
   if (state.queryDocumentAsset?.original_filename) {
     return state.queryDocumentAsset.original_filename;
   }
-  if (state.queryDocumentLibraryObject?.source_path) {
-    return sourceName(state.queryDocumentLibraryObject.source_path);
+  if (state.queryDocumentLibraryObject?.source_uri) {
+    return sourceName(state.queryDocumentLibraryObject.source_uri);
   }
   return null;
 }

@@ -2,11 +2,13 @@ import { expect, test } from "@playwright/test";
 import fs from "node:fs";
 import {
   createLibrary,
+  createMockMatchedUnits,
   createMockSearchResult,
   createTempSourceManagementFixtures,
   currentLibraryId,
   expectSelectionControlContrast,
   expectSearchRequiresContent,
+  fileSourceUri,
   importFixtureIntoCurrentLibrary,
   mockSingleTextSearchResult,
   openInventoryImportPanel,
@@ -381,7 +383,7 @@ export function registerSearchTextScenarios() {
                   url: "http://127.0.0.1:54210/mock-preview/clip.mp4",
                 },
                 source_type: "video",
-                kind: "video_segment",
+                asset_type: "video_segment",
                 locator: {
                   start_ms: 42_000,
                   end_ms: 50_000,
@@ -394,18 +396,18 @@ export function registerSearchTextScenarios() {
         }),
       });
     });
-    await page.route(`**/api/libraries/${libraryId}/visual-units/vu_mock_0`, async (route) => {
+    await page.route(`**/api/libraries/${libraryId}/assets/asset_mock_0`, async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           data: {
-            visual_unit: {
-              visual_unit_id: "vu_mock_0",
+            asset: {
+              asset_id: "asset_mock_0",
               source_id: "src_mock_0",
-              source_path: "/tmp/video-preview/clip.mp4",
+              source_uri: fileSourceUri("/tmp/video-preview/clip.mp4"),
               source_type: "video",
-              kind: "video_segment",
+              asset_type: "video_segment",
               locator: {
                 start_ms: 42_000,
                 end_ms: 50_000,
@@ -415,6 +417,10 @@ export function registerSearchTextScenarios() {
               url: "http://127.0.0.1:54210/mock-preview/clip.mp4",
             },
             neighbor_context: null,
+            units: createMockMatchedUnits(0).map((unit) => ({
+              unit_id: unit.unit_id,
+              unit_type: unit.unit_type,
+            })),
             library_id: libraryId,
           },
         }),
@@ -443,8 +449,8 @@ export function registerSearchTextScenarios() {
     await expect(resultPreview).toHaveAttribute("data-poll-stable-marker", "kept");
 
     await videoResult.locator(".result-select").click();
-    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
-    await expect(page.getByTestId("visual-unit-detail")).toContainText("clip.mp4");
+    await expect(page.getByTestId("asset-detail")).toBeVisible();
+    await expect(page.getByTestId("asset-detail")).toContainText("clip.mp4");
     await expect(videoResult).toHaveAttribute("data-card-stable-marker", "kept");
     await expect(resultPreview).toHaveAttribute("data-poll-stable-marker", "kept");
   });
@@ -474,7 +480,7 @@ export function registerSearchTextScenarios() {
                     progress: {
                       completed: 13,
                       total: 57,
-                      unit: "visual_unit",
+                      unit: "asset",
                     },
                     cancelable: true,
                     retryable: false,
@@ -482,7 +488,7 @@ export function registerSearchTextScenarios() {
                       attempt: 1,
                       status: "running",
                       summary:
-                        "Writing batch 13/57 (8 visual unit(s)) into staged vector-space storage.",
+                        "Writing batch 13/57 (8 assets(s)) into staged vector-space storage.",
                     },
                   },
                 ],
@@ -497,7 +503,7 @@ export function registerSearchTextScenarios() {
       "data-progress-kind",
       "determinate"
     );
-    await expect(page.getByTestId("status-capsule-progress-label")).toHaveText("13/57 visual_unit");
+    await expect(page.getByTestId("status-capsule-progress-label")).toHaveText("13/57 asset");
     await expect(
       page.getByTestId("status-capsule-button").locator(".status-dot")
     ).toHaveCSS("animation-name", "status-capsule-dot-pulse");
@@ -514,11 +520,16 @@ export function registerSearchTextScenarios() {
 
     const firstResult = page.getByTestId("result-card").first();
     await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
+    await expect(firstResult).toHaveAttribute("data-kind", "document_page");
+    await expect(firstResult).toContainText("file:///tmp/search-fixtures/formal/report-1.pdf");
     await expect(firstResult.getByTestId("result-score")).toBeVisible();
     await expect(firstResult.getByTestId("result-preview")).toBeVisible();
 
     await expect(page.getByTestId("detail-panel")).toBeVisible();
-    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+    await expect(page.getByTestId("asset-detail")).toBeVisible();
+    await expect(page.getByTestId("asset-detail")).toContainText(
+      "file:///tmp/search-fixtures/formal/report-1.pdf"
+    );
     await expect(page.getByTestId("visual-preview")).toBeVisible();
     await expect(page.locator('[data-testid="preview-link"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="detail-use-as-query-document-button"]')).toHaveCount(0);
@@ -592,7 +603,7 @@ export function registerSearchTextControlScenarios() {
     const sourcePathPrefix = "/tmp/search-fixtures/set-a";
 
     const searchRoutePattern = "**/api/search/text";
-    const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+    const detailRoutePattern = "**/api/libraries/*/assets/*";
 
     await page.route(searchRoutePattern, async (route) => {
       const payload = route.request().postDataJSON();
@@ -636,19 +647,19 @@ export function registerSearchTextControlScenarios() {
     });
 
     await page.route(detailRoutePattern, async (route) => {
-      const visualUnitId = route.request().url().split("/").pop();
-      const index = Number(String(visualUnitId).replace("vu_mock_", "")) || 0;
+      const assetId = route.request().url().split("/").pop();
+      const index = Number(String(assetId).replace("asset_mock_", "")) || 0;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           data: {
-            visual_unit: {
-              visual_unit_id: `vu_mock_${index}`,
+            asset: {
+              asset_id: `asset_mock_${index}`,
               source_id: `src_mock_${index}`,
-              source_path: `${sourcePathPrefix}/report-${index + 1}.pdf`,
+              source_uri: fileSourceUri(`${sourcePathPrefix}/report-${index + 1}.pdf`),
               source_type: "pdf",
-              kind: "document_page",
+              asset_type: "document_page",
               locator: {
                 page: index + 1,
                 page_label: String(index + 1),
@@ -658,6 +669,10 @@ export function registerSearchTextControlScenarios() {
               url: `http://127.0.0.1:54210/mock-preview/${index}.png`,
             },
             neighbor_context: null,
+            units: createMockMatchedUnits(index).map((unit) => ({
+              unit_id: unit.unit_id,
+              unit_type: unit.unit_type,
+            })),
           },
         }),
       });
@@ -689,7 +704,7 @@ export function registerSearchTextControlScenarios() {
         text: "Revenue 46 percent",
         top_k: 5,
         filters: {
-          "visual_unit.kind": "document_page",
+          "asset_type": "document_page",
           source_type: "pdf",
           path_prefix: sourcePathPrefix,
         },
@@ -698,7 +713,7 @@ export function registerSearchTextControlScenarios() {
         text: "Revenue 46 percent",
         cursor: "search:v1:5",
         filters: {
-          "visual_unit.kind": "document_page",
+          "asset_type": "document_page",
           source_type: "pdf",
           path_prefix: sourcePathPrefix,
         },
@@ -789,7 +804,7 @@ export function registerSearchTextControlScenarios() {
     const searchRequests = [];
     const librariesRoutePattern = "**/api/libraries";
     const searchRoutePattern = "**/api/search/text";
-    const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+    const detailRoutePattern = "**/api/libraries/*/assets/*";
 
     await page.route(librariesRoutePattern, async (route) => {
       await route.fulfill({
@@ -834,12 +849,12 @@ export function registerSearchTextControlScenarios() {
         contentType: "application/json",
         body: JSON.stringify({
           data: {
-            visual_unit: {
-              visual_unit_id: "vu_mock_0",
+            asset: {
+              asset_id: "asset_mock_0",
               source_id: "src_mock_0",
-              source_path: "/tmp/search-fixtures/set-b/ready-report.pdf",
+              source_uri: fileSourceUri("/tmp/search-fixtures/set-b/ready-report.pdf"),
               source_type: "pdf",
-              kind: "document_page",
+              asset_type: "document_page",
               locator: {
                 page: 1,
                 page_label: "1",
@@ -849,6 +864,10 @@ export function registerSearchTextControlScenarios() {
               url: "http://127.0.0.1:54210/mock-preview/0.png",
             },
             neighbor_context: null,
+            units: createMockMatchedUnits(0).map((unit) => ({
+              unit_id: unit.unit_id,
+              unit_type: unit.unit_type,
+            })),
             library_id: libraryId,
           },
         }),
@@ -952,7 +971,7 @@ export function registerSearchTextControlScenarios() {
       });
     const librariesRoutePattern = "**/api/libraries";
     const searchRoutePattern = "**/api/search/text";
-    const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+    const detailRoutePattern = "**/api/libraries/*/assets/*";
 
     await page.route(librariesRoutePattern, async (route) => {
       await route.fulfill({
@@ -997,18 +1016,18 @@ export function registerSearchTextControlScenarios() {
       const pathname = new URL(route.request().url()).pathname;
       const parts = pathname.split("/");
       const libraryId = parts[parts.indexOf("libraries") + 1] ?? secondReadyLibraryId;
-      const visualUnitId = parts.at(-1) ?? "vu_mock_0";
+      const assetId = parts.at(-1) ?? "asset_mock_0";
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           data: {
-            visual_unit: {
-              visual_unit_id: visualUnitId,
+            asset: {
+              asset_id: assetId,
               source_id: `src_${libraryId}`,
-              source_path: `/tmp/search-fixtures/${libraryId}/focused-report.pdf`,
+              source_uri: fileSourceUri(`/tmp/search-fixtures/${libraryId}/focused-report.pdf`),
               source_type: "pdf",
-              kind: "document_page",
+              asset_type: "document_page",
               locator: {
                 page: 1,
                 page_label: "1",
@@ -1018,6 +1037,10 @@ export function registerSearchTextControlScenarios() {
               url: `http://127.0.0.1:54210/mock-preview/${libraryId}.png`,
             },
             neighbor_context: null,
+            units: createMockMatchedUnits(0).map((unit) => ({
+              unit_id: unit.unit_id,
+              unit_type: unit.unit_type,
+            })),
             library_id: libraryId,
           },
         }),
@@ -1139,7 +1162,7 @@ export function registerSearchTextControlScenarios() {
       });
     const librariesRoutePattern = "**/api/libraries";
     const searchRoutePattern = "**/api/search/text";
-    const detailRoutePattern = "**/api/libraries/*/visual-units/*";
+    const detailRoutePattern = "**/api/libraries/*/assets/*";
 
     await page.route(librariesRoutePattern, async (route) => {
       await route.fulfill({
@@ -1182,12 +1205,12 @@ export function registerSearchTextControlScenarios() {
         contentType: "application/json",
         body: JSON.stringify({
           data: {
-            visual_unit: {
-              visual_unit_id: "vu_mock_0",
+            asset: {
+              asset_id: "asset_mock_0",
               source_id: "src_mock_0",
-              source_path: "/tmp/search-fixtures/set-b/ready-report.pdf",
+              source_uri: fileSourceUri("/tmp/search-fixtures/set-b/ready-report.pdf"),
               source_type: "pdf",
-              kind: "document_page",
+              asset_type: "document_page",
               locator: {
                 page: 1,
                 page_label: "1",
@@ -1197,6 +1220,10 @@ export function registerSearchTextControlScenarios() {
               url: "http://127.0.0.1:54210/mock-preview/0.png",
             },
             neighbor_context: null,
+            units: createMockMatchedUnits(0).map((unit) => ({
+              unit_id: unit.unit_id,
+              unit_type: unit.unit_type,
+            })),
             library_id: libraryId,
           },
         }),

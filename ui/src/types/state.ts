@@ -20,7 +20,7 @@ import type {
   SourceRootSnapshot,
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
-  VisualUnitDetailData,
+  AssetDetailData,
 } from "./api";
 import type {
   InventoryFilters,
@@ -101,8 +101,8 @@ export interface AppState {
   queryDocumentStartPageDraft: string;
   queryDocumentEndPageDraft: string;
   importReceipt: ImportPathsData | null;
-  selectedVisualUnit: VisualUnitDetailData | null;
-  selectedVisualUnitLibraryId: string;
+  selectedAsset: AssetDetailData | null;
+  selectedAssetLibraryId: string;
   searchOutcome: SearchOutcomeState | null;
   searchInFlight: boolean;
   searchResultLibraryFocusId: string;

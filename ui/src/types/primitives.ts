@@ -6,7 +6,7 @@ export type SettingsSection =
   | "library-overrides"
   | "providers"
   | "diagnostics";
-export type VisualUnitKind = "image" | "document_page" | "video_segment" | string;
+export type AssetType = "image" | "document_page" | "video_segment" | string;
 export type Locator = Record<string, string | number | boolean | null | undefined>;
 export type ModelTestModality = "text" | "image";
 
@@ -21,7 +21,7 @@ export interface InventoryFilters {
 }
 
 export interface SearchFilters {
-  visualUnitKind: string;
+  assetType: string;
   sourceType: string;
   pathPrefix: string;
   timeRangeStartMsDraft: string;

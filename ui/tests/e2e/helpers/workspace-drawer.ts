@@ -49,8 +49,17 @@ export function registerWorkspaceDrawerScenarios() {
             vector_spaces: [
               {
                 vector_space_id: "vs_active",
-                lifecycle_state: "active",
                 content_types: ["document"],
+                unit_index_summary: {
+                  active: 1,
+                  retired: 0,
+                  failed: 0,
+                  not_ready: 0,
+                },
+                content_e2e_index_summary: {
+                  completed: 1,
+                  missing: 0,
+                },
                 provider_id: "local_sidecar",
                 model_id: "athrael-soju/colqwen3.5-4.5B-v3",
                 model_version: "main",
@@ -58,9 +67,20 @@ export function registerWorkspaceDrawerScenarios() {
               },
               {
                 vector_space_id: "vs_retired",
-                lifecycle_state: "retired",
                 content_types: [],
-                retired_at_ms: Date.now() - 60_000,
+                unit_index_summary: {
+                  active: 0,
+                  retired: 1,
+                  failed: 0,
+                  not_ready: 0,
+                },
+                content_e2e_index_summary: {
+                  completed: 0,
+                  missing: 0,
+                },
+                cleanup_summary: {
+                  retired_orphan_retrieval_namespaces: 1,
+                },
               },
             ],
           },
@@ -118,9 +138,9 @@ export function registerWorkspaceDrawerScenarios() {
             action: "cleanup_retired_vector_spaces",
             accepted: [
               {
-                target_kind: "vector_space",
+                target_kind: "retrieval_namespace",
                 target_id: "vs_retired",
-                message: "已加入退役执行空间清理队列。",
+                message: "已加入检索命名空间清理队列。",
               },
             ],
             rejected: [],
@@ -164,7 +184,7 @@ export function registerWorkspaceDrawerScenarios() {
     await page.getByTestId("inventory-action-library-maintenance").click();
     await expect(page.getByTestId("inventory-library-maintenance-panel")).toBeVisible();
     await expect(page.getByTestId("inventory-library-maintenance-summary")).toContainText(
-      "退役执行空间 1"
+      "待清理检索命名空间 1"
     );
     await expect(page.getByTestId("inventory-library-maintenance-rebuild")).toBeVisible();
     await expect(page.getByTestId("inventory-library-maintenance-cleanup")).toBeEnabled();

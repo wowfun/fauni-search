@@ -46,7 +46,7 @@ import {
   selectedGlobalContentTypeKey,
   selectedGlobalModelSelection,
   selectedInventoryRepresentativePreview,
-  selectedInventoryRepresentativeVisualUnit,
+  selectedInventoryRepresentativeAsset,
   selectedInventorySource,
   selectedLibrary,
   selectedLibraryContentTypeBinding,
@@ -54,11 +54,11 @@ import {
   selectedLibraryContentTypeKey,
   selectedLibraryModelSelection,
   selectedProviderConfig,
-  selectedVisualUnitId,
-  selectedVisualUnitOriginLibraryId,
-  setLibraryQueryDocumentVisualUnit,
+  selectedAssetId,
+  selectedAssetOriginLibraryId,
+  setLibraryQueryDocumentAsset,
   setLibraryQueryVideoSource,
-  setLibraryQueryVideoVisualUnit,
+  setLibraryQueryVideoAsset,
   setPendingQueryDocumentFile,
   setPendingQueryImageFile,
   setPendingQueryVideoFile,
@@ -92,11 +92,11 @@ import {
   type SearchScopeKind,
   type SettingsSection,
   type SourceActionData,
-  type VisualUnitDetailData,
+  type AssetDetailData,
   type WorkspaceKind,
 } from "../core";
 import { renderWorkspace } from "../render/workspace";
-import { loadVisualUnit } from "./workspace";
+import { loadAsset } from "./workspace";
 
 export async function triggerJobBackedAction<T extends { job?: JobSnapshot | null }>(
   path,
@@ -128,7 +128,7 @@ export async function onCleanupRetiredVectorSpaces() {
   try {
     await triggerJobBackedAction<MaintenanceActionData>(
       `/libraries/${state.selectedLibraryId}/maintenance`,
-      "正在清理退役执行空间...",
+      "正在清理检索命名空间...",
       {
         method: "POST",
         body: JSON.stringify({ action: "cleanup_retired_vector_spaces" }),
@@ -251,11 +251,11 @@ export async function importPaths(paths: string[]): Promise<ImportPathsData> {
     }
   }
 
-  const firstVisualUnit = state.importReceipt.accepted
-    .flatMap((item) => item.visual_units ?? [])
+  const firstAsset = state.importReceipt.accepted
+    .flatMap((item) => item.assets ?? [])
     .at(0);
-  if (firstVisualUnit && state.selectedLibraryId) {
-    await loadVisualUnit(state.selectedLibraryId, firstVisualUnit.visual_unit_id);
+  if (firstAsset && state.selectedLibraryId) {
+    await loadAsset(state.selectedLibraryId, firstAsset.asset_id);
   }
   return state.importReceipt;
 }

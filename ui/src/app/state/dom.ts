@@ -7,27 +7,27 @@ import {
   type FocusedEditableState,
 } from "./store";
 
-export function selectedVisualUnitDetailSignature(): string | null {
-  if (!state.selectedVisualUnit) {
+export function selectedAssetDetailSignature(): string | null {
+  if (!state.selectedAsset) {
     return null;
   }
 
-  const visualUnit = state.selectedVisualUnit.visual_unit;
+  const asset = state.selectedAsset.asset;
   return JSON.stringify({
-    library_id: state.selectedVisualUnitLibraryId || state.selectedLibraryId || null,
-    visual_unit_id: visualUnit.visual_unit_id,
-    source_id: visualUnit.source_id,
-    source_path: visualUnit.source_path,
-    source_type: visualUnit.source_type,
-    kind: visualUnit.kind,
-    locator: visualUnit.locator,
-    preview_url: state.selectedVisualUnit.preview?.url ?? null,
-    neighbor_context: state.selectedVisualUnit.neighbor_context ?? null,
+    library_id: state.selectedAssetLibraryId || state.selectedLibraryId || null,
+    asset_id: asset.asset_id,
+    source_id: asset.source_id,
+    source_uri: asset.source_uri,
+    source_type: asset.source_type,
+    asset_type: asset.asset_type,
+    locator: asset.locator,
+    preview_url: state.selectedAsset.preview?.url ?? null,
+    neighbor_context: state.selectedAsset.neighbor_context ?? null,
   });
 }
 
 export function currentDetailPanelRenderKey(): string | null {
-  const detailSignature = selectedVisualUnitDetailSignature();
+  const detailSignature = selectedAssetDetailSignature();
   if (!detailSignature) {
     return null;
   }
@@ -39,7 +39,7 @@ export function currentDetailPanelRenderKey(): string | null {
 }
 
 export function searchDetailSheetIsOpen() {
-  return Boolean(state.selectedVisualUnit && state.searchDetailSheetOpen);
+  return Boolean(state.selectedAsset && state.searchDetailSheetOpen);
 }
 
 export function inventoryDetailSheetIsOpen() {

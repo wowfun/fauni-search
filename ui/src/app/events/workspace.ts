@@ -46,7 +46,7 @@ import {
   selectedGlobalContentTypeKey,
   selectedGlobalModelSelection,
   selectedInventoryRepresentativePreview,
-  selectedInventoryRepresentativeVisualUnit,
+  selectedInventoryRepresentativeAsset,
   selectedInventorySource,
   selectedLibrary,
   selectedLibraryContentTypeBinding,
@@ -54,13 +54,13 @@ import {
   selectedLibraryContentTypeKey,
   selectedLibraryModelSelection,
   selectedProviderConfig,
-  selectedVisualUnitId,
-  selectedVisualUnitOriginLibraryId,
+  selectedAssetId,
+  selectedAssetOriginLibraryId,
   setInventoryImportOpen,
   setInventorySourceManagementOpen,
-  setLibraryQueryDocumentVisualUnit,
+  setLibraryQueryDocumentAsset,
   setLibraryQueryVideoSource,
-  setLibraryQueryVideoVisualUnit,
+  setLibraryQueryVideoAsset,
   setPendingQueryDocumentFile,
   setPendingQueryImageFile,
   setPendingQueryVideoFile,
@@ -94,7 +94,7 @@ import {
   type SearchScopeKind,
   type SettingsSection,
   type SourceActionData,
-  type VisualUnitDetailData,
+  type AssetDetailData,
   type WorkspaceKind,
 } from "../core";
 import { renderWorkspace } from "../render/workspace";
@@ -277,17 +277,17 @@ export async function onUtilitiesAction(event) {
   }
 }
 
-export async function loadVisualUnit(libraryId: string, visualUnitId: string): Promise<void> {
+export async function loadAsset(libraryId: string, assetId: string): Promise<void> {
   if (!libraryId) {
     return;
   }
 
   try {
     state.globalError = null;
-    state.selectedVisualUnit = await apiRequest<VisualUnitDetailData>(
-      `/libraries/${libraryId}/visual-units/${encodeURIComponent(visualUnitId)}`
+    state.selectedAsset = await apiRequest<AssetDetailData>(
+      `/libraries/${libraryId}/assets/${encodeURIComponent(assetId)}`
     );
-    state.selectedVisualUnitLibraryId = libraryId;
+    state.selectedAssetLibraryId = libraryId;
     state.searchDetailSheetOpen = true;
     renderWorkspace();
   } catch (error) {
@@ -296,18 +296,18 @@ export async function loadVisualUnit(libraryId: string, visualUnitId: string): P
   }
 }
 
-export async function onSelectVisualUnit(event) {
-  const visualUnitId = event.currentTarget.dataset.visualUnitId;
+export async function onSelectAsset(event) {
+  const assetId = event.currentTarget.dataset.assetId;
   const libraryId =
-    event.currentTarget.dataset.visualUnitLibraryId || state.selectedLibraryId || "";
+    event.currentTarget.dataset.assetLibraryId || state.selectedLibraryId || "";
   if (
-    visualUnitId &&
-    `${libraryId}:${visualUnitId}` === selectedVisualUnitId() &&
+    assetId &&
+    `${libraryId}:${assetId}` === selectedAssetId() &&
     !state.searchDetailSheetOpen
   ) {
     state.searchDetailSheetOpen = true;
     renderWorkspace();
     return;
   }
-  await loadVisualUnit(libraryId, visualUnitId);
+  await loadAsset(libraryId, assetId);
 }

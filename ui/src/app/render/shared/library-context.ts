@@ -115,7 +115,7 @@ function renderSearchScopeBar(
     Boolean(state.searchFilters.timeRangeStartMsDraft.trim()) ||
     Boolean(state.searchFilters.timeRangeEndMsDraft.trim());
   const hasFilterSelections =
-    Boolean(state.searchFilters.visualUnitKind) ||
+    Boolean(state.searchFilters.assetType) ||
     Boolean(state.searchFilters.sourceType) ||
     hasAdvancedFilters;
 

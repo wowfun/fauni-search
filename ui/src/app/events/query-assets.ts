@@ -46,7 +46,7 @@ import {
   selectedGlobalContentTypeKey,
   selectedGlobalModelSelection,
   selectedInventoryRepresentativePreview,
-  selectedInventoryRepresentativeVisualUnit,
+  selectedInventoryRepresentativeAsset,
   selectedInventorySource,
   selectedLibrary,
   selectedLibraryContentTypeBinding,
@@ -54,11 +54,11 @@ import {
   selectedLibraryContentTypeKey,
   selectedLibraryModelSelection,
   selectedProviderConfig,
-  selectedVisualUnitId,
-  selectedVisualUnitOriginLibraryId,
-  setLibraryQueryDocumentVisualUnit,
+  selectedAssetId,
+  selectedAssetOriginLibraryId,
+  setLibraryQueryDocumentAsset,
   setLibraryQueryVideoSource,
-  setLibraryQueryVideoVisualUnit,
+  setLibraryQueryVideoAsset,
   setPendingQueryDocumentFile,
   setPendingQueryImageFile,
   setPendingQueryVideoFile,
@@ -92,7 +92,7 @@ import {
   type SearchScopeKind,
   type SettingsSection,
   type SourceActionData,
-  type VisualUnitDetailData,
+  type AssetDetailData,
   type WorkspaceKind,
 } from "../core";
 import { renderWorkspace } from "../render/workspace";
@@ -367,60 +367,60 @@ export function onQueryDocumentRangeEndInput(event) {
 }
 
 export function resolveLibraryObjectQueryImage(
-  visualUnitId,
+  assetId,
   libraryId: string | null = null
 ): LibraryObjectQueryImage | null {
   const resultItem =
     state.searchOutcome?.results?.find(
       (item) =>
-        item.visual_unit_id === visualUnitId && (!libraryId || item.library_id === libraryId)
+        item.asset_id === assetId && (!libraryId || item.library_id === libraryId)
     ) ?? null;
-  if (resultItem?.kind === "image") {
+  if (resultItem?.asset_type === "image") {
     return {
       library_id: resultItem.library_id,
-      visual_unit_id: resultItem.visual_unit_id,
-      kind: resultItem.kind,
-      source_path: resultItem.source_path,
+      asset_id: resultItem.asset_id,
+      asset_type: resultItem.asset_type,
+      source_uri: resultItem.source_uri,
       preview: resultItem.preview,
     };
   }
-  if (resultItem?.kind === "document_page") {
+  if (resultItem?.asset_type === "document_page") {
     return {
       library_id: resultItem.library_id,
-      visual_unit_id: resultItem.visual_unit_id,
-      kind: resultItem.kind,
-      source_path: resultItem.source_path,
+      asset_id: resultItem.asset_id,
+      asset_type: resultItem.asset_type,
+      source_uri: resultItem.source_uri,
       preview: resultItem.preview,
     };
   }
 
-  const detailVisualUnit = state.selectedVisualUnit?.visual_unit;
+  const detailAsset = state.selectedAsset?.asset;
   if (
-    detailVisualUnit?.visual_unit_id === visualUnitId &&
-    (detailVisualUnit.kind === "image" || detailVisualUnit.kind === "document_page")
+    detailAsset?.asset_id === assetId &&
+    (detailAsset.asset_type === "image" || detailAsset.asset_type === "document_page")
   ) {
     return {
-      library_id: selectedVisualUnitOriginLibraryId(),
-      visual_unit_id: detailVisualUnit.visual_unit_id,
-      kind: detailVisualUnit.kind,
-      source_path: detailVisualUnit.source_path,
-      preview: state.selectedVisualUnit.preview,
+      library_id: selectedAssetOriginLibraryId(),
+      asset_id: detailAsset.asset_id,
+      asset_type: detailAsset.asset_type,
+      source_uri: detailAsset.source_uri,
+      preview: state.selectedAsset.preview,
     };
   }
 
   const inventorySource = selectedInventorySource();
-  const representativeVisual = selectedInventoryRepresentativeVisualUnit(inventorySource);
+  const representativeVisual = selectedInventoryRepresentativeAsset(inventorySource);
   const representativePreview = selectedInventoryRepresentativePreview(inventorySource);
   if (
-    representativeVisual?.visual_unit_id === visualUnitId &&
+    representativeVisual?.asset_id === assetId &&
     representativePreview &&
-    (representativeVisual.kind === "image" || representativeVisual.kind === "document_page")
+    (representativeVisual.asset_type === "image" || representativeVisual.asset_type === "document_page")
   ) {
     return {
       library_id: state.selectedLibraryId,
-      visual_unit_id: representativeVisual.visual_unit_id,
-      kind: representativeVisual.kind,
-      source_path: inventorySource?.source_path ?? "",
+      asset_id: representativeVisual.asset_id,
+      asset_type: representativeVisual.asset_type,
+      source_uri: inventorySource?.source_uri ?? "",
       preview: representativePreview,
     };
   }
@@ -429,50 +429,50 @@ export function resolveLibraryObjectQueryImage(
 }
 
 export function resolveLibraryObjectQueryVideo(
-  visualUnitId,
+  assetId,
   libraryId: string | null = null
 ): LibraryObjectQueryVideo | null {
   const resultItem =
     state.searchOutcome?.results?.find(
       (item) =>
-        item.visual_unit_id === visualUnitId && (!libraryId || item.library_id === libraryId)
+        item.asset_id === assetId && (!libraryId || item.library_id === libraryId)
     ) ?? null;
-  if (resultItem?.kind === "video_segment") {
+  if (resultItem?.asset_type === "video_segment") {
     return {
       library_id: resultItem.library_id,
-      visual_unit_id: resultItem.visual_unit_id,
-      kind: resultItem.kind,
-      source_path: resultItem.source_path,
+      asset_id: resultItem.asset_id,
+      asset_type: resultItem.asset_type,
+      source_uri: resultItem.source_uri,
       locator: resultItem.locator,
       preview: resultItem.preview,
     };
   }
 
-  const detailVisualUnit = state.selectedVisualUnit?.visual_unit;
-  if (detailVisualUnit?.visual_unit_id === visualUnitId && detailVisualUnit.kind === "video_segment") {
+  const detailAsset = state.selectedAsset?.asset;
+  if (detailAsset?.asset_id === assetId && detailAsset.asset_type === "video_segment") {
     return {
-      library_id: selectedVisualUnitOriginLibraryId(),
-      visual_unit_id: detailVisualUnit.visual_unit_id,
-      kind: detailVisualUnit.kind,
-      source_path: detailVisualUnit.source_path,
-      locator: detailVisualUnit.locator,
-      preview: state.selectedVisualUnit.preview,
+      library_id: selectedAssetOriginLibraryId(),
+      asset_id: detailAsset.asset_id,
+      asset_type: detailAsset.asset_type,
+      source_uri: detailAsset.source_uri,
+      locator: detailAsset.locator,
+      preview: state.selectedAsset.preview,
     };
   }
 
   const inventorySource = selectedInventorySource();
-  const representativeVisual = selectedInventoryRepresentativeVisualUnit(inventorySource);
+  const representativeVisual = selectedInventoryRepresentativeAsset(inventorySource);
   const representativePreview = selectedInventoryRepresentativePreview(inventorySource);
   if (
-    representativeVisual?.visual_unit_id === visualUnitId &&
+    representativeVisual?.asset_id === assetId &&
     representativePreview &&
-    representativeVisual.kind === "video_segment"
+    representativeVisual.asset_type === "video_segment"
   ) {
     return {
       library_id: state.selectedLibraryId,
-      visual_unit_id: representativeVisual.visual_unit_id,
-      kind: representativeVisual.kind,
-      source_path: inventorySource?.source_path ?? "",
+      asset_id: representativeVisual.asset_id,
+      asset_type: representativeVisual.asset_type,
+      source_uri: inventorySource?.source_uri ?? "",
       locator: representativeVisual.locator,
       preview: representativePreview,
     };
@@ -482,22 +482,22 @@ export function resolveLibraryObjectQueryVideo(
 }
 
 export function resolveLibraryObjectQueryDocument(
-  visualUnitId,
+  assetId,
   libraryId: string | null = null
 ): LibraryObjectQueryDocument | null {
   const resultItem =
     state.searchOutcome?.results?.find(
       (item) =>
-        item.visual_unit_id === visualUnitId && (!libraryId || item.library_id === libraryId)
+        item.asset_id === assetId && (!libraryId || item.library_id === libraryId)
     ) ?? null;
-  if (resultItem?.kind === "document_page") {
+  if (resultItem?.asset_type === "document_page") {
     const page = Number(resultItem.locator?.page ?? 0);
     return {
       library_id: resultItem.library_id,
-      visual_unit_id: resultItem.visual_unit_id,
+      asset_id: resultItem.asset_id,
       source_id: resultItem.source_id,
-      kind: resultItem.kind,
-      source_path: resultItem.source_path,
+      asset_type: resultItem.asset_type,
+      source_uri: resultItem.source_uri,
       locator:
         page > 0
           ? {
@@ -509,15 +509,15 @@ export function resolveLibraryObjectQueryDocument(
     };
   }
 
-  const detailVisualUnit = state.selectedVisualUnit?.visual_unit;
-  if (detailVisualUnit?.visual_unit_id === visualUnitId && detailVisualUnit.kind === "document_page") {
-    const page = Number(detailVisualUnit.locator?.page ?? 0);
+  const detailAsset = state.selectedAsset?.asset;
+  if (detailAsset?.asset_id === assetId && detailAsset.asset_type === "document_page") {
+    const page = Number(detailAsset.locator?.page ?? 0);
     return {
-      library_id: selectedVisualUnitOriginLibraryId(),
-      visual_unit_id: detailVisualUnit.visual_unit_id,
-      source_id: detailVisualUnit.source_id,
-      kind: detailVisualUnit.kind,
-      source_path: detailVisualUnit.source_path,
+      library_id: selectedAssetOriginLibraryId(),
+      asset_id: detailAsset.asset_id,
+      source_id: detailAsset.source_id,
+      asset_type: detailAsset.asset_type,
+      source_uri: detailAsset.source_uri,
       locator:
         page > 0
           ? {
@@ -525,25 +525,25 @@ export function resolveLibraryObjectQueryDocument(
               end_page: page,
             }
           : null,
-      preview: state.selectedVisualUnit.preview,
+      preview: state.selectedAsset.preview,
     };
   }
 
   const inventorySource = selectedInventorySource();
-  const representativeVisual = selectedInventoryRepresentativeVisualUnit(inventorySource);
+  const representativeVisual = selectedInventoryRepresentativeAsset(inventorySource);
   const representativePreview = selectedInventoryRepresentativePreview(inventorySource);
   if (
-    representativeVisual?.visual_unit_id === visualUnitId &&
+    representativeVisual?.asset_id === assetId &&
     representativePreview &&
-    representativeVisual.kind === "document_page"
+    representativeVisual.asset_type === "document_page"
   ) {
     const page = Number(representativeVisual.locator?.page ?? 0);
     return {
       library_id: state.selectedLibraryId,
-      visual_unit_id: representativeVisual.visual_unit_id,
+      asset_id: representativeVisual.asset_id,
       source_id: representativeVisual.source_id,
-      kind: representativeVisual.kind,
-      source_path: inventorySource?.source_path ?? "",
+      asset_type: representativeVisual.asset_type,
+      source_uri: inventorySource?.source_uri ?? "",
       locator:
         page > 0
           ? {
@@ -559,9 +559,9 @@ export function resolveLibraryObjectQueryDocument(
 }
 
 export async function onUseAsQueryImage(event) {
-  const visualUnitId = event.currentTarget.dataset.useQueryVisualUnitId;
+  const assetId = event.currentTarget.dataset.useQueryAssetId;
   const libraryId = event.currentTarget.dataset.useQueryLibraryId ?? null;
-  const libraryObject = resolveLibraryObjectQueryImage(visualUnitId, libraryId);
+  const libraryObject = resolveLibraryObjectQueryImage(assetId, libraryId);
   if (!libraryObject) {
     state.globalError = {
       code: "not_supported",
@@ -593,9 +593,9 @@ export async function onUseAsQueryImage(event) {
 }
 
 export async function onUseAsQueryVideo(event) {
-  const visualUnitId = event.currentTarget.dataset.useQueryVideoVisualUnitId;
+  const assetId = event.currentTarget.dataset.useQueryVideoAssetId;
   const libraryId = event.currentTarget.dataset.useQueryLibraryId ?? null;
-  const libraryObject = resolveLibraryObjectQueryVideo(visualUnitId, libraryId);
+  const libraryObject = resolveLibraryObjectQueryVideo(assetId, libraryId);
   if (!libraryObject) {
     state.globalError = {
       code: "not_supported",
@@ -614,7 +614,7 @@ export async function onUseAsQueryVideo(event) {
       return;
     }
   }
-  setLibraryQueryVideoVisualUnit(libraryObject);
+  setLibraryQueryVideoAsset(libraryObject);
   state.activeWorkspace = "search";
   state.searchMode = "video";
   state.searchScope = "library";
@@ -626,9 +626,9 @@ export async function onUseAsQueryVideo(event) {
 }
 
 export async function onUseAsQueryDocument(event) {
-  const visualUnitId = event.currentTarget.dataset.useQueryDocumentVisualUnitId;
+  const assetId = event.currentTarget.dataset.useQueryDocumentAssetId;
   const libraryId = event.currentTarget.dataset.useQueryLibraryId ?? null;
-  const libraryObject = resolveLibraryObjectQueryDocument(visualUnitId, libraryId);
+  const libraryObject = resolveLibraryObjectQueryDocument(assetId, libraryId);
   if (!libraryObject) {
     state.globalError = {
       code: "not_supported",
@@ -647,7 +647,7 @@ export async function onUseAsQueryDocument(event) {
       return;
     }
   }
-  setLibraryQueryDocumentVisualUnit(libraryObject);
+  setLibraryQueryDocumentAsset(libraryObject);
   state.activeWorkspace = "search";
   state.searchMode = "document";
   state.searchScope = "library";

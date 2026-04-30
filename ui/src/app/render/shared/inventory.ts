@@ -3,7 +3,7 @@ import { retiredVectorSpaceDiagnostics } from "../../selectors/runtime";
 import { state } from "../../state/store";
 
 export function renderInventoryActionRow(library: LibrarySnapshot | null) {
-  const retiredVectorSpaces = retiredVectorSpaceDiagnostics();
+  const cleanupCandidates = retiredVectorSpaceDiagnostics();
   return `
     <div class="inventory-action-stack">
       <div class="inline-actions inventory-action-row">
@@ -66,7 +66,7 @@ export function renderInventoryActionRow(library: LibrarySnapshot | null) {
                   <h4>低频维护动作</h4>
                 </div>
                 <p class="helper" data-testid="inventory-library-maintenance-summary">
-                  ${retiredVectorSpaces.length ? `退役执行空间 ${retiredVectorSpaces.length}` : "当前没有退役执行空间待清理"}
+                  ${cleanupCandidates.length ? `待清理检索命名空间 ${cleanupCandidates.length}` : "当前没有检索命名空间待清理"}
                 </p>
               </div>
               <div class="inline-actions inventory-library-maintenance-actions">
@@ -84,9 +84,9 @@ export function renderInventoryActionRow(library: LibrarySnapshot | null) {
                   class="ui-button ui-button-secondary"
                   data-testid="inventory-library-maintenance-cleanup"
                   data-utilities-action="cleanup-retired-vector-spaces"
-                  ${library && retiredVectorSpaces.length ? "" : "disabled"}
+                  ${library && cleanupCandidates.length ? "" : "disabled"}
                 >
-                  清理退役执行空间
+                  清理检索命名空间
                 </button>
               </div>
             </div>

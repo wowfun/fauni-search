@@ -43,7 +43,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import { state } from "../state/store";
@@ -59,8 +59,8 @@ export function selectedInventorySource(): SourceInventoryItem | null {
   );
 }
 
-export function selectedInventoryRepresentativeVisualUnit(source: SourceInventoryItem | null) {
-  return source?.representative_visual_unit ?? null;
+export function selectedInventoryRepresentativeAsset(source: SourceInventoryItem | null) {
+  return source?.representative_asset ?? null;
 }
 
 export function selectedInventoryRepresentativePreview(source: SourceInventoryItem | null) {

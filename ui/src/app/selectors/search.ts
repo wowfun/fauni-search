@@ -43,12 +43,12 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import { state } from "../state/store";
 import { allLibrariesTextScopeActive } from "./library";
-import { libraryDisplayName, sourceTypeDisplayName, visualUnitKindDisplayName } from "./common";
+import { libraryDisplayName, sourceTypeDisplayName, assetTypeDisplayName } from "./common";
 import { libraryOperationalReadiness } from "./runtime";
 
 export function canSearchLibrary(library: LibrarySnapshot | null) {
@@ -210,8 +210,8 @@ export function searchHasMoreResults() {
 
 export function searchFiltersSummary() {
   const tokens = [];
-  if (state.searchFilters.visualUnitKind) {
-    tokens.push(`对象类型=${visualUnitKindDisplayName(state.searchFilters.visualUnitKind)}`);
+  if (state.searchFilters.assetType) {
+    tokens.push(`对象类型=${assetTypeDisplayName(state.searchFilters.assetType)}`);
   }
   if (state.searchFilters.sourceType) {
     tokens.push(`来源类型=${sourceTypeDisplayName(state.searchFilters.sourceType)}`);
@@ -251,8 +251,8 @@ export function parseNonNegativeIntegerDraft(value: string, field: string) {
 
 export function searchFiltersPayload() {
   const filters: Record<string, unknown> = {};
-  if (state.searchFilters.visualUnitKind) {
-    filters["visual_unit.kind"] = state.searchFilters.visualUnitKind;
+  if (state.searchFilters.assetType) {
+    filters["asset_type"] = state.searchFilters.assetType;
   }
   if (state.searchFilters.sourceType) {
     filters.source_type = state.searchFilters.sourceType;

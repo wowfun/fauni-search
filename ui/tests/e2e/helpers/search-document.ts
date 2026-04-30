@@ -29,7 +29,7 @@ export function registerSearchDocumentScenarios() {
       await documentPageResult.locator(".result-select").click();
       await expect(page.getByTestId("result-score").first()).toBeVisible();
       await expect(page.getByTestId("detail-panel")).toBeVisible();
-      await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+      await expect(page.getByTestId("asset-detail")).toBeVisible();
     } finally {
       fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
     }

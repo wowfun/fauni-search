@@ -106,7 +106,7 @@ import {
   onSelectSearchScope,
   onSelectSettingsSection,
   onSettingsDiagnosticsJobsToggle,
-  onSelectVisualUnit,
+  onSelectAsset,
   onSelectWorkspace,
   onSourceFilterRootChange,
   onSourceFilterStatusChange,
@@ -149,7 +149,7 @@ import {
   renderSearchLoadingNotice,
   renderSearchNextStepDock,
   renderSearchOutcome,
-  renderVisualUnitDetail,
+  renderAssetDetail,
 } from "../workspaces/search";
 import { renderSettingsPanel } from "../workspaces/settings";
 
@@ -204,7 +204,7 @@ export function patchWorkspaceMarkupPreservingDetail(
   const syncOptionalRegion = (parent, selector, nextNode) => {
     const currentNode = parent.querySelector(selector);
     if (currentNode instanceof HTMLElement && nextNode instanceof HTMLElement) {
-      currentNode.replaceWith(nextNode);
+      currentNode.replaceWith(nextNode.cloneNode(true));
       return;
     }
     if (currentNode instanceof HTMLElement) {
@@ -212,7 +212,7 @@ export function patchWorkspaceMarkupPreservingDetail(
       return;
     }
     if (nextNode instanceof HTMLElement) {
-      parent.append(nextNode);
+      parent.append(nextNode.cloneNode(true));
     }
   };
 
@@ -421,7 +421,7 @@ export function patchWorkspaceMarkupPreservingDetail(
       return false;
     }
     const cardIdentity = (card) =>
-      `${card.getAttribute("data-kind") ?? ""}:${card.getAttribute("data-visual-unit-id") ?? ""}`;
+      `${card.getAttribute("data-kind") ?? ""}:${card.getAttribute("data-asset-id") ?? ""}`;
     if (
       currentCards.some(
         (card, index) =>
@@ -692,7 +692,7 @@ export function renderWorkspace() {
                         关闭
                       </button>
                     </div>
-                    ${renderVisualUnitDetail()}
+                    ${renderAssetDetail()}
                   </section>
                 </aside>
               `
@@ -1046,13 +1046,13 @@ export function renderWorkspace() {
   document.querySelectorAll("[data-search-mode]").forEach((button) => {
     button.addEventListener("click", onSelectSearchMode);
   });
-  document.querySelectorAll("[data-visual-unit-id]").forEach((button) => {
-    button.addEventListener("click", onSelectVisualUnit);
+  document.querySelectorAll("[data-asset-id]").forEach((button) => {
+    button.addEventListener("click", onSelectAsset);
   });
-  bindClickListeners("[data-use-query-visual-unit-id]", onUseAsQueryImage, preservedDetailPanel);
-  bindClickListeners("[data-use-query-video-visual-unit-id]", onUseAsQueryVideo, preservedDetailPanel);
+  bindClickListeners("[data-use-query-asset-id]", onUseAsQueryImage, preservedDetailPanel);
+  bindClickListeners("[data-use-query-video-asset-id]", onUseAsQueryVideo, preservedDetailPanel);
   bindClickListeners(
-    "[data-use-query-document-visual-unit-id]",
+    "[data-use-query-document-asset-id]",
     onUseAsQueryDocument,
     preservedDetailPanel
   );

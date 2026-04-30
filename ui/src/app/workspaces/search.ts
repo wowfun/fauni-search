@@ -32,13 +32,13 @@ import {
   searchHasMoreResults,
   searchModeDisplayName,
   selectedLibrary,
-  selectedVisualUnitId,
-  selectedVisualUnitOriginLibraryId,
+  selectedAssetId,
+  selectedAssetOriginLibraryId,
   sourceName,
   sourceTypeDisplayName,
   state,
   videoLabel,
-  visualUnitKindDisplayName,
+  assetTypeDisplayName,
   type LibrarySnapshot,
   type SearchResultItem,
 } from "../core";
@@ -223,41 +223,41 @@ export function renderSearchResultCard(
     ${renderUiButton("查看详情", {
       tone: "secondary",
       attrs: {
-        "data-visual-unit-id": item.visual_unit_id,
-        "data-visual-unit-library-id": item.library_id,
+        "data-asset-id": item.asset_id,
+        "data-asset-library-id": item.library_id,
       },
     })}
     ${
-      item.kind === "image" || item.kind === "document_page"
+      item.asset_type === "image" || item.asset_type === "document_page"
         ? renderUiButton("作为查询图片", {
             tone: "secondary",
             testId: "use-as-query-image-button",
             attrs: {
-              "data-use-query-visual-unit-id": item.visual_unit_id,
+              "data-use-query-asset-id": item.asset_id,
               "data-use-query-library-id": item.library_id,
             },
           })
         : ""
     }
     ${
-      item.kind === "document_page"
+      item.asset_type === "document_page"
         ? renderUiButton("作为查询文档", {
             tone: "secondary",
             testId: "use-as-query-document-button",
             attrs: {
-              "data-use-query-document-visual-unit-id": item.visual_unit_id,
+              "data-use-query-document-asset-id": item.asset_id,
               "data-use-query-library-id": item.library_id,
             },
           })
         : ""
     }
     ${
-      item.kind === "video_segment"
+      item.asset_type === "video_segment"
         ? renderUiButton("作为查询视频", {
             tone: "secondary",
             testId: "use-as-query-video-button",
             attrs: {
-              "data-use-query-video-visual-unit-id": item.visual_unit_id,
+              "data-use-query-video-asset-id": item.asset_id,
               "data-use-query-library-id": item.library_id,
             },
           })
@@ -268,31 +268,31 @@ export function renderSearchResultCard(
   return renderObjectListItem({
     testId: "result-card",
     className: `result-card result-card-${layout}`,
-    active: `${item.library_id}:${item.visual_unit_id}` === selectedVisualUnitId(),
+    active: `${item.library_id}:${item.asset_id}` === selectedAssetId(),
     dataAttrs: {
-      "data-kind": item.kind,
-      "data-visual-unit-id": item.visual_unit_id,
+      "data-kind": item.asset_type,
+      "data-asset-id": item.asset_id,
     },
     selectClassName: "result-select",
     selectAttrs: {
-      "data-visual-unit-id": item.visual_unit_id,
-      "data-visual-unit-library-id": item.library_id,
+      "data-asset-id": item.asset_id,
+      "data-asset-library-id": item.library_id,
     },
     visualClassName: "result-visual",
     visualHtml: renderSearchResultPreview(item),
     bodyClassName: `result-body result-body-${layout}`,
     topLineHtml: `
       <div class="result-topline">
-        ${renderTypeTag(visualUnitKindDisplayName(item.kind), item.kind === "image" ? "ready" : "pending")}
+        ${renderTypeTag(assetTypeDisplayName(item.asset_type), item.asset_type === "image" ? "ready" : "pending")}
         ${page ? renderLocatorTag(page) : ""}
         ${segment ? renderLocatorTag(segment) : ""}
       </div>
     `,
-    title: sourceName(item.source_path),
+    title: sourceName(item.source_uri),
     titleRowClassName: "result-title-row",
     titleClassName: "result-title",
     titleAfterHtml: scoreLabel ? renderScoreTag(scoreLabel, { testId: "result-score" }) : "",
-    metaHtml: `<span class="helper result-path">${escapeHtml(item.source_path)}</span>`,
+    metaHtml: `<span class="helper result-path">${escapeHtml(item.source_uri)}</span>`,
     actionsClassName: "result-actions",
     actionsHtml: actions,
   });
@@ -342,7 +342,7 @@ export function renderSearchResultGroup(group: {
 }
 
 export function renderVisualPreview() {
-  if (!state.selectedVisualUnit) {
+  if (!state.selectedAsset) {
     return `
       <div class="preview-placeholder" data-testid="visual-preview">
         <p>选择一个结果或导入项后，这里会显示图片或 PDF 页预览。</p>
@@ -350,21 +350,21 @@ export function renderVisualPreview() {
     `;
   }
 
-  const visualUnit = state.selectedVisualUnit.visual_unit;
-  const preview = state.selectedVisualUnit.preview;
-  return renderPreviewSurface(visualUnit, preview, "visual-preview");
+  const asset = state.selectedAsset.asset;
+  const preview = state.selectedAsset.preview;
+  return renderPreviewSurface(asset, preview, "visual-preview");
 }
 
-export function renderVisualUnitDetail() {
-  if (!state.selectedVisualUnit) {
+export function renderAssetDetail() {
+  if (!state.selectedAsset) {
     return renderEmptyState("从结果列表选择一个对象后，这里会显示预览与来源信息。");
   }
 
-  const visualUnit = state.selectedVisualUnit.visual_unit;
-  const originLibraryId = selectedVisualUnitOriginLibraryId();
+  const asset = state.selectedAsset.asset;
+  const originLibraryId = selectedAssetOriginLibraryId();
   const originLibrary = libraryById(originLibraryId);
-  const page = pageLabel(visualUnit.locator);
-  const segment = videoLabel(visualUnit.locator);
+  const page = pageLabel(asset.locator);
+  const segment = videoLabel(asset.locator);
   const showCrossLibraryContext = allLibrariesTextScopeActive() && originLibraryId;
   const crossLibraryContext = showCrossLibraryContext
     ? `
@@ -397,7 +397,7 @@ export function renderVisualUnitDetail() {
           <div class="detail-grid">
             <div class="detail-block">
               <h5>定位信息</h5>
-              <pre>${escapeHtml(JSON.stringify(visualUnit.locator, null, 2))}</pre>
+              <pre>${escapeHtml(JSON.stringify(asset.locator, null, 2))}</pre>
             </div>
             <div class="detail-block">
               <h5>阅读提示</h5>
@@ -406,21 +406,21 @@ export function renderVisualUnitDetail() {
           </div>
           <div class="detail-block">
             <h5>邻近上下文</h5>
-            <pre>${escapeHtml(JSON.stringify(state.selectedVisualUnit.neighbor_context, null, 2))}</pre>
+            <pre>${escapeHtml(JSON.stringify(state.selectedAsset.neighbor_context, null, 2))}</pre>
           </div>
         </div>
       </details>
   `;
 
   return renderDetailCard({
-    testId: "visual-unit-detail",
-    title: sourceName(visualUnit.source_path),
+    testId: "asset-detail",
+    title: sourceName(asset.source_uri),
     previewHtml: renderVisualPreview(),
     tags: [
       ...(state.searchScope === "all_libraries" && originLibraryId
         ? [{ label: originLibrary ? libraryDisplayName(originLibrary) : originLibraryId, tone: "muted" as const }]
         : []),
-      { label: visualUnitKindDisplayName(visualUnit.kind), tone: "ready" },
+      { label: assetTypeDisplayName(asset.asset_type), tone: "ready" },
       ...(page ? [{ label: page, tone: "muted" as const }] : []),
       ...(segment ? [{ label: segment, tone: "muted" as const }] : []),
     ],
@@ -434,9 +434,9 @@ export function renderVisualUnitDetail() {
             },
           ]
         : []),
-      { label: "对象编号", value: visualUnit.visual_unit_id },
-      { label: "来源类型", value: sourceTypeDisplayName(visualUnit.source_type) },
-      { label: "来源路径", value: visualUnit.source_path, valueClassName: "detail-path" },
+      { label: "对象编号", value: asset.asset_id },
+      { label: "来源类型", value: sourceTypeDisplayName(asset.source_type) },
+      { label: "来源 URI", value: asset.source_uri, valueClassName: "detail-path" },
     ],
     footerHtml: technicalInfo,
   });
@@ -649,7 +649,7 @@ export function renderSearchControls(library, readingMode = false) {
     Boolean(state.searchFilters.timeRangeStartMsDraft.trim()) ||
     Boolean(state.searchFilters.timeRangeEndMsDraft.trim());
   const hasFilterSelections =
-    Boolean(state.searchFilters.visualUnitKind) ||
+    Boolean(state.searchFilters.assetType) ||
     Boolean(state.searchFilters.sourceType) ||
     hasAdvancedFilters;
   const filterPanelOpen = state.searchFiltersPanelOpen || hasFilterSelections;
@@ -845,7 +845,7 @@ export function renderSearchControls(library, readingMode = false) {
                           value="${escapeHtml(source.source_id)}"
                           ${state.queryVideoSource?.source_id === source.source_id ? "selected" : ""}
                         >
-                          ${escapeHtml(sourceName(source.source_path))} (${escapeHtml(source.source_id)})
+                          ${escapeHtml(sourceName(source.source_uri))} (${escapeHtml(source.source_id)})
                         </option>
                       `
                     )
@@ -1054,12 +1054,12 @@ export function renderSearchControls(library, readingMode = false) {
             <section class="search-filter-panel" data-testid="search-filter-dock">
               <div class="search-common-filters">
                 <label>
-                  <span>视觉对象类型</span>
+                  <span>Asset 类型</span>
                   <select id="search-filter-kind" data-testid="search-filter-kind" ${library ? "" : "disabled"}>
                     <option value="">全部</option>
-                    <option value="image" ${state.searchFilters.visualUnitKind === "image" ? "selected" : ""}>图片</option>
-                    <option value="document_page" ${state.searchFilters.visualUnitKind === "document_page" ? "selected" : ""}>文档页</option>
-                    <option value="video_segment" ${state.searchFilters.visualUnitKind === "video_segment" ? "selected" : ""}>视频片段</option>
+                    <option value="image" ${state.searchFilters.assetType === "image" ? "selected" : ""}>图片</option>
+                    <option value="document_page" ${state.searchFilters.assetType === "document_page" ? "selected" : ""}>文档页</option>
+                    <option value="video_segment" ${state.searchFilters.assetType === "video_segment" ? "selected" : ""}>视频片段</option>
                   </select>
                 </label>
                 <label>

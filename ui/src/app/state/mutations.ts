@@ -44,7 +44,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import {
@@ -91,7 +91,7 @@ export function upsertLibrarySnapshot(library: LibrarySnapshot) {
 
 export function resetSearchFilters() {
   state.searchFilters = {
-    visualUnitKind: "",
+    assetType: "",
     sourceType: "",
     pathPrefix: "",
     timeRangeStartMsDraft: "",
@@ -452,9 +452,9 @@ export function setPendingQueryDocumentFile(file) {
   state.queryDocumentObjectUrl = URL.createObjectURL(state.queryDocumentFile);
 }
 
-export function setLibraryQueryDocumentVisualUnit(visualUnit: LibraryObjectQueryDocument) {
+export function setLibraryQueryDocumentAsset(asset: LibraryObjectQueryDocument) {
   clearQueryDocumentState();
-  state.queryDocumentLibraryObject = visualUnit;
+  state.queryDocumentLibraryObject = asset;
 }
 
 export function setLibraryQueryVideoSource(source: VideoSourceItem) {
@@ -463,12 +463,12 @@ export function setLibraryQueryVideoSource(source: VideoSourceItem) {
   setQueryVideoDuration(source?.duration_ms ?? null);
 }
 
-export function setLibraryQueryVideoVisualUnit(visualUnit: LibraryObjectQueryVideo) {
+export function setLibraryQueryVideoAsset(asset: LibraryObjectQueryVideo) {
   clearQueryVideoState();
-  state.queryVideoLibraryObject = visualUnit;
+  state.queryVideoLibraryObject = asset;
   setQueryVideoDuration(
-    visualUnit?.locator?.duration_ms ??
-      (typeof visualUnit?.locator?.end_ms === "number" ? visualUnit.locator.end_ms : null)
+    asset?.locator?.duration_ms ??
+      (typeof asset?.locator?.end_ms === "number" ? asset.locator.end_ms : null)
   );
 }
 

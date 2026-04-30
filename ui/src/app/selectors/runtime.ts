@@ -43,7 +43,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import { state } from "../state/store";
@@ -515,6 +515,6 @@ export function libraryOperationalReadiness(library: LibrarySnapshot) {
 
 export function retiredVectorSpaceDiagnostics() {
   return (state.vectorSpaceDiagnostics?.vector_spaces ?? []).filter(
-    (vectorSpace) => vectorSpace.lifecycle_state !== "active"
+    (vectorSpace) => Boolean(vectorSpace.cleanup_summary)
   );
 }

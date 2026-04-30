@@ -25,6 +25,7 @@ export function registerRuntimeStatusScenarios() {
 
     const vectorSpacesPanel = page.getByTestId("vector-space-diagnostics-panel");
     await expect(vectorSpacesPanel).toContainText("active");
+    await expect(vectorSpacesPanel).toContainText("content completed");
     await expect(vectorSpacesPanel).toContainText(localModelId);
     await expect(vectorSpacesPanel).toContainText("multi_vector_late_interaction");
   });

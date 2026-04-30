@@ -43,7 +43,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 
@@ -97,7 +97,7 @@ export const state: AppState = {
     sourceStatus: "",
   },
   searchFilters: {
-    visualUnitKind: "",
+    assetType: "",
     sourceType: "",
     pathPrefix: "",
     timeRangeStartMsDraft: "",
@@ -156,8 +156,8 @@ export const state: AppState = {
   queryDocumentStartPageDraft: "",
   queryDocumentEndPageDraft: "",
   importReceipt: null,
-  selectedVisualUnit: null,
-  selectedVisualUnitLibraryId: "",
+  selectedAsset: null,
+  selectedAssetLibraryId: "",
   searchOutcome: null,
   searchInFlight: false,
   searchResultLibraryFocusId: "",

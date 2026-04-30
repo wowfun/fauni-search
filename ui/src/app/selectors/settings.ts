@@ -43,7 +43,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import {
@@ -232,7 +232,7 @@ export function settingsMetricsForSection(section: SettingsSection, library: Lib
         value: runtimeOverview ? `${runtimeOverview.providerIssues.length} 个` : "待刷新",
       },
       {
-        label: "退役执行空间",
+        label: "待清理命名空间",
         value: library ? `${retiredVectorSpaceDiagnostics().length} 个` : "等待库",
       },
     ];

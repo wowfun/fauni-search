@@ -2,7 +2,7 @@ import type { LibrarySnapshot } from "../../../types";
 import { allLibrariesTextScopeActive } from "../../selectors/library";
 import { currentSearchScopeStageState } from "../../selectors/search";
 import { currentStatusCapsule, globalJobsProgressSummary, libraryOperationalReadiness } from "../../selectors/runtime";
-import { escapeHtml, visualUnitKindDisplayName } from "../../selectors/common";
+import { escapeHtml, assetTypeDisplayName } from "../../selectors/common";
 import { state } from "../../state/store";
 import { renderEmptyState, renderNotice, renderUiButton } from "./primitives";
 
@@ -118,22 +118,22 @@ export function renderImportReceipt() {
                 (item) => `
                   <li>
                     <div class="list-head">
-                      <strong>${escapeHtml(visualUnitKindDisplayName(item.kind))}</strong>
-                      <span class="helper">${(item.visual_units ?? []).length} 个可搜索对象</span>
+                      <strong>${escapeHtml(assetTypeDisplayName(item.kind))}</strong>
+                      <span class="helper">${(item.assets ?? []).length} 个可搜索对象</span>
                     </div>
                     <span>${escapeHtml(item.normalized_path ?? item.original_path)}</span>
                     ${
-                      item.visual_units?.length
+                      item.assets?.length
                         ? `<div class="inline-actions">
-                            ${item.visual_units
+                            ${item.assets
                               .map(
-                                (visualUnit) => `
+                                (asset) => `
                                   <button
                                     type="button"
                                     class="ui-button ui-button-secondary"
-                                    data-visual-unit-id="${escapeHtml(visualUnit.visual_unit_id)}"
+                                    data-asset-id="${escapeHtml(asset.asset_id)}"
                                   >
-                                    查看 ${escapeHtml(visualUnitKindDisplayName(visualUnit.kind))} · ${escapeHtml(visualUnit.visual_unit_id)}
+                                    查看 ${escapeHtml(assetTypeDisplayName(asset.asset_type))} · ${escapeHtml(asset.asset_id)}
                                   </button>
                                 `
                               )

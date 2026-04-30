@@ -24,7 +24,7 @@ export function registerWorkspaceShellScenarios() {
     await expect(page.getByTestId("workspace-tab-tools")).toHaveCount(0);
     await expect(page.getByTestId("utility-drawer")).toHaveCount(0);
     await expect(page.getByTestId("status-capsule-button")).toBeVisible();
-    await expect(page.getByTestId("inventory-bridge-button")).toBeVisible();
+    await expect(page.getByTestId("search-readiness-open-inventory")).toBeVisible();
     await page.evaluate(() => {
       const probe = document.createElement("button");
       probe.type = "button";
@@ -55,9 +55,9 @@ export function registerWorkspaceShellScenarios() {
 
     const firstResult = page.getByTestId("result-card").first();
     await expect(firstResult).toBeVisible({ timeout: 2 * 60 * 1000 });
-    const visualUnitId = await firstResult.getAttribute("data-visual-unit-id");
+    const assetId = await firstResult.getAttribute("data-asset-id");
     await firstResult.locator(".result-select").click();
-    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+    await expect(page.getByTestId("asset-detail")).toBeVisible();
     await expect(page.getByTestId("search-text-input")).toHaveValue(
       "What is the percentage change in the net cash provided from operating activities?"
     );
@@ -70,9 +70,9 @@ export function registerWorkspaceShellScenarios() {
     await expect(page.getByTestId("search-text-input")).toHaveValue(
       "What is the percentage change in the net cash provided from operating activities?"
     );
-    await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+    await expect(page.getByTestId("asset-detail")).toBeVisible();
     await expect(
-      page.locator(`[data-testid="result-card"][data-visual-unit-id="${visualUnitId}"]`)
+      page.locator(`[data-testid="result-card"][data-asset-id="${assetId}"]`)
     ).toHaveClass(/active/);
   });
 }

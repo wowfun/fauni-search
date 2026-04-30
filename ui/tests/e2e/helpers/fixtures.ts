@@ -23,6 +23,33 @@ export const invalidQueryUploadPath = path.resolve(__dirname, "../../../../READM
 export const venvPythonPath = path.resolve(__dirname, "../../../../.venv/bin/python");
 export const workspacePollWaitMs = 3_500;
 
+export function fileSourceUri(sourcePath) {
+  const value = String(sourcePath);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    return value;
+  }
+  return `file://${value}`;
+}
+
+export function createMockMatchedUnits(index) {
+  return [
+    {
+      unit_id: `unit_mock_${index}`,
+      unit_type: "page_image",
+      vector_space_id: "vs_mock_late_interaction",
+      rank: index + 1,
+      raw_score: 100 - index,
+    },
+  ];
+}
+
+function unitsFromMatchedUnits(matchedUnits) {
+  return matchedUnits.map((unit) => ({
+    unit_id: unit.unit_id,
+    unit_type: unit.unit_type,
+  }));
+}
+
 function colorLuminance(color) {
   const match = color.match(/\d+(\.\d+)?/g);
   if (!match || match.length < 3) {
@@ -201,6 +228,7 @@ export async function prepareSearchableSourceRoot(page, rootPath) {
   const previousJobId = await latestJobId(page, libraryId);
   await rootCard.locator("[data-source-root-refresh-id]").click();
   await waitForNewLatestJobCompleted(page, libraryId, previousJobId);
+  await openSearchWorkspace(page);
   return rootCard;
 }
 
@@ -306,22 +334,23 @@ export async function mockSingleTextSearchResult(
     });
   });
 
-  await page.route(`**/api/libraries/${libraryId}/visual-units/${result.visual_unit_id}`, async (route) => {
+  await page.route(`**/api/libraries/${libraryId}/assets/${result.asset_id}`, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         data: {
-          visual_unit: {
-            visual_unit_id: result.visual_unit_id,
+          asset: {
+            asset_id: result.asset_id,
             source_id: result.source_id,
-            source_path: result.source_path,
+            source_uri: result.source_uri,
             source_type: result.source_type,
-            kind: result.kind,
+            asset_type: result.asset_type,
             locator: result.locator,
           },
           preview: result.preview,
           neighbor_context: null,
+          units: unitsFromMatchedUnits(result.matched_units),
           library_id: libraryId,
         },
       }),
@@ -366,20 +395,20 @@ export async function mockDocumentSearchResults(
     });
   });
 
-  await page.route(`**/api/libraries/${libraryId}/visual-units/*`, async (route) => {
-    const visualUnitId = route.request().url().split("/").pop();
-    const result = results.find((entry) => entry.visual_unit_id === visualUnitId) ?? results[0];
+  await page.route(`**/api/libraries/${libraryId}/assets/*`, async (route) => {
+    const assetId = route.request().url().split("/").pop();
+    const result = results.find((entry) => entry.asset_id === assetId) ?? results[0];
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         data: {
-          visual_unit: {
-            visual_unit_id: result.visual_unit_id,
+          asset: {
+            asset_id: result.asset_id,
             source_id: result.source_id,
-            source_path: result.source_path,
+            source_uri: result.source_uri,
             source_type: result.source_type,
-            kind: result.kind,
+            asset_type: result.asset_type,
             locator: result.locator,
           },
           preview: result.preview,
@@ -387,6 +416,7 @@ export async function mockDocumentSearchResults(
             previous: null,
             next: null,
           },
+          units: unitsFromMatchedUnits(result.matched_units),
           library_id: libraryId,
         },
       }),
@@ -403,17 +433,18 @@ export async function mockImageSearchResults(
   const libraryId = await currentLibraryId(page);
   const resolvedResults = (results ?? [
     {
-      visual_unit_id: "vu_image_mock_0",
+      asset_id: "asset_image_mock_0",
       source_id: "src_image_mock_0",
       preview: {
         url: "http://127.0.0.1:54210/mock-preview/image-0.png",
       },
-      source_path: "/tmp/search-fixtures/formal/query-image.png",
+      source_uri: fileSourceUri("/tmp/search-fixtures/formal/query-image.png"),
       source_type: "image",
-      kind: "image",
+      asset_type: "image",
       locator: null,
       cursor: "search:v1:image:1",
       score: 100,
+      matched_units: createMockMatchedUnits(0),
     },
   ]).map((result) => ({
     ...result,
@@ -441,25 +472,27 @@ export async function mockImageSearchResults(
     });
   });
 
-  await page.route(`**/api/libraries/${libraryId}/visual-units/*`, async (route) => {
-    const visualUnitId = route.request().url().split("/").pop();
+  await page.route(`**/api/libraries/${libraryId}/assets/*`, async (route) => {
+    const assetId = route.request().url().split("/").pop();
     const result =
-      resolvedResults.find((entry) => entry.visual_unit_id === visualUnitId) ?? resolvedResults[0];
+      resolvedResults.find((entry) => entry.asset_id === assetId) ?? resolvedResults[0];
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         data: {
-          visual_unit: {
-            visual_unit_id: result.visual_unit_id,
+          asset: {
+            asset_id: result.asset_id,
             source_id: result.source_id,
-            source_path: result.source_path,
+            source_uri: result.source_uri,
             source_type: result.source_type,
-            kind: result.kind,
+            asset_type: result.asset_type,
             locator: result.locator,
           },
           preview: result.preview,
-          neighbor_context: result.kind === "document_page" ? { previous: null, next: null } : null,
+          neighbor_context:
+            result.asset_type === "document_page" ? { previous: null, next: null } : null,
+          units: unitsFromMatchedUnits(result.matched_units),
           library_id: libraryId,
         },
       }),
@@ -565,20 +598,21 @@ first_page.save(pdf_path, "PDF", save_all=True, append_images=[second_page])
 
 export function createMockSearchResult(index, sourcePath) {
   return {
-    visual_unit_id: `vu_mock_${index}`,
+    asset_id: `asset_mock_${index}`,
     source_id: `src_mock_${index}`,
     preview: {
       url: `http://127.0.0.1:54210/mock-preview/${index}.png`,
     },
-    source_path: sourcePath,
+    source_uri: fileSourceUri(sourcePath),
     source_type: "pdf",
-    kind: "document_page",
+    asset_type: "document_page",
     locator: {
       page: index + 1,
       page_label: String(index + 1),
     },
     cursor: `search:v1:${index + 1}`,
     score: 100 - index,
+    matched_units: createMockMatchedUnits(index),
   };
 }
 

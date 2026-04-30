@@ -163,7 +163,7 @@ export function registerWorkspaceJobScenarios() {
         summary:
           retriedJobPolls > 0
             ? "refresh completed."
-            : "Encoding 1 visual unit for refresh.",
+            : "Encoding 1 assets for refresh.",
       },
     });
 
@@ -322,8 +322,8 @@ export function registerWorkspaceJobScenarios() {
         status: resumedJobPolls > 0 ? "completed" : "running",
         summary:
           resumedJobPolls > 0
-            ? "Accepted 1 path(s); indexed 1 visual unit(s) across 1 vector space(s) and activated the resulting namespaces."
-            : "Encoding batch 1/1 (1 visual unit(s)) for staged vector-space indexing.",
+            ? "Accepted 1 path(s); indexed 1 assets(s) across 1 vector space(s) and activated the resulting namespaces."
+            : "Encoding batch 1/1 (1 assets(s)) for staged vector-space indexing.",
       },
     });
 

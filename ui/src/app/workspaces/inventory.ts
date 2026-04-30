@@ -4,7 +4,7 @@ import {
   pageLabel,
   renderUiIcon,
   selectedInventoryRepresentativePreview,
-  selectedInventoryRepresentativeVisualUnit,
+  selectedInventoryRepresentativeAsset,
   selectedInventorySource,
   sourceName,
   sourceRootInventoryLabel,
@@ -13,7 +13,7 @@ import {
   sourceTypeDisplayName,
   state,
   videoLabel,
-  visualUnitKindDisplayName,
+  assetTypeDisplayName,
   type LibrarySnapshot,
   type SourceInventoryItem,
 } from "../core";
@@ -122,11 +122,11 @@ export function renderInventoryImportPanel(library: LibrarySnapshot | null) {
 }
 
 export function inventoryRepresentativeKind(source: SourceInventoryItem) {
-  return source.representative_visual_unit?.kind ?? source.kind;
+  return source.representative_asset?.asset_type ?? source.kind;
 }
 
 export function inventoryRepresentativeSourceType(source: SourceInventoryItem) {
-  return source.representative_visual_unit?.source_type ?? source.source_type;
+  return source.representative_asset?.source_type ?? source.source_type;
 }
 
 export function inventoryRepresentativeKindIcon(source: SourceInventoryItem) {
@@ -148,7 +148,7 @@ export function renderInventorySourceThumbnail(source: SourceInventoryItem) {
       <img
         class="inventory-source-thumbnail"
         src="${escapeHtml(preview.url)}"
-        alt="${escapeHtml(sourceName(source.source_path))}"
+        alt="${escapeHtml(sourceName(source.source_uri))}"
         loading="lazy"
       />
     `;
@@ -157,7 +157,7 @@ export function renderInventorySourceThumbnail(source: SourceInventoryItem) {
   return `
     <div class="inventory-source-thumbnail inventory-source-thumbnail-placeholder">
       ${renderUiIcon(inventoryRepresentativeKindIcon(source))}
-      <span>${escapeHtml(visualUnitKindDisplayName(kind))}</span>
+      <span>${escapeHtml(assetTypeDisplayName(kind))}</span>
     </div>
   `;
 }
@@ -234,7 +234,7 @@ export function renderInventoryDetailPanel(library: LibrarySnapshot | null) {
     `;
   }
 
-  const representativeVisual = selectedInventoryRepresentativeVisualUnit(source);
+  const representativeVisual = selectedInventoryRepresentativeAsset(source);
   const representativePreview = selectedInventoryRepresentativePreview(source);
   const page = pageLabel(representativeVisual?.locator);
   const segment = videoLabel(representativeVisual?.locator);
@@ -260,21 +260,21 @@ export function renderInventoryDetailPanel(library: LibrarySnapshot | null) {
       <div class="panel-head">
         <div>
           <p class="eyebrow">详情</p>
-          <h2>${escapeHtml(sourceName(source.source_path))}</h2>
+          <h2>${escapeHtml(sourceName(source.source_uri))}</h2>
         </div>
       </div>
       ${renderDetailCard({
         testId: "inventory-detail-card",
         className: "inventory-detail-shell",
         previewClassName: "inventory-preview-shell",
-        title: sourceName(source.source_path),
+        title: sourceName(source.source_uri),
         previewHtml:
           representativeVisual && representativePreview
             ? renderPreviewSurface(
                 {
                   ...representativeVisual,
                   source_id: source.source_id,
-                  source_path: source.source_path,
+                  source_uri: source.source_uri,
                 },
                 representativePreview,
                 "inventory-detail-preview"
@@ -297,36 +297,36 @@ export function renderInventoryDetailPanel(library: LibrarySnapshot | null) {
           }
           ${
             representativeVisual &&
-            (representativeVisual.kind === "image" || representativeVisual.kind === "document_page")
+            (representativeVisual.asset_type === "image" || representativeVisual.asset_type === "document_page")
               ? renderUiButton("作为查询图片", {
                   tone: "secondary",
                   testId: "inventory-use-as-query-image-button",
-                  attrs: { "data-use-query-visual-unit-id": representativeVisual.visual_unit_id },
+                  attrs: { "data-use-query-asset-id": representativeVisual.asset_id },
                 })
               : ""
           }
           ${
-            representativeVisual && representativeVisual.kind === "document_page"
+            representativeVisual && representativeVisual.asset_type === "document_page"
               ? renderUiButton("作为查询文档", {
                   tone: "secondary",
                   testId: "inventory-use-as-query-document-button",
-                  attrs: { "data-use-query-document-visual-unit-id": representativeVisual.visual_unit_id },
+                  attrs: { "data-use-query-document-asset-id": representativeVisual.asset_id },
                 })
               : ""
           }
           ${
-            representativeVisual && representativeVisual.kind === "video_segment"
+            representativeVisual && representativeVisual.asset_type === "video_segment"
               ? renderUiButton("作为查询视频", {
                   tone: "secondary",
                   testId: "inventory-use-as-query-video-button",
-                  attrs: { "data-use-query-video-visual-unit-id": representativeVisual.visual_unit_id },
+                  attrs: { "data-use-query-video-asset-id": representativeVisual.asset_id },
                 })
               : ""
           }
         `,
         metaItems: [
-          { label: "可搜索对象", value: source.visual_unit_count },
-          { label: "来源路径", value: source.source_path, valueClassName: "detail-path" },
+          { label: "可搜索对象", value: source.asset_count },
+          { label: "来源 URI", value: source.source_uri, valueClassName: "detail-path" },
           { label: "来源根", value: sourceRootInventoryLabel(source) },
           { label: "来源编号", value: source.source_id },
         ],
@@ -377,9 +377,9 @@ export function renderInventoryWorkspace(library: LibrarySnapshot | null) {
                   visualClassName: "inventory-source-visual",
                   visualHtml: renderInventorySourceThumbnail(source),
                   bodyClassName: "inventory-source-main",
-                  title: sourceName(source.source_path),
+                  title: sourceName(source.source_uri),
                   titleClassName: "inventory-source-name",
-                  metaHtml: `<p class="helper inventory-source-path">${escapeHtml(source.source_path)}</p>`,
+                  metaHtml: `<p class="helper inventory-source-path">${escapeHtml(source.source_uri)}</p>`,
                   trailingClassName: "inventory-source-meta",
                   trailingHtml: `
                     ${
@@ -387,7 +387,7 @@ export function renderInventoryWorkspace(library: LibrarySnapshot | null) {
                         ? renderStatusTag(sourceStatusDisplayName(source.status), sourceStatusPillClass(source.status) as any)
                         : ""
                     }
-                    <strong class="inventory-source-count">${escapeHtml(source.visual_unit_count)} 个对象</strong>
+                    <strong class="inventory-source-count">${escapeHtml(source.asset_count)} 个对象</strong>
                     ${
                       source.status_reason
                         ? `<span class="helper inventory-source-reason">${escapeHtml(source.status_reason)}</span>`

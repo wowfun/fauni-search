@@ -2,7 +2,7 @@ import type {
   Locator,
   ModelTestModality,
   PreviewReference,
-  VisualUnitKind,
+  AssetType,
 } from "./primitives";
 
 export interface LibraryCounts {
@@ -134,14 +134,27 @@ export interface ResolvedContentModelsData {
 
 export interface VectorSpaceDiagnosticSnapshot {
   vector_space_id: string;
-  lifecycle_state: string;
   content_types: string[];
+  unit_index_summary: UnitIndexSummary;
+  content_e2e_index_summary: ContentE2eIndexSummary;
   provider_id?: string | null;
   provider_kind?: string | null;
   model_id?: string | null;
   model_version?: string | null;
   vector_type?: string | null;
-  retired_at_ms?: number | null;
+  cleanup_summary?: Record<string, unknown> | null;
+}
+
+export interface UnitIndexSummary {
+  active: number;
+  retired: number;
+  failed: number;
+  not_ready: number;
+}
+
+export interface ContentE2eIndexSummary {
+  completed: number;
+  missing: number;
 }
 
 export interface VectorSpaceDiagnosticsData {
@@ -257,8 +270,9 @@ export interface SourceRootSnapshot {
 
 export interface SourceInventoryItem {
   source_id: string;
-  source_path: string;
+  source_uri: string;
   source_type: string;
+  media_type: string;
   kind: string;
   status: string;
   status_reason?: string | null;
@@ -266,14 +280,14 @@ export interface SourceInventoryItem {
   source_root_id?: string | null;
   source_root_path?: string | null;
   source_root_label: string;
-  visual_unit_count: number;
-  representative_visual_unit?: VisualUnitSummary | null;
+  asset_count: number;
+  representative_asset?: AssetSummary | null;
   representative_preview?: PreviewReference | null;
 }
 
 export interface VideoSourceItem {
   source_id: string;
-  source_path: string;
+  source_uri: string;
   source_type: string;
   duration_ms?: number | null;
   preview: PreviewReference;
@@ -304,29 +318,44 @@ export interface JobSnapshot {
   current_attempt: JobAttemptSnapshot;
 }
 
-export interface VisualUnitSummary {
-  visual_unit_id: string;
+export interface AssetSummary {
+  asset_id: string;
   source_id: string;
-  kind: VisualUnitKind;
+  asset_type: AssetType;
   source_type: string;
   locator: Locator;
 }
 
-export interface VisualUnitSnapshot extends VisualUnitSummary {
-  source_path: string;
+export interface AssetSnapshot extends AssetSummary {
+  source_uri: string;
 }
 
-export interface VisualUnitDetailData {
-  visual_unit: VisualUnitSnapshot;
+export interface AssetDetailData {
+  asset: AssetSnapshot;
   preview: PreviewReference;
   neighbor_context: Record<string, unknown> | null;
+  units: UnitSummary[];
 }
 
-export interface SearchResultItem extends VisualUnitSnapshot {
+export interface SearchResultItem extends AssetSnapshot {
   library_id: string;
   preview: PreviewReference;
+  matched_units: MatchedUnitEvidence[];
   score?: number | null;
   cursor?: string | null;
+}
+
+export interface UnitSummary {
+  unit_id: string;
+  unit_type: string;
+}
+
+export interface MatchedUnitEvidence {
+  unit_id: string;
+  unit_type: string;
+  vector_space_id: string;
+  rank: number;
+  raw_score: number;
 }
 
 export interface SearchErrorContentTypeDetail {
@@ -389,7 +418,7 @@ export interface ImportAcceptedItem {
   source_id?: string | null;
   source_type: string;
   kind: string;
-  visual_units: VisualUnitSummary[];
+  assets: AssetSummary[];
 }
 
 export interface ImportRejectedItem {
@@ -447,17 +476,17 @@ export interface ImportPathsData {
 
 export interface LibraryObjectQueryImage {
   library_id: string;
-  visual_unit_id: string;
-  kind: "image" | "document_page";
-  source_path: string;
+  asset_id: string;
+  asset_type: "image" | "document_page";
+  source_uri: string;
   preview: PreviewReference;
 }
 
 export interface LibraryObjectQueryVideo {
   library_id: string;
-  visual_unit_id: string;
-  kind: "video_segment";
-  source_path: string;
+  asset_id: string;
+  asset_type: "video_segment";
+  source_uri: string;
   locator: VideoQueryLocator;
   preview: PreviewReference;
 }
@@ -475,10 +504,10 @@ export interface VideoQueryLocator {
 
 export interface LibraryObjectQueryDocument {
   library_id: string;
-  visual_unit_id: string;
+  asset_id: string;
   source_id: string;
-  kind: "document_page";
-  source_path: string;
+  asset_type: "document_page";
+  source_uri: string;
   locator: DocumentQueryLocator | null;
   preview: PreviewReference;
 }

@@ -46,7 +46,7 @@ import {
   selectedGlobalContentTypeKey,
   selectedGlobalModelSelection,
   selectedInventoryRepresentativePreview,
-  selectedInventoryRepresentativeVisualUnit,
+  selectedInventoryRepresentativeAsset,
   selectedInventorySource,
   selectedLibrary,
   selectedLibraryContentTypeBinding,
@@ -54,11 +54,11 @@ import {
   selectedLibraryContentTypeKey,
   selectedLibraryModelSelection,
   selectedProviderConfig,
-  selectedVisualUnitId,
-  selectedVisualUnitOriginLibraryId,
-  setLibraryQueryDocumentVisualUnit,
+  selectedAssetId,
+  selectedAssetOriginLibraryId,
+  setLibraryQueryDocumentAsset,
   setLibraryQueryVideoSource,
-  setLibraryQueryVideoVisualUnit,
+  setLibraryQueryVideoAsset,
   setPendingQueryDocumentFile,
   setPendingQueryImageFile,
   setPendingQueryVideoFile,
@@ -92,7 +92,7 @@ import {
   type SearchScopeKind,
   type SettingsSection,
   type SourceActionData,
-  type VisualUnitDetailData,
+  type AssetDetailData,
   type WorkspaceKind,
 } from "../core";
 import { renderWorkspace } from "../render/workspace";
@@ -130,8 +130,8 @@ export async function onCreateLibrary(event) {
     clearQueryDocumentState();
     resetLibraryModelTestState();
     state.importReceipt = null;
-    state.selectedVisualUnit = null;
-    state.selectedVisualUnitLibraryId = "";
+    state.selectedAsset = null;
+    state.selectedAssetLibraryId = "";
     state.searchOutcome = null;
     state.searchInFlight = false;
     state.lastSearchRequest = null;
@@ -319,8 +319,8 @@ export async function onDeleteLibrary() {
     clearQueryDocumentState();
     resetLibraryModelTestState();
     state.importReceipt = null;
-    state.selectedVisualUnit = null;
-    state.selectedVisualUnitLibraryId = "";
+    state.selectedAsset = null;
+    state.selectedAssetLibraryId = "";
     state.searchOutcome = null;
     state.searchInFlight = false;
     state.lastSearchRequest = null;

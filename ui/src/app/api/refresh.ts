@@ -43,7 +43,7 @@ import type {
   VectorSpaceDiagnosticsData,
   VideoSourceItem,
   VideoSourcesData,
-  VisualUnitDetailData,
+  AssetDetailData,
   WorkspaceKind,
 } from "../../types";
 import { renderWorkspace } from "../render/workspace";
@@ -291,8 +291,8 @@ export async function switchCurrentLibrary(libraryId: string) {
   clearQueryDocumentState();
   resetLibraryModelTestState();
   state.importReceipt = null;
-  state.selectedVisualUnit = null;
-  state.selectedVisualUnitLibraryId = "";
+  state.selectedAsset = null;
+  state.selectedAssetLibraryId = "";
   state.searchOutcome = null;
   state.searchInFlight = false;
   state.lastSearchRequest = null;

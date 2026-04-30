@@ -269,6 +269,9 @@ export function registerSourceManagementScenarios() {
     await expect(pdfCard).toContainText("2 个对象");
     await imageCard.locator("button").click();
     await expect(page.getByTestId("inventory-detail-preview")).toBeVisible();
+    await expect(page.getByTestId("inventory-detail-card")).toContainText(
+      `file://${fixtures.imagePath}`
+    );
     await expect(page.getByTestId("inventory-preview-link")).toBeVisible();
     await page.getByTestId("inventory-use-as-query-image-button").click();
     await expect(page.getByTestId("search-panel")).toBeVisible();
@@ -493,6 +496,7 @@ export function registerInventoryWorkspaceScenarios() {
   try {
     await page.setViewportSize({ width: 390, height: 844 });
     await createLibrary(page, "inventory-narrow");
+    await openSourcePreparationPanel(page);
     const libraryId = await currentLibraryId(page);
 
     await page.getByTestId("source-root-path-input").fill(fixtures.tempDir);

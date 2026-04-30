@@ -32,7 +32,7 @@ export function registerSearchVideoScenarios() {
       await videoResult.locator(".result-select").click();
       await expect(videoResult.getByTestId("result-score")).toBeVisible();
       await expect(page.getByTestId("detail-panel")).toBeVisible();
-      await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+      await expect(page.getByTestId("asset-detail")).toBeVisible();
     } finally {
       fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
     }
@@ -66,7 +66,7 @@ export function registerSearchVideoScenarios() {
       await videoResult.locator(".result-select").click();
       await expect(videoResult.getByTestId("result-score")).toBeVisible();
       await expect(page.getByTestId("detail-panel")).toBeVisible();
-      await expect(page.getByTestId("visual-unit-detail")).toBeVisible();
+      await expect(page.getByTestId("asset-detail")).toBeVisible();
     } finally {
       fs.rmSync(fixtures.tempDir, { recursive: true, force: true });
     }

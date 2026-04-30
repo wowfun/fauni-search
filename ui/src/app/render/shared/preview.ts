@@ -1,15 +1,15 @@
 import type { PreviewReference, SearchResultItem } from "../../../types";
-import { escapeHtml, sourceName, sourceTypeDisplayName, visualUnitKindDisplayName } from "../../selectors/common";
-import { selectedVisualUnitOriginLibraryId } from "../../selectors/library";
+import { escapeHtml, sourceName, sourceTypeDisplayName, assetTypeDisplayName } from "../../selectors/common";
+import { selectedAssetOriginLibraryId } from "../../selectors/library";
 import { state } from "../../state/store";
 
-export function renderPreviewSurface(visualUnit, preview, testId = "visual-preview") {
-  const title = `${visualUnit.kind} · ${sourceName(visualUnit.source_path)}`;
+export function renderPreviewSurface(asset, preview, testId = "visual-preview") {
+  const title = `${assetTypeDisplayName(asset.asset_type)} · ${sourceName(asset.source_uri)}`;
   const previewIdentity =
-    visualUnit.source_id ?? visualUnit.visual_unit_id ?? visualUnit.source_path ?? preview.url;
-  const previewKey = `${visualUnit.visual_unit_id ?? visualUnit.source_id ?? visualUnit.source_path}::${preview.url}`;
+    asset.source_id ?? asset.asset_id ?? asset.source_uri ?? preview.url;
+  const previewKey = `${asset.asset_id ?? asset.source_id ?? asset.source_uri}::${preview.url}`;
 
-  if (visualUnit.kind === "image") {
+  if (asset.asset_type === "image") {
     return `
       <img
         class="preview-image"
@@ -23,9 +23,9 @@ export function renderPreviewSurface(visualUnit, preview, testId = "visual-previ
     `;
   }
 
-  if (visualUnit.kind === "video_segment") {
-    const startMs = visualUnit.locator?.start_ms ?? 0;
-    const endMs = visualUnit.locator?.end_ms ?? 0;
+  if (asset.asset_type === "video_segment") {
+    const startMs = asset.locator?.start_ms ?? 0;
+    const endMs = asset.locator?.end_ms ?? 0;
     return `
       <video
         class="preview-video"
@@ -56,20 +56,20 @@ export function renderPreviewSurface(visualUnit, preview, testId = "visual-previ
 }
 
 export function renderSearchResultPreview(result: SearchResultItem) {
-  const title = `${visualUnitKindDisplayName(result.kind)} · ${sourceName(result.source_path)}`;
+  const title = `${assetTypeDisplayName(result.asset_type)} · ${sourceName(result.source_uri)}`;
   const previewIdentity =
-    result.library_id && result.visual_unit_id
-      ? `${result.library_id}:${result.visual_unit_id}`
-      : result.visual_unit_id ?? result.source_path ?? result.preview.url;
+    result.library_id && result.asset_id
+      ? `${result.library_id}:${result.asset_id}`
+      : result.asset_id ?? result.source_uri ?? result.preview.url;
   const previewKey = [
     result.library_id ?? "",
-    result.visual_unit_id ?? result.source_path,
+    result.asset_id ?? result.source_uri,
     result.preview.url,
     result.locator?.start_ms ?? "",
     result.locator?.end_ms ?? "",
   ].join("::");
 
-  if (result.kind === "image") {
+  if (result.asset_type === "image") {
     return `
       <img
         class="result-preview-image"
@@ -83,7 +83,7 @@ export function renderSearchResultPreview(result: SearchResultItem) {
     `;
   }
 
-  if (result.kind === "video_segment") {
+  if (result.asset_type === "video_segment") {
     const startMs = result.locator?.start_ms ?? 0;
     const endMs = result.locator?.end_ms ?? 0;
     return `
@@ -117,10 +117,10 @@ export function renderSearchResultPreview(result: SearchResultItem) {
 }
 
 export function selectedPreviewSurface() {
-  const visualUnit = state.selectedVisualUnit?.visual_unit;
-  const preview = state.selectedVisualUnit?.preview;
-  if (!visualUnit || !preview) {
+  const asset = state.selectedAsset?.asset;
+  const preview = state.selectedAsset?.preview;
+  if (!asset || !preview) {
     return "";
   }
-  return renderPreviewSurface(visualUnit, preview, "visual-preview");
+  return renderPreviewSurface(asset, preview, "visual-preview");
 }
