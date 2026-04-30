@@ -12,6 +12,7 @@
 - 人类可读输出 (Human-readable Output)
 - 机器可读输出 (Machine-readable Output)
 - 一键上传搜索 (Upload-and-search)
+- Agent-first 查找 (Agent-first Find)
 
 ## 范围
 
@@ -32,7 +33,7 @@
 ## 设计原则
 
 - Server-first：产品业务能力只通过 Rust 主服务公开 API 暴露；除 `faus serve` 的本机 runtime 启动职责外，CLI 不直接读写内部状态、SQLite、Qdrant、runtime 文件或 sidecar
-- 层级清晰：`serve` 是 headless runtime 入口，`status` 是只读观察命令，`web` 基于启动或连接后的 Rust server 进入浏览器体验，library / sources / import / search / jobs 是公开 HTTP API 的工作流 client
+- 层级清晰：`serve` 是 headless runtime 入口，`status` 是只读观察命令，`web` 基于启动或连接后的 Rust server 进入浏览器体验，library / sources / import / search / find / jobs 是公开 HTTP API 的工作流 client
 - 工作流优先：命令按用户目标组织，优先覆盖启动、状态查看、库操作、导入、搜索、任务观察和打开 Web，不机械镜像全部 HTTP API
 - 可脚本化输出：默认输出服务人类阅读；显式 `--json` 时必须提供稳定机器可读结构，不依赖人类文案解析
 - 运维分层：`faus serve` 是产品 runtime 启动入口；bootstrap、doctor、reset、stop、detach、smoke、Qdrant 诊断和运行面清理继续归 `scripts/local/*` 与 [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md)
@@ -56,6 +57,7 @@
 - `faus status`、library、sources、import、search、jobs 等 client 型命令默认不读取 `.env`、`.env.dev` 或 `FAUNI_ENV_FILE`
 - 当 Rust 主服务不可达时，client 型命令必须明确报告连接失败；是否启动本机 runtime 只属于 `faus serve` 与基于它的 `faus web` 语义
 - client 型命令连接 Rust 主服务 App API 时不得使用 ambient `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量；本地产品 API 默认应直连目标 base URL
+- `search`、`find` 这类可能触发本地模型推理或大范围检索的 App API 请求不得复用健康检查级短 timeout；CLI 必须允许真实本机模型请求运行到可用结果或服务端错误
 
 ## 输出与错误
 
@@ -95,6 +97,7 @@
 - `faus sources ...`
 - `faus import ...`
 - `faus search ...`
+- `faus find ...`
 - `faus jobs ...`
 - `faus web`
 
@@ -180,8 +183,26 @@
 - 当用户请求服务端尚不支持的范围、组合查询或输入形态时，应返回 `not_supported` 或等价服务端错误
 - 搜索命令应支持 `top_k`、`cursor`、`target_content_types`、`debug` 等与公开搜索契约对应的常用参数
 - 视频和文档搜索可以通过命令参数传递 locator 范围；复杂 filters 与库内对象复用属于扩展能力
-- 人类可读搜索输出应优先展示结果数量、来源路径、结果类型、库 ID、score 与可取用预览 URL
+- 人类可读搜索输出应优先展示结果数量、来源 URI、结果类型、库 ID、score 与可取用预览 URL
 - `--json` 搜索输出应保留服务端搜索响应结构，不丢弃 `next_cursor`、`unsupported_content_types` 或 `debug`
+
+### `faus find`
+
+- `faus find` 是 agent-first workflow 命令，用于快速定位相关文档页、图片或视频片段
+- Canonical 命令形态固定为：
+  - `faus find <folder> --text <query>`
+  - `faus find <folder> --image <path>`
+  - `faus find --all-libraries --text <query>`
+  - `faus find --library-id <library_id> --text <query>`
+  - `faus find --library-id <library_id> --image <path>`
+- `faus find` 是 client 型命令，只连接已有 Rust 主服务，不启动本地 runtime、不直接读写 SQLite、Qdrant、runtime 文件或 sidecar
+- 有 `<folder>` 时，`faus find` 会通过公开 API 自动准备 folder：按规范化 folder path 派生 `faus-find-<16 hex>` 托管库，创建或复用来源根，并默认触发 source-root `refresh`
+- 无 `<folder>` 时，调用方必须显式传入 `--all-libraries` 或 `--library-id <library_id>`；该模式只搜索已有 active 索引，不创建库、不创建来源根、不触发 refresh / rescan、不等待 prepare job
+- 文本搜索支持单库和所有库；图片搜索当前只支持单库 scope，因为 query asset upload API 是库级接口
+- `faus find` 默认等待本次 folder 准备任务完成后搜索；显式 `--wait-mode partial` 使用 active-only 轮询，在已有 Source 级 active 结果时提前返回
+- 结果面向定位任务组织：命中按 Asset 返回，并在 `locations` 中列出具体库、Source URI、文档页、图片或视频时间片段；Unit 只作为匹配证据
+- `faus find --json` 必须返回稳定机器结构，至少表达 scope、folder 或显式搜索范围、prepare 状态、results、locations 与可选 `job_id`
+- `faus find` 的完整行为由 [230-faus-find-cli](../230-faus-find-cli/spec.md) 定义；`faus search` 继续承接基础搜索 API 形态
 
 ### `faus jobs`
 
@@ -224,10 +245,11 @@
 ## 验收标准
 
 - 仓库存在 `faus` 产品 CLI 入口规划，且其命令面不与 `scripts/local/*` 职责混淆
-- 基础命令面覆盖 serve、status、library、sources、import、search、jobs 与 web
+- 基础命令面覆盖 serve、status、library、sources、import、search、find、jobs 与 web
 - `serve -> status -> web` 的职责层级清晰：启动 runtime、观察 runtime、进入浏览器体验
 - `faus` 的 base URL 解析、`--json` 输出、错误映射和运行边界有明确规格约束
 - 搜索命令覆盖文本单库 / 所有库，以及图片、视频、文档的一键上传搜索
+- `faus find` 登记为 agent-first 查找工作流，并与基础 `faus search` 的原始搜索 API 输出职责分开
 - 规格没有新增 HTTP endpoint，也没有复制 009 中的 payload 细节
 
 ## 关联主题
@@ -235,5 +257,6 @@
 - [001-architecture](../001-architecture/spec.md) 定义 Rust 主服务作为唯一系统级编排中心
 - [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md) 定义公开 HTTP/API 契约与 OpenAPI 承接方向
 - [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md) 定义本地运维脚本、env 选择、服务启停与 smoke 验证
+- [230-faus-find-cli](../230-faus-find-cli/spec.md) 定义 agent-first 文件夹查找命令
 - [008-ui-ux](../008-ui-ux/spec.md) 定义 Web 产品体验与应用壳层语义
 - [020-frontend-architecture](../020-frontend-architecture/spec.md) 定义前端实现层组织边界

@@ -11,7 +11,7 @@
   - 单个临时上传视频
   - 库内视频对象引用，包括 `source_id` 与库内 `video_segment`
 - 当前阶段实际可返回的结果对象固定为 `video_segment + image + document_page`
-- 当前阶段索引主线固定为 `multi_vector_late_interaction` `vector_space` 路线
+- 当前阶段索引主线固定为 `multi_vector_late_interaction` VectorSpace 路线
 - 当前阶段首个实现模型固定为本地视觉模型链路；具体模型选择在实现专题中落地，不在本计划固定
 - 当前阶段检索后端固定为外部已运行的 `Qdrant` 实例
 

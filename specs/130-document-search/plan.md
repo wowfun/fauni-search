@@ -11,7 +11,7 @@
   - 单个临时上传文档
   - 库内文档对象引用，且使用 `source_id`
 - 当前阶段硬验收结果对象固定为 `document_page + image`；`video_segment` 保留为可选扩展命中，但不作为首轮验收阻塞项
-- 当前阶段索引主线固定为 `multi_vector_late_interaction` `vector_space` 路线
+- 当前阶段索引主线固定为 `multi_vector_late_interaction` VectorSpace 路线
 - 当前阶段首个查询文档格式固定为 `PDF`
 
 ## 当前阶段工作流

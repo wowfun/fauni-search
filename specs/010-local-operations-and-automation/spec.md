@@ -94,17 +94,17 @@
 - `status.sh` 应报告每个服务的 URL、ready 状态、pid、日志路径与配置来源；app pid 识别必须覆盖旧 Rust server binary、`cargo run` 与 `faus serve`，modeld pid 识别必须覆盖 `faus serve model`，modeld 状态应展示 loaded models 摘要
 - `stop.sh` 应优先复用 pid 文件，并保留端口 / 命令发现兜底，避免 pid 文件缺失时无法停止本仓库服务
 - 旧 runtime-token Qdrant collections 的清理属于 operator/manual concern，不属于 `run.sh` / `stop.sh` 的自动职责
-- 本次 alias cutover 后，旧 `text_search_*` collection、旧“直接物理 `index_*` collection”与旧“直接物理 `vector_space_*` collection”的清理同样属于 operator/manual concern；`run.sh` / `stop.sh` 不负责自动迁移或自动删除这些 collections
+- 本次索引命名 cutover 后，旧检索 collection 的清理同样属于 operator/manual concern；`run.sh` / `stop.sh` 不负责自动迁移或自动删除这些 collections
 - `cleanup-legacy-runtime.sh` 应只作用于选中 env 对应的 runtime root，并支持：
   - 默认 scan-only 输出
   - `--execute` 显式删除
   - `--json` 机器可读摘要
 - `cleanup-legacy-runtime.sh` 在执行删除前必须确认选中 env 下的 app、sidecar、UI 与 Qdrant 均未运行；若仍有任一服务运行，脚本必须拒绝执行删除
-- `cleanup-legacy-runtime.sh --execute` 应删除该 env root 下全部 `legacy-*` 归档目录，以及 Qdrant storage 中旧世代 `index_*`、`text_search_*` 与直接物理 `vector_space_*` collections
-- `cleanup-legacy-runtime.sh` 不得删除 alias 当前 target，也不得把当前命名方案中的 `vector_space_stage_*` collections 当成 legacy collection 误删
+- `cleanup-legacy-runtime.sh --execute` 应删除该 env root 下全部 `legacy-*` 归档目录，以及 Qdrant storage 中旧世代检索 collections
+- `cleanup-legacy-runtime.sh` 不得删除 alias 当前 target，也不得把当前命名方案中的临时 collections 当成 legacy collection 误删
 - 如需兼容切换，操作员应先执行 `cutover-runtime.sh` 归档旧世代 runtime，再按需执行 `cleanup-legacy-runtime.sh --execute` 清理旧归档与旧 collections
 - `cutover-runtime.sh` 只归档旧 `${APP_RUNTIME_DIR}/state.sqlite` 所在 `app/` 目录与 `QDRANT_STORAGE_DIR` 所在 `qdrant/` 目录；它不归档下载缓存、模型缓存、日志或其他工具缓存
-- `prune-dev-qdrant-collections.sh --dev` 默认在 collections 总数大于 500 时触发，按 collection 名称中的 Playwright 时间戳或文件时间排序，只保留最新 100 个 `vector_space_stage_playwright-*` collection，并同步删除指向被删 collection 的 alias
+- `prune-dev-qdrant-collections.sh --dev` 默认在 collections 总数大于 500 时触发，按 collection 名称中的 Playwright 时间戳或文件时间排序，只保留最新 100 个 Playwright 临时 collections，并同步删除指向被删 collection 的 alias
 - `prune-dev-qdrant-collections.sh` 不得在 Qdrant 运行时直接删除 storage 文件；如需删除，调用方必须先停止 `.env.dev` 下的相关服务
 - `reset-dev-runtime.sh --dev` 删除并重建 `.env.dev` 指向的 `${APP_RUNTIME_DIR}` 与 `${QDRANT_STORAGE_DIR}`，保留 `${DEV_LOG_DIR}` 目录但清理 stale pid 文件，并重新初始化 `${APP_RUNTIME_DIR}/runtime-config.json`
 - `.env.dev` 遇到旧 snapshot `state.sqlite` 时，推荐使用 `reset-dev-runtime.sh --dev` 明确重建 dev 运行面；默认 `.env` 运行面应由用户手动 cutover 或 reset，不自动处理
@@ -116,12 +116,12 @@
 - `check.sh` 不应默认执行 GPU smoke，也不应要求 app、sidecar、UI 或 Qdrant 已经启动
 - `smoke-text-search.sh` 用于真实模型与真实 Qdrant 链路验证，应在 app、sidecar 与 Qdrant 已可访问后运行
 - `smoke-image-search.sh` 若存在，用于真实图片查询链路验证，并应复用与 `smoke-text-search.sh` 相同的本地配置选择、服务前置与 JSON 输出约定
-- `smoke-runtime-status.sh` 若存在，用于真实运行时状态与 `vector_space` 诊断链路验证，并应复用与其他 smoke 相同的本地配置选择、服务前置与 JSON 输出约定
+- `smoke-runtime-status.sh` 若存在，用于真实运行时状态与 vector-space diagnostics 链路验证，并应复用与其他 smoke 相同的本地配置选择、服务前置与 JSON 输出约定
 - `check-e2e.sh` 若存在，应作为 Playwright UI smoke 与本地 smoke 的统一聚合入口，并默认面向 `--dev` 隔离运行面
 - smoke 的机器可读摘要至少包含：`status`、`library_id`、`job_id`、`result_kinds`、`backend`、`vector_type`
 - `smoke-runtime-status.sh` 的机器可读摘要至少还应包含：
   - `runtime_status`
-  - `vector_space_ids`
+  - `vector_spaces`
   - 可选 `unsupported_content_types`
 - Playwright UI smoke 默认使用 `--dev` 隔离配置；启动前应先执行 `.env.dev` Qdrant collection prune，避免历史 `playwright-*` stage collection 与 alias 无限增长并拖慢 Qdrant 冷启动
 - Playwright UI smoke 结束时只停止由自身启动的 `.env.dev` 服务，不在 teardown 阶段删除数据，以便失败后保留现场；下一次 E2E 启动前只在超过阈值时修剪旧 collection

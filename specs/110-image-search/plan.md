@@ -8,7 +8,7 @@
 - 当前阶段图片搜索继续复用现有共享搜索工作区，而不是新开独立页面或独立工作区
 - 当前阶段查询输入固定为单张查询图片；其来源允许是单张临时上传图片，或库内 `image` / `document_page` 对象引用
 - 当前阶段实际可返回的结果对象固定为 `document_page + image`
-- 当前阶段索引主线固定为 `multi_vector_late_interaction` `vector_space` 路线
+- 当前阶段索引主线固定为 `multi_vector_late_interaction` VectorSpace 路线
 - 当前阶段首个实现模型固定为 `ColQwen3.5-4.5B-v3`
 - 当前阶段检索后端固定为外部已运行的 `Qdrant` 实例
 
@@ -30,7 +30,7 @@
 - 当前阶段同时启用两种查询图片来源：
   - 单张临时上传图片
   - 库内 `image` / `document_page` 对象引用
-- 当前阶段库内对象引用只启用 `image` 与 `document_page` 视觉单元；不启用其他对象类型直接作为查询图片
+- 当前阶段库内对象引用只启用 `image` 与 `document_page` Asset；不启用其他对象类型直接作为查询图片
 - 当前阶段不实现图片拖拽上传、圈选 / 裁剪、区域搜索或图片 + 文本组合输入
 - 当前阶段不实现多图片粘贴、多图片上传或混合输入
 

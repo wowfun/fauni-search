@@ -31,7 +31,7 @@
 - 文本搜索能够命中 `document_page`
 - 文本搜索能够命中 `image`
 - 文本搜索能够命中 `video_segment`
-- 多类视觉对象允许在同一结果集中混排
+- 多类 Asset 结果允许在同一结果集中混排
 - 结果卡片稳定返回最小字段，并能继续打开对象详情
 
 ### 可搜索状态
@@ -67,7 +67,7 @@
 
 - 使用 `.venv-test/bin/python -m pytest sidecar/tests` 覆盖当前阶段模型与媒体处理链路
 - 优先覆盖：
-  - PDF 转页图与 `document_page` 视觉单元输入准备
+  - PDF 转页图与 `document_page` Asset / page image Unit 输入准备
   - 图片输入处理
   - `ColQwen3.5-4.5B-v3` 的查询与文档 embedding 路径
   - sidecar 在不可用、失败或输入异常时的稳定返回

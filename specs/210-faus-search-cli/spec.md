@@ -3,6 +3,7 @@
 定义 `faus search` 的具体行为：通过 Rust server 公开 App API 执行文本、图片、视频与文档搜索。命令采用 flag-based 查询输入，而不是 `text|image|video|document` 子命令；首版只执行单一输入搜索，但命令形态为未来组合查询保留空间。
 
 本专题承接 [030-cli](../030-cli/spec.md) 的长期 CLI 方向，复用 [160-faus-status-cli](../160-faus-status-cli/spec.md) 的连接与错误输出规则。
+面向 agent 的自动 folder prepare 与 active-only 部分等待由 [230-faus-find-cli](../230-faus-find-cli/spec.md) 承接。
 
 ## 关键术语
 
@@ -14,6 +15,7 @@
 - 本地查询文件
 - 组合查询
 - 搜索结果
+- Active-only 搜索
 - 人类可读输出
 - 机器可读输出
 
@@ -29,6 +31,8 @@
 范围外：
 
 - 组合查询的服务端能力实现
+- folder 自动准备、托管库创建、来源根自动创建与 refresh / rescan 编排
+- folder 自动准备后的 active-only 部分等待工作流
 - 库内对象复用输入
 - filters JSON 或复杂过滤 flag
 - `--wait`、watch、分页自动拉取、tail 或 job log
@@ -39,6 +43,7 @@
 
 - 命令形态稳定：`faus search` 通过输入 flag 表达查询类型，未来组合查询不需要新增主子命令
 - 显式范围：搜索命令不得隐式猜测用户要搜哪个库或所有库
+- Active-only 默认：`faus search` 保持基础搜索命令语义，只读取已提交的 active 搜索结果；需要 folder 自动准备和部分等待的场景使用 `faus find`
 - 单输入先行：首版只允许一个 query input；多个输入返回 CLI 层 `not_supported`
 - 本地文件优先：非文本搜索首版只承接本地文件上传查询，库内对象复用留给后续切片
 - 公开 API 优先：CLI 只消费 Rust server App API，不直接访问 SQLite、runtime 文件、Qdrant 或 sidecar
@@ -94,6 +99,7 @@
 - 非文本输入与 `--all-libraries` 组合时返回 `not_supported`
 - `--top-k` 必须大于 0
 - `--debug` 出现时，search 请求体必须携带 `debug: true`
+- `faus search` 不携带索引可见性切换字段；本专题不为基础 search 命令开启未提交索引载荷可见性
 - `--top-k`、`--cursor`、`--target-content-type` 进入对应 search 请求体
 - 视频 `--video-start-ms` / `--video-end-ms` 同时出现时写入 `video_input.locator`；只出现一端是 CLI 层错误
 - 文档 `--document-start-page` / `--document-end-page` 同时出现时写入 `document_input.locator`；只出现一端是 CLI 层错误
@@ -169,6 +175,7 @@
 ## 与其他命令的分界
 
 - `faus search` 只执行产品搜索请求，不启动本地进程
+- `faus search` 不自动创建库、来源根或触发 refresh / rescan；针对本地 folder 的自动准备、active-only 早返回和 Asset 定位输出由 [230-faus-find-cli](../230-faus-find-cli/spec.md) 的 `faus find` 承接
 - `faus import` 负责把本地路径提交为库内容，见 [200-faus-import-cli](../200-faus-import-cli/spec.md)
 - `faus jobs` 负责观察或处理后台任务，见 [190-faus-jobs-cli](../190-faus-jobs-cli/spec.md)
 - `scripts/local/*` 继续负责服务 stop、状态脚本、doctor、smoke 与本地运行面管理
@@ -193,6 +200,7 @@
 - 连接失败、无效 base URL、本地文件无法读取或响应契约不匹配返回非零退出码
 - 服务端错误载荷在 CLI 错误对象中保留
 - 本切片不启动本地进程，不新增 HTTP endpoint，不改变 Web 前端实现
+- 本切片不承接 `faus find <folder>` 的自动准备、active-only 部分等待或 Asset 定位输出
 
 ## 关联主题
 
@@ -201,5 +209,6 @@
 - [160-faus-status-cli](../160-faus-status-cli/spec.md)
 - [190-faus-jobs-cli](../190-faus-jobs-cli/spec.md)
 - [200-faus-import-cli](../200-faus-import-cli/spec.md)
+- [230-faus-find-cli](../230-faus-find-cli/spec.md)
 - [009-interfaces-and-protocol-contracts](../009-interfaces-and-protocol-contracts/spec.md)
 - [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md)

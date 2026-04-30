@@ -69,7 +69,8 @@
 - `Settings` -> `设置`
 - `Diagnostics` -> `诊断`
 - `resolved content model` -> `当前生效模型`
-- `vector_space` -> `执行空间`
+- `VectorSpace` -> `向量空间`
+- `vector_space_id` -> `向量空间编号`
 - `source_id` -> `来源编号`
 
 ## 共享组件的产品语气

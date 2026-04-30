@@ -1,6 +1,6 @@
 # 120 视频搜索 (Video Search)
 
-定义 FauniSearch 的视频搜索能力域，明确视频查询如何在单个库上下文中作用于已进入可搜索状态的视觉内容，并返回可消费的搜索结果。
+定义 FauniSearch 的视频搜索能力域，明确视频查询如何在单个库上下文中作用于已进入可搜索状态的内容，并返回可消费的 Asset 搜索结果。
 
 ## 关键术语 (Terminology)
 
@@ -87,7 +87,7 @@
 ## 公开能力与复用边界
 
 - 本专题复用以下既有基础能力，而不重新定义其事实源：
-  - [002-state-and-data-model](../002-state-and-data-model/spec.md) 中的临时查询资产、视觉单元与相关运行时状态归属
+  - [002-state-and-data-model](../002-state-and-data-model/spec.md) 中的临时查询资产、Asset、Unit 与相关运行时状态归属
   - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 中的正式接入、索引线生命周期与激活语义
   - [004-search](../004-search/spec.md) 中的视频查询语义、结果语义、对象展开语义与显式拒绝规则
   - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 中的任务、阶段推进与可观察性语义
@@ -100,7 +100,7 @@
 - `AC-1` 当目标库中的相关内容已进入可搜索状态后，视频查询能够命中 `video_segment` 结果。
 - `AC-2` 当目标库中的相关内容已进入可搜索状态后，视频查询能够命中 `image` 结果。
 - `AC-3` 当目标库中的相关内容已进入可搜索状态后，视频查询能够命中 `document_page` 结果。
-- `AC-4` 当查询同时命中多类视觉对象时，同一结果集中允许按实际分数混排返回这些结果。
+- `AC-4` 当查询同时命中多类 Asset 结果时，同一结果集中允许按实际分数混排返回这些结果。
 - `AC-5` 当查询视频缺失、过期、损坏、不可读取或范围非法时，系统返回明确失败，而不是静默返回空结果。
 - `AC-6` 当请求涉及已启用但尚未就绪的索引线时，系统返回明确未就绪反馈，而不是静默返回空结果。
 - `AC-7` 视频查询只作用于单个目标库，并且单次请求只承接一种视频查询输入，不发生跨库隐式搜索或隐式组合查询。
@@ -108,7 +108,7 @@
 ## 关联主题
 
 - [000-foundation](../000-foundation/spec.md) 定义项目级搜索输入与检索对象的上游基础
-- [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义临时查询资产、视觉单元与相关运行时状态模型
+- [002-state-and-data-model](../002-state-and-data-model/spec.md) 定义临时查询资产、Asset、Unit 与相关运行时状态模型
 - [003-ingestion-and-indexing](../003-ingestion-and-indexing/spec.md) 定义正式接入、索引线、active index 与可搜索状态的上游语义
 - [004-search](../004-search/spec.md) 定义视频查询、搜索结果与显式拒绝规则
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务、进度与运行时观察语义

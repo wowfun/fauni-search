@@ -15,7 +15,10 @@
 - schema component（Schema Component）
 - 搜索请求载荷（Search Request Payload）
 - 搜索范围载荷（Search Scope Payload）
+- 搜索可见性载荷（Search Visibility Payload）
 - 搜索响应载荷（Search Response Payload）
+- 结果位置载荷（Result Location Payload）
+- `faus find` 工作流输出（Find Workflow Output）
 - 任务动作载荷（Task Action Payload）
 - 任务快照载荷（Task Snapshot Payload）
 - 健康快照载荷（Health Snapshot Payload）
@@ -121,14 +124,15 @@
 - `/search/image` 的请求载荷必须携带 `image_input`
 - `/search/video` 的请求载荷必须携带 `video_input`
 - `/search/document` 的请求载荷必须携带 `document_input`
+- 当前稳定搜索只读取已提交的 active UnitIndex；公开搜索请求不提供索引可见性切换字段，未知控制字段必须返回 `not_supported` 或验证失败，不得静默回退或暴露未提交检索载荷
 - `image_input`、`video_input` 与 `document_input` 都必须编码为显式区分输入来源的结构化对象
 - 图片与视频查询长期上允许两类稳定编码形式：临时查询资产引用、库内对象引用
 - 图片查询的稳定输入对象至少应支持以下两种显式编码：
   - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "..." }`
-  - 库内对象引用：`{ "kind": "library_object", "visual_unit_id": "..." }`
+  - 库内对象引用：`{ "kind": "library_object", "asset_id": "..." }`
 - 视频查询的稳定输入对象至少应支持以下两种显式编码：
   - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "...", "locator": { "start_ms": ..., "end_ms": ... }? }`
-  - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "visual_unit_id": "..."?, "locator": { "start_ms": ..., "end_ms": ... }? }`
+  - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "asset_id": "..."?, "locator": { "start_ms": ..., "end_ms": ... }? }`
 - 文档查询的稳定输入对象至少应支持以下两种显式编码：
   - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "...", "locator": { "start_page": ..., "end_page": ... }? }`
   - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "locator": { "start_page": ..., "end_page": ... }? }`
@@ -136,7 +140,7 @@
 - 文档查询的 `locator` 若出现，必须同时包含 `start_page` 与 `end_page`；缺失 `locator` 时表示整份文档查询
 - 当视频查询使用库内对象引用时，能力专题可以选择：
   - 通过 `source_id` 表示“整段视频或显式时间范围”
-  - 通过 `visual_unit_id` 表示“直接复用某个库内 `video_segment` 作为查询输入”
+  - 通过 `asset_id` 表示“直接复用某个库内 `video_segment` Asset 作为查询输入”
 - 各能力专题可以只启用其中一个正式输入变体；未启用变体应通过统一错误载荷返回 `not_supported`
 - 搜索响应载荷通过响应封套中的 `data` 返回，至少包含：
   - 有序 `results`
@@ -145,12 +149,15 @@
   - 可选 `debug`
 - `cursor` 必须编码为来自上一页 `next_cursor` 或上一页最后一个结果项 `cursor` 的不透明字符串；客户端不得依赖其内部格式
 - 若启用了 `filters`，正式稳定编码至少包括：
-  - `filters.visual_unit.kind`：单字符串或字符串数组
+  - `filters.asset_type`：单字符串或字符串数组
   - `filters.source_type`：单字符串或字符串数组
   - `filters.path_prefix`：单字符串或字符串数组
   - `filters.time_range`：`{ "start_ms": number, "end_ms": number }`
 - `filters.time_range` 若出现，必须同时包含可解析的 `start_ms` 与 `end_ms`；否则应通过统一错误载荷返回 `validation_failed`
-- 每个搜索结果项的稳定字段至少包括：`library_id`、`preview`、`source_path`、`source_type`、`kind`、`locator`、`cursor`，以及可选 `score`
+- 每个搜索结果项的稳定字段至少包括：`library_id`、`source_id`、`asset_id`、`preview`、`source_uri`、`source_type`、`asset_type`、`locator`、`cursor`，以及可选 `score`、`matched_units`、`job_id`
+- `matched_units` 是命中证据数组；每项至少可表达 `unit_id`、`unit_type`、`vector_space_id`、`rank`、`raw_score` 与可选匹配摘要
+- 面向 `faus find` 等 agent-first 工作流的折叠结果默认按 Asset 返回；折叠结果至少应支持 `asset_id`、可选 `matched_units` 与 `locations`
+- `locations` 是结果位置数组，每项至少应支持：`library_id`、`source_id`、`asset_id`、可选 `source_root_id`、`source_uri`、`source_type`、`asset_type`、`locator` 与 `preview`
 - 结果项上的 `cursor` 与响应级 `next_cursor` 共享同一续页令牌语义；若本页后仍有更多结果，`next_cursor` 应可直接复用最后一个结果项上的 `cursor`
 - `preview` 必须编码为结构化资源引用对象；该对象至少包含一个可直接取用、对客户端保持不透明的 `url`，并可按需附带 `handle`
 - `neighbor_context` 不在搜索结果列表中默认内联返回；对象详情与展开接口负责承接该信息
@@ -161,12 +168,17 @@
   - `vector_type`
   - `content_types`
   - `vector_spaces`
+- `debug` 载荷可以包含 `prefilter` 摘要，用于说明本次查询的行级预过滤计划与执行情况
+- `debug.prefilter` 的稳定最小编码应能表达是否启用预过滤、使用的模式、候选 point 数量、下推字段，以及可选 fallback 原因；候选 point 数量必须表示应用搜索 scope 与公共 filters 后的可下推 point 数
+- `debug.prefilter.mode` 的稳定值至少应能区分 point allow-list、payload filter、组合过滤、未下推与 fallback 后过滤；具体后端 filter JSON 不进入公开契约
+- 全局 VectorSpace namespace 下，服务端对 library / folder / source-root 等窄 scope 搜索应在 debug 中报告 point allow-list prefilter；若未下推，应提供 fallback reason
 - `debug.vector_type` 的正式公开值固定为 `multi_vector_late_interaction`
 - 搜索请求若同时携带多种查询输入、显式请求未启用内容类型，或命中已启用但未就绪的目标内容类型，应通过统一错误载荷返回失败
 - `unsupported_content_types` 的稳定最小编码应为对象数组；每项至少应支持：
   - `content_type`
   - `model`
   - `vector_type`
+  - 可选 `vector_space_id`
   - `reason`
 - `debug.vector_spaces` 的稳定最小编码应为对象数组；每项至少应支持：
   - `vector_space_id`
@@ -178,8 +190,16 @@
   - `vector_type`
   - `content_types`
   - 可选 `execution_input_types`
-- `not_ready` 错误的 `details` 至少应支持按内容类型返回结构化条目；每个条目至少可表达 `content_type`，并可附带相关 `job` / `phase` 摘要
+- `not_ready` 错误的 `details` 至少应支持按内容类型返回结构化条目；每个条目至少可表达 `content_type`，并可附带 `vector_space_id`、相关 `job` / `phase` 摘要
 - 搜索结果字段的含义、过滤 / 排序规则、邻近上下文语义与显式拒绝规则由 [004-search](../004-search/spec.md) 定义
+
+### `faus find` 所需公开字段
+
+- `faus find` 是 CLI client 工作流，不要求 Rust server 暴露专用私有 endpoint；它应复用库、来源根、refresh / rescan、query asset 与 `/search/*` 公开契约
+- `faus find <folder>` 的机器输出 schema 由 [230-faus-find-cli](../230-faus-find-cli/spec.md) 承接；本专题只固定其依赖的最小公开字段
+- 服务端响应必须让 CLI 能判断 folder prepare 状态，最小需要库快照、来源根快照、动作型任务回执与任务快照中的 `job_id`、`status`、`phase`、`progress`
+- `faus find` 的 partial 模式通过轮询 active 搜索实现早返回；搜索响应不暴露未提交索引结果
+- 搜索响应或 CLI 折叠层必须能保留 Asset 与多个 `locations`，以便 agent 直接定位具体文档页、图片或视频片段
 
 ## 非搜索控制面接口契约
 
@@ -324,18 +344,19 @@
 - `GET /libraries/{library_id}/vector-space-diagnostics` 的稳定最小返回应支持 `vector_spaces` 数组
 - 每个 vector-space diagnostics 条目至少应支持：
   - `vector_space_id`
-  - `lifecycle_state`
   - `content_types`
+  - `unit_index_summary`
+  - `content_e2e_index_summary`
   - 可选 `provider_id`
   - 可选 `provider_kind`
   - 可选 `model_id`
   - 可选 `model_version`
   - 可选 `vector_type`
-  - 可选 `retired_at_ms`
-- vector-space diagnostics 的稳定 lifecycle 摘要规则为：
-  - active `vector_space` 应返回仍受配置与结构化真相共同承认的执行空间摘要
-  - retired `vector_space` 应返回仍处于延迟清理窗口内、尚未被后台维护循环成功清理的空间摘要
-  - retired 条目若无法安全反推出旧绑定细节，可以只返回 `vector_space_id`、`lifecycle_state` 与 `retired_at_ms`
+  - 可选 `cleanup_summary`
+- `unit_index_summary` 的稳定最小编码应能表达 active、retired、failed 与 not_ready 的 UnitIndex 计数或等价摘要
+- `unit_index_summary` 可以补充可下推 point 引用的聚合摘要，例如 active UnitIndex 中可解析 `vector_ref` 的数量；不得暴露 Qdrant collection、alias 或内部 namespace 为公开资源身份
+- `content_e2e_index_summary` 的稳定最小编码应能表达已完成端到端索引的 Source Content 数量，以及缺失完成标记导致无法走复用快路径的内容摘要
+- `cleanup_summary` 只表达检索后端命名空间清理的聚合事实，例如 retired / orphan namespace 数量与最早待清理时间；不得把后端命名空间提升为公开资源身份
 - `POST /settings/model-tests` 的稳定输入应采用 `multipart/form-data`，至少支持：
   - `provider_id`
   - `model_id`
@@ -369,12 +390,12 @@
 - `POST /settings/model-tests` 是纯诊断接口，不创建 job，不修改已持久化的 provider config、全局 `content_types` 或库级内容类型覆盖
 - `GET /libraries/{library_id}/sources` 至少应支持按 `source_root_id`、来源状态与来源类型过滤；若通过 HTTP 暴露，可使用等价的查询参数表达这些过滤条件
 - 来源清单项的最小快照至少应支持：`source_id`、来源类型、来源状态、来源根归属摘要与路径或等价来源定位摘要
-- 来源清单项可以按需附带代表性视觉对象摘要与稳定 `preview` 资源引用对象，用于来源浏览工作区中的预览优先详情面；这些附加字段不得把来源清单提升为独立 source detail 协议
+- 来源清单项可以按需附带代表性 Asset 摘要与稳定 `preview` 资源引用对象，用于来源浏览工作区中的预览优先详情面；这些附加字段不得把来源清单提升为独立 source detail 协议
 - 若通过 HTTP 暴露，库级视频来源清单接口的稳定入口应包括 `GET /libraries/{library_id}/video-sources`
 - 若通过 HTTP 暴露，视频来源预览资源的稳定入口应包括 `GET /libraries/{library_id}/video-sources/{source_id}/preview`
-- 若通过 HTTP 暴露，视觉对象详情接口的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}`
-- 若通过 HTTP 暴露，视觉对象预览资源的稳定入口应包括 `GET /libraries/{library_id}/visual-units/{visual_unit_id}/preview`
-- 视觉对象详情响应至少应返回目标对象的稳定详情快照、稳定 `preview` 资源引用对象，并可附带 `neighbor_context`
+- 若通过 HTTP 暴露，Asset 详情接口的稳定入口应包括 `GET /libraries/{library_id}/assets/{asset_id}`
+- 若通过 HTTP 暴露，Asset 预览资源的稳定入口应包括 `GET /libraries/{library_id}/assets/{asset_id}/preview`
+- Asset 详情响应至少应返回目标对象的稳定详情快照、稳定 `preview` 资源引用对象，并可附带 `neighbor_context`
 - 导入、刷新、重扫、重建、清理、维护，以及任务取消 / 重试 / 恢复等动作型接口，应采用显式动作载荷，而不是通过隐式读写触发后台执行
 - 若通过 HTTP 暴露，任务读取入口至少应包括：
   - `GET /jobs`
@@ -395,7 +416,7 @@
 - 若通过 HTTP 暴露，库级维护动作入口可以采用显式动作载荷；稳定入口应包括：
   - `POST /libraries/{library_id}/maintenance`
 - `POST /libraries/{library_id}/maintenance` 至少应支持：
-  - `cleanup_retired_vector_spaces`
+  - `cleanup_retired_indexes`
 - `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
 - 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/images`
 - 若通过 HTTP 暴露，临时查询视频上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/videos`
@@ -421,7 +442,7 @@
   - `reason_code`
   - `message`
 - 任务快照载荷至少应包含：`job_id`、`kind`、`status`、`phase`、`progress`、`cancelable`、`retryable`、`current_attempt`
-- `progress` 应稳定表达 `completed`、`total` 与 `unit`；同一任务在不同阶段可以切换更贴近当前工作的 `unit`，例如从 `source_root` / `item` 切到索引阶段的 `visual_unit`
+- `progress` 应稳定表达 `completed`、`total` 与 `unit`；同一任务在不同阶段可以切换更贴近当前工作的 `unit`，例如从 `source_root` / `item` 切到索引阶段的 `asset` 或 `unit`
 - 当任务由显式 retry 重新排队时，任务快照还应能表达其 retry lineage；至少应暴露可选 `retried_from_job_id`
 - `POST /jobs/{job_id}/cancel` 的成功响应可以直接返回更新后的任务快照
 - `POST /jobs/{job_id}/resume` 的成功响应可以直接返回被重新打开的同一 job 快照
@@ -486,27 +507,27 @@
   - `operation_kind`
   - 输入引用或临时资产引用
   - 已解析提供方选择摘要或等价执行上下文
-  - 与目标索引线或目标输出相关的最小上下文
+  - 与目标 VectorSpace 或目标输出相关的最小上下文
   - 可选 `debug`
 - `POST /embed` 至少应支持以下 `operation_kind`：
-  - `query_embedding`，用于承接文本查询编码；其输入至少应能表达一个或多个查询文本，以及与目标索引线相关的最小上下文
-  - `image_query_embedding`，用于承接图片查询编码；其输入至少应能表达一个或多个本地图片引用，且在需要时能够携带视觉单元级 `locator`
+  - `query_embedding`，用于承接文本查询编码；其输入至少应能表达一个或多个查询文本，以及与目标 VectorSpace 相关的最小上下文
+  - `image_query_embedding`，用于承接图片查询编码；其输入至少应能表达一个或多个本地图片引用，且在需要时能够携带 Asset 级 `locator`
   - `video_query_embedding`，用于承接视频查询编码；其输入至少应能表达一个或多个本地视频引用，并在需要时能够携带视频时间范围 `locator`
   - `document_query_embedding`，用于承接文档查询编码；其输入至少应能表达一个或多个本地文档引用，并在需要时能够携带文档页范围 `locator`
-  - `document_embedding`，用于承接 PDF 页图或图片对象的编码；其输入至少应能表达一个或多个本地文件引用，以及与目标索引线相关的最小上下文
-- `image_query_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；至少应支持用页定位符表达库内 `document_page` 作为查询图片的路径
+  - `document_embedding`，用于承接 PDF 页图或图片对象的编码；其输入至少应能表达一个或多个本地文件引用，以及与目标 VectorSpace 相关的最小上下文
+- `image_query_embedding` 的单项输入在需要时必须能够携带 Asset 级 `locator`；至少应支持用页定位符表达库内 `document_page` Asset 作为查询图片的路径
 - `video_query_embedding` 的单项输入在需要时必须能够携带视频时间范围 `locator`；至少应支持用 `start_ms` / `end_ms` 表达整段视频中的目标片段
 - `document_query_embedding` 的单项输入在需要时必须能够携带文档页范围 `locator`；至少应支持用 `start_page` / `end_page` 表达整份 PDF 中的目标片段
-- `document_embedding` 的单项输入在需要时必须能够携带视觉单元级 `locator`；至少应支持用页定位符表达 PDF 的目标页
+- `document_embedding` 的单项输入在需要时必须能够携带 Asset 级 `locator`；至少应支持用页定位符表达 PDF 的目标页
 - `document_embedding` 可以承接批量输入，但服务端可以基于运行时批大小上限拒绝过大的 `inputs.documents`
 - 若 `document_embedding` 因批大小上限拒绝请求，应继续复用统一错误载荷并返回 `validation_failed`
-- `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了视觉单元级 `locator`，响应应能返回与该输入对应的定位摘要
+- `document_embedding` 的成功响应应按请求输入逐项返回结构化结果；若输入携带了 Asset 级 `locator`，响应应能返回与该输入对应的定位摘要
 - `document_embedding` 的批大小限制属于实现配置而不是稳定协议契约；无论是否触发该限制，`POST /embed` 的成功响应 shape 都不应改变
 - `video_query_embedding` 与 `document_query_embedding` 属于 runtime adapter operation；它们不应被上游误判为模型原生输入类型
 - `GET /capabilities` 中的 `runtime_adapters` 应使用命名 adapter 列表，例如：
   - `document_query_via_page_images`
   - `video_query_via_frame_images`
-- 批处理、staging 与 active 切换属于内部执行实现；app 对外公开 API shape 不应因此改变
+- 批处理与索引激活属于内部执行实现；app 对外公开 API shape 不应因此改变
 - 推理 / 编码成功响应必须返回与 `operation_kind` 对应的结构化 `data`，例如向量输出、派生结果描述或媒体处理摘要；不得依赖未文档化的 sidecar 私有字段
 - sidecar 的超时、不可达、能力不满足与内部失败，必须复用稳定错误载荷与错误码族表达，而不是只依赖传输层异常
 - sidecar 协议只承接公开输入 / 输出 / 诊断契约；模型加载、驻留、容量逐出与运行时托管语义由 [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义
@@ -520,7 +541,7 @@
 - [004-search](../004-search/spec.md) 定义搜索查询、结果语义、过滤分页规则与显式拒绝条件
 - [005-provider-capabilities-and-profiles](../005-provider-capabilities-and-profiles/spec.md) 定义 provider config、模型选择、解析顺序与运行时探测判定语义
 - [006-runtime-and-execution](../006-runtime-and-execution/spec.md) 定义任务执行、任务恢复、运行时健康与 sidecar 托管语义
-- [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义结构化记录、任务记录、检索命名空间与文件载荷的物理落点
+- [007-storage-and-persistence](../007-storage-and-persistence/spec.md) 定义结构化记录、任务记录、检索命名空间与 Unit 物化缓存的物理落点
 - [008-ui-ux](../008-ui-ux/spec.md) 定义搜索工作区、管理工作区、控制面入口与应用级体验边界
 - [010-local-operations-and-automation](../010-local-operations-and-automation/spec.md) 定义 `scripts/local/*` 的本地运维自动化边界，它们不属于公开 App API 或产品 CLI surface
 - [020-frontend-architecture](../020-frontend-architecture/spec.md) 定义前端实现组织、Vite 开发代理与 UI 构建约束，不承接公开 API payload 事实源

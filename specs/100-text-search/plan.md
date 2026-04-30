@@ -7,7 +7,7 @@
 - 当前阶段交付形态固定为 `API + 最小 UI` 的可演示闭环，而不是纯后端原型
 - 当前阶段来源范围固定为 `PDF + 图片`
 - 当前阶段实际可返回的结果对象固定为 `document_page + image`
-- 当前阶段索引主线固定为 `multi_vector_late_interaction` `vector_space` 路线
+- 当前阶段索引主线固定为 `multi_vector_late_interaction` VectorSpace 路线
 - 当前阶段首个实现模型固定为 `ColQwen3.5-4.5B-v3`
 - 当前阶段检索后端固定为外部已运行的 `Qdrant` 实例
 
@@ -17,7 +17,7 @@
 
 - 当前阶段用户必须先创建库或选择已有库，再进入文本搜索工作台
 - 当前阶段的工作台必须始终显式展示当前目标库上下文
-- 当前阶段创建库时，库配置必须显式启用 `multi_vector_late_interaction` 向量类型，并允许系统派生对应 `vector_space`；相关契约形状继续复用 `009`
+- 当前阶段创建库时，库配置必须显式启用 `multi_vector_late_interaction` 向量类型，并允许系统派生对应 VectorSpace；相关契约形状继续复用 `009`
 
 ### 2. 路径导入
 

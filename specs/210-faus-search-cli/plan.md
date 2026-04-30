@@ -84,7 +84,7 @@
 
 - 组合查询服务端能力
 - filters JSON 与常用过滤 flags
-- 库内 visual unit / source 复用查询
+- 库内 Asset / Source 复用查询
 - 自动分页、watch、tail 或 search history
 - shell completion 与 man page
 - search 命令真实 dev smoke 脚本

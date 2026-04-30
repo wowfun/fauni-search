@@ -203,12 +203,12 @@ Execution Input Types 的约束：
 - 当前切片中，Settings 模型测试只要求承接 `text` 与 `image`
 - Settings 模型测试除主输入外，还应允许一个可选的第二输入；第二输入的模态应独立选择，但同样必须受 `Embedding Capabilities.input_types` 约束
 - 当提供第二输入时，Settings 模型测试除返回第二输入对应的向量结果外，还必须返回第二输入与主输入之间的相似度
-- Settings 模型测试中的跨模态相似度是模型诊断能力；它不改变正式索引、正式搜索或 `vector_space + multi_vector_late_interaction` 的执行语义
+- Settings 模型测试中的跨模态相似度是模型诊断能力；它不改变正式索引、正式搜索或 `VectorSpace + multi_vector_late_interaction` 的执行语义
 - Settings 模型测试是纯诊断能力，不创建 job，不写 durable state，不改变已持久化的全局 content types、库级 content types 或已解析模型选择
 - 当前切片中，`dashscope` 仍只作为配置与未来兼容字段存在；在 Settings 模型测试中选择它时，必须显式返回 `not_supported`
 - 文档与视频查询能力属于 runtime adapter，不属于模型原生能力；它们只允许在运行时诊断或调试面中以命名 adapter 列表呈现
 - 文档与视频查询能力虽然不属于模型原生能力，但在当前切片中属于 `local_sidecar` 的正式执行能力；搜索是否可执行必须以 Execution Input Types 判定，而不是以 `EmbeddingCapabilities.input_types` 判定
-- 已启用内容类型可以解析到多个不同的可执行 `model/vector_type` 组合；系统必须按组合派生多个 `vector_space`，而不是要求全库收敛到单一执行绑定
+- 已启用内容类型可以解析到多个不同的可执行 `model/vector_type` 组合；系统必须按组合派生多个 VectorSpace，而不是要求全库收敛到单一执行绑定
 
 ## 运行时探测与失败语义
 
