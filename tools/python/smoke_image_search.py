@@ -198,9 +198,9 @@ def main() -> int:
         },
     )
     searched = assert_success(search_status, searched_payload, "image search")
-    result_kinds = {item["kind"] for item in searched.get("results", [])}
+    result_asset_types = {item["asset_type"] for item in searched.get("results", [])}
     debug = searched.get("debug") or {}
-    if "image" not in result_kinds or "document_page" not in result_kinds:
+    if "image" not in result_asset_types or "document_page" not in result_asset_types:
         raise SystemExit(
             "[error] image search did not return both image and document_page results: "
             + json.dumps(searched, ensure_ascii=False)
@@ -213,11 +213,11 @@ def main() -> int:
             "[error] image search did not report the qdrant multi_vector_late_interaction backend"
         )
 
-    image_result = next((item for item in searched.get("results", []) if item.get("kind") == "image"), None)
+    image_result = next((item for item in searched.get("results", []) if item.get("asset_type") == "image"), None)
     if not image_result:
         raise SystemExit("[error] image search did not return an image result that can be reused as a library query object")
     document_page_result = next(
-        (item for item in searched.get("results", []) if item.get("kind") == "document_page"),
+        (item for item in searched.get("results", []) if item.get("asset_type") == "document_page"),
         None,
     )
     if not document_page_result:
@@ -231,7 +231,7 @@ def main() -> int:
             "library_id": library_id,
             "image_input": {
                 "kind": "library_object",
-                "visual_unit_id": image_result["visual_unit_id"],
+                "asset_id": image_result["asset_id"],
             },
             "top_k": 10,
             "debug": True,
@@ -242,9 +242,9 @@ def main() -> int:
         library_object_payload,
         "library-object image search",
     )
-    library_object_result_kinds = {item["kind"] for item in library_object_search.get("results", [])}
+    library_object_result_asset_types = {item["asset_type"] for item in library_object_search.get("results", [])}
     library_object_debug = library_object_search.get("debug") or {}
-    if "image" not in library_object_result_kinds or "document_page" not in library_object_result_kinds:
+    if "image" not in library_object_result_asset_types or "document_page" not in library_object_result_asset_types:
         raise SystemExit(
             "[error] library-object image search did not return both image and document_page results: "
             + json.dumps(library_object_search, ensure_ascii=False)
@@ -263,7 +263,7 @@ def main() -> int:
             "library_id": library_id,
             "image_input": {
                 "kind": "library_object",
-                "visual_unit_id": document_page_result["visual_unit_id"],
+                "asset_id": document_page_result["asset_id"],
             },
             "top_k": 10,
             "debug": True,
@@ -274,11 +274,11 @@ def main() -> int:
         document_page_payload,
         "document-page library-object image search",
     )
-    document_page_result_kinds = {
-        item["kind"] for item in document_page_search.get("results", [])
+    document_page_result_asset_types = {
+        item["asset_type"] for item in document_page_search.get("results", [])
     }
     document_page_debug = document_page_search.get("debug") or {}
-    if "image" not in document_page_result_kinds or "document_page" not in document_page_result_kinds:
+    if "image" not in document_page_result_asset_types or "document_page" not in document_page_result_asset_types:
         raise SystemExit(
             "[error] document-page library-object image search did not return both image and document_page results: "
             + json.dumps(document_page_search, ensure_ascii=False)
@@ -296,12 +296,12 @@ def main() -> int:
         "library_id": library_id,
         "job_id": job_id,
         "temp_asset_id": temp_asset_id,
-        "library_object_visual_unit_id": image_result["visual_unit_id"],
-        "document_page_visual_unit_id": document_page_result["visual_unit_id"],
+        "library_object_asset_id": image_result["asset_id"],
+        "document_page_asset_id": document_page_result["asset_id"],
         "accepted": len(imported["accepted"]),
-        "result_kinds": sorted(result_kinds),
-        "library_object_result_kinds": sorted(library_object_result_kinds),
-        "document_page_library_object_result_kinds": sorted(document_page_result_kinds),
+        "result_asset_types": sorted(result_asset_types),
+        "library_object_result_asset_types": sorted(library_object_result_asset_types),
+        "document_page_library_object_result_asset_types": sorted(document_page_result_asset_types),
         "backend": debug.get("backend"),
         "vector_type": debug.get("vector_type"),
         "query_vector_count": debug.get("query_vector_count"),

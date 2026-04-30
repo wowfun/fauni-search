@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 import urllib.request
 import argparse
@@ -139,9 +138,9 @@ def main() -> int:
         (item for item in imported["accepted"] if item.get("source_type") == "pdf"),
         None,
     )
-    if not pdf_import or len(pdf_import.get("visual_units", [])) != 2:
+    if not pdf_import or len(pdf_import.get("assets", [])) != 2:
         raise SystemExit(
-            "[error] PDF import did not expand into two document_page visual units: "
+            "[error] PDF import did not expand into two document_page assets: "
             + json.dumps(imported, ensure_ascii=False)
         )
     job = wait_for_job_terminal(job_id)
@@ -161,9 +160,9 @@ def main() -> int:
         },
     )
     searched = assert_success(search_status, searched_payload, "text search")
-    result_kinds = {item["kind"] for item in searched.get("results", [])}
+    result_asset_types = {item["asset_type"] for item in searched.get("results", [])}
     debug = searched.get("debug") or {}
-    if "image" not in result_kinds or "document_page" not in result_kinds:
+    if "image" not in result_asset_types or "document_page" not in result_asset_types:
         raise SystemExit(
             "[error] search did not return both image and document_page results: "
             + json.dumps(searched, ensure_ascii=False)
@@ -175,15 +174,21 @@ def main() -> int:
         raise SystemExit(
             "[error] search did not report the qdrant multi_vector_late_interaction backend"
         )
+    if not debug.get("vector_spaces"):
+        raise SystemExit(
+            "[error] search debug did not report vector_spaces: "
+            + json.dumps(searched, ensure_ascii=False)
+        )
 
     summary = {
         "status": "ok",
         "library_id": library_id,
         "job_id": job_id,
         "accepted": len(imported["accepted"]),
-        "result_kinds": sorted(result_kinds),
+        "result_asset_types": sorted(result_asset_types),
         "backend": debug.get("backend"),
         "vector_type": debug.get("vector_type"),
+        "vector_spaces": debug.get("vector_spaces"),
         "query_vector_count": debug.get("query_vector_count"),
         "retrieved_points": debug.get("retrieved_points"),
         "pdf_path": str(pdf_path),

@@ -6,6 +6,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -39,6 +40,7 @@ fn top_help_describes_cli_and_examples() {
     assert!(stdout.contains("faus library list"));
     assert!(stdout.contains("faus sources roots list"));
     assert!(stdout.contains("faus import --library-id demo"));
+    assert!(stdout.contains("faus find ./notes --text"));
 }
 
 #[test]
@@ -1678,6 +1680,576 @@ async fn search_rejects_non_json_response() {
     assert_eq!(payload["error"]["details"]["http_status"], 200);
 }
 
+#[test]
+fn find_help_describes_folder_workflow_flags() {
+    let output = faus()
+        .args(["find", "--help"])
+        .output()
+        .expect("faus find help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    for flag in [
+        "--text",
+        "--image",
+        "--top-k",
+        "--target-content-type",
+        "--library-id",
+        "--all-libraries",
+        "--rescan",
+        "--wait-mode",
+        "--wait-timeout-ms",
+        "--poll-interval-ms",
+    ] {
+        assert!(stdout.contains(flag), "missing {flag} in help");
+    }
+    assert!(stdout.contains("faus find ./notes --text"));
+    assert!(stdout.contains("faus find --all-libraries --text"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_without_folder_requires_explicit_scope_before_http() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            "--text",
+            "query",
+        ])
+        .output()
+        .expect("faus find should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "validation_failed");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .expect("message should be present")
+        .contains("--all-libraries"));
+    assert!(server.records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_text_all_libraries_searches_without_prepare() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--debug",
+            "--json",
+            "find",
+            "--all-libraries",
+            "--text",
+            "financial statement analysis",
+            "--top-k",
+            "2",
+        ])
+        .output()
+        .expect("faus find all libraries should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["scope"], json!({ "kind": "all_libraries" }));
+    assert_eq!(payload["data"]["folder"], Value::Null);
+    assert!(payload["data"].get("library").is_none());
+    assert_eq!(payload["data"]["prepare"]["status"], "skipped");
+    assert_eq!(payload["data"]["prepare"]["action"], "none");
+    assert_eq!(payload["data"]["prepare"]["job_id"], Value::Null);
+    assert_eq!(payload["data"]["prepare"]["wait_mode"], "none");
+    assert_eq!(
+        payload["data"]["results"][0]["locations"][0]["library_id"],
+        "demo"
+    );
+    assert_eq!(payload["data"]["debug"]["request_debug"], true);
+
+    let records = server.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].method, "POST");
+    assert_eq!(records[0].path, "/search/text");
+    assert_eq!(
+        records[0].body,
+        Some(json!({
+            "text": "financial statement analysis",
+            "search_scope": {
+                "kind": "all_libraries"
+            },
+            "top_k": 2,
+            "debug": true
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_text_library_scope_searches_without_prepare() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            "--library-id",
+            "demo",
+            "--text",
+            "query",
+        ])
+        .output()
+        .expect("faus find library text should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(
+        payload["data"]["scope"],
+        json!({ "kind": "library", "library_id": "demo" })
+    );
+    assert_eq!(payload["data"]["folder"], Value::Null);
+    assert_eq!(payload["data"]["library"]["library_id"], "demo");
+    assert_eq!(payload["data"]["library"].get("source_root_id"), None);
+    assert_eq!(payload["data"]["prepare"]["status"], "skipped");
+
+    let records = server.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].path, "/search/text");
+    assert_eq!(
+        records[0].body,
+        Some(json!({
+            "text": "query",
+            "search_scope": {
+                "kind": "library",
+                "library_id": "demo"
+            }
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_image_library_scope_uploads_and_searches_without_prepare() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let folder = temp_test_dir("find-scope-image");
+    let query = folder.join("query.png");
+    fs::write(&query, b"image").expect("query image should be written");
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            "--library-id",
+            "demo",
+            "--image",
+            query.to_str().unwrap(),
+        ])
+        .output()
+        .expect("faus find library image should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["folder"], Value::Null);
+    assert_eq!(payload["data"]["library"]["library_id"], "demo");
+    assert_eq!(
+        payload["data"]["query_asset"]["temp_asset_id"],
+        "asset_image_1"
+    );
+
+    let records = server.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].path, "/libraries/demo/query-assets/images");
+    assert_eq!(records[1].path, "/search/image");
+    assert_eq!(
+        records[1].body,
+        Some(json!({
+            "library_id": "demo",
+            "search_scope": {
+                "kind": "library",
+                "library_id": "demo"
+            },
+            "image_input": {
+                "kind": "temp_asset",
+                "temp_asset_id": "asset_image_1"
+            }
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_all_libraries_image_returns_not_supported_before_http() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            "--all-libraries",
+            "--image",
+            "/tmp/query.png",
+        ])
+        .output()
+        .expect("faus find should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "not_supported");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .expect("message should be present")
+        .contains("--all-libraries --image"));
+    assert!(server.records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_scope_only_rejects_prepare_flags_before_http() {
+    for flag in [
+        "--rescan",
+        "--wait-mode",
+        "--wait-timeout-ms",
+        "--poll-interval-ms",
+    ] {
+        let server = StatusServer::start(RuntimeMode::Ok).await;
+        let mut args = vec![
+            "--base-url",
+            server.base_url.as_str(),
+            "--json",
+            "find",
+            "--all-libraries",
+            "--text",
+            "query",
+        ];
+        match flag {
+            "--rescan" => args.push("--rescan"),
+            "--wait-mode" => args.extend(["--wait-mode", "partial"]),
+            "--wait-timeout-ms" => args.extend(["--wait-timeout-ms", "1000"]),
+            "--poll-interval-ms" => args.extend(["--poll-interval-ms", "100"]),
+            _ => unreachable!(),
+        }
+
+        let output = faus().args(args).output().expect("faus find should run");
+        assert!(!output.status.success(), "{flag} should fail");
+        let payload = stdout_json(&output);
+        assert_eq!(payload["error"]["code"], "validation_failed");
+        assert!(server.records().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_folder_rejects_all_libraries_before_http() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let folder = temp_test_dir("find-folder-all-libraries");
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            folder.to_str().unwrap(),
+            "--all-libraries",
+            "--text",
+            "query",
+        ])
+        .output()
+        .expect("faus find should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "validation_failed");
+    assert!(server.records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_text_creates_managed_library_prepares_and_searches() {
+    let server = StatusServer::start(RuntimeMode::JobCompleted).await;
+    let folder = temp_test_dir("find-text");
+    let folder_path = folder.canonicalize().expect("folder should canonicalize");
+    let folder_string = folder_path.to_string_lossy().to_string();
+    let folder_uri = expected_file_uri(&folder_string);
+    let expected_library_id = expected_faus_find_library_id(&folder_string);
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--debug",
+            "--json",
+            "find",
+            folder.to_str().unwrap(),
+            "--text",
+            "VAS segment revenue",
+            "--top-k",
+            "3",
+            "--target-content-type",
+            "image",
+            "--target-content-type",
+            "document",
+        ])
+        .output()
+        .expect("faus find should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["data"]["folder"]["path"], folder_string);
+    assert_eq!(
+        payload["data"]["library"]["library_id"],
+        expected_library_id
+    );
+    assert_eq!(payload["data"]["library"]["source_root_id"], "root_1");
+    assert_eq!(payload["data"]["library"]["reused_library"], false);
+    assert_eq!(payload["data"]["library"]["reused_source_root"], false);
+    assert_eq!(payload["data"]["prepare"]["status"], "ready");
+    assert_eq!(payload["data"]["prepare"]["action"], "refresh");
+    assert_eq!(payload["data"]["prepare"]["job_id"], "job_1");
+    assert_eq!(payload["data"]["prepare"]["wait_mode"], "complete");
+    assert_eq!(payload["data"].get("index"), None);
+    assert_eq!(payload["data"]["debug"]["request_debug"], true);
+    assert_eq!(
+        payload["data"]["results"][0]["locations"][0]["source_root_id"],
+        "root_1"
+    );
+    assert_eq!(payload["debug"]["job_poll_count"], 1);
+
+    let records = server.records();
+    assert_eq!(records[0].method, "GET");
+    assert_eq!(records[0].path, format!("/libraries/{expected_library_id}"));
+    assert_eq!(records[1].method, "POST");
+    assert_eq!(records[1].path, "/libraries");
+    assert_eq!(
+        records[1].body,
+        Some(json!({
+            "library_id": expected_library_id,
+            "display_name": format!(
+                "faus find: {}",
+                folder_path.file_name().unwrap().to_string_lossy()
+            )
+        }))
+    );
+    assert_eq!(
+        records[2].path,
+        format!("/libraries/{expected_library_id}/source-roots")
+    );
+    assert_eq!(records[3].method, "POST");
+    assert_eq!(
+        records[3].path,
+        format!("/libraries/{expected_library_id}/source-roots")
+    );
+    assert_eq!(records[3].body, Some(json!({ "root_path": folder_string })));
+    assert_eq!(
+        records[4].path,
+        format!("/libraries/{expected_library_id}/source-roots/root_1/refresh")
+    );
+    assert_eq!(records[5].path, "/jobs/job_1");
+    assert_eq!(records[6].path, "/search/text");
+    assert_eq!(
+        records[6].body,
+        Some(json!({
+            "text": "VAS segment revenue",
+            "search_scope": {
+                "kind": "library",
+                "library_id": expected_library_id
+            },
+            "filters": {
+                "path_prefix": folder_uri
+            },
+            "top_k": 3,
+            "target_content_types": ["image", "document"],
+            "debug": true
+        }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_image_reuses_explicit_library_root_and_rescans() {
+    let folder = temp_test_dir("find-image");
+    let folder_string = folder
+        .canonicalize()
+        .expect("folder should canonicalize")
+        .to_string_lossy()
+        .to_string();
+    let folder_uri = expected_file_uri(&folder_string);
+    let server =
+        StatusServer::start_with_source_root(RuntimeMode::JobCompleted, folder_string.clone())
+            .await;
+    let query = folder.join("query.png");
+    fs::write(&query, b"image").expect("query image should be written");
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            folder.to_str().unwrap(),
+            "--image",
+            query.to_str().unwrap(),
+            "--library-id",
+            "demo",
+            "--rescan",
+        ])
+        .output()
+        .expect("faus find image should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["library"]["library_id"], "demo");
+    assert_eq!(payload["data"]["library"]["reused_library"], true);
+    assert_eq!(payload["data"]["library"]["reused_source_root"], true);
+    assert_eq!(payload["data"]["prepare"]["action"], "rescan");
+    assert_eq!(
+        payload["data"]["query_asset"]["temp_asset_id"],
+        "asset_image_1"
+    );
+    assert_eq!(payload["data"]["results"][0]["asset_type"], "image");
+    assert_eq!(
+        payload["data"]["results"][0]["locations"][0]["library_id"],
+        "demo"
+    );
+
+    let records = server.records();
+    assert_eq!(records[0].path, "/libraries/demo");
+    assert_eq!(records[1].path, "/libraries/demo/source-roots");
+    assert_eq!(
+        records[2].path,
+        "/libraries/demo/source-roots/root_1/rescan"
+    );
+    assert_eq!(records[3].path, "/jobs/job_1");
+    assert_eq!(records[4].path, "/libraries/demo/query-assets/images");
+    assert_eq!(records[5].path, "/search/image");
+    assert_eq!(
+        records[5].body.as_ref().unwrap()["filters"],
+        json!({ "path_prefix": folder_uri })
+    );
+    assert_eq!(
+        records[5].body.as_ref().unwrap()["image_input"],
+        json!({ "kind": "temp_asset", "temp_asset_id": "asset_image_1" })
+    );
+    assert!(!records
+        .iter()
+        .any(|record| record.method == "POST" && record.path == "/libraries"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_partial_returns_active_results_before_job_completes() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let folder = temp_test_dir("find-partial");
+    let folder_path = folder.canonicalize().expect("folder should canonicalize");
+    let folder_string = folder_path.to_string_lossy().to_string();
+    let expected_library_id = expected_faus_find_library_id(&folder_string);
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            folder.to_str().unwrap(),
+            "--text",
+            "query",
+            "--wait-mode",
+            "partial",
+        ])
+        .output()
+        .expect("faus find should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["data"]["prepare"]["wait_mode"], "partial");
+    assert_eq!(payload["data"]["prepare"]["status"], "running");
+    assert_eq!(payload["data"].get("index"), None);
+    assert_eq!(payload["data"]["results"][0].get("visibility"), None);
+
+    let records = server.records();
+    assert_eq!(records[0].path, format!("/libraries/{expected_library_id}"));
+    assert_eq!(records[5].path, "/search/text");
+    assert_eq!(records[6].path, "/jobs/job_1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_prepare_timeout_returns_details() {
+    let folder = temp_test_dir("find-timeout");
+    let folder_string = folder
+        .canonicalize()
+        .expect("folder should canonicalize")
+        .to_string_lossy()
+        .to_string();
+    let server = StatusServer::start_with_source_root(RuntimeMode::Ok, folder_string).await;
+
+    let output = faus()
+        .args([
+            "--base-url",
+            &server.base_url,
+            "--json",
+            "find",
+            folder.to_str().unwrap(),
+            "--text",
+            "query",
+            "--library-id",
+            "demo",
+            "--wait-timeout-ms",
+            "1",
+            "--poll-interval-ms",
+            "1",
+        ])
+        .output()
+        .expect("faus find should run");
+
+    assert!(!output.status.success());
+    let payload = stdout_json(&output);
+    assert_eq!(payload["error"]["code"], "wait_timeout");
+    assert_eq!(payload["error"]["details"]["library_id"], "demo");
+    assert_eq!(payload["error"]["details"]["source_root_id"], "root_1");
+    assert_eq!(payload["error"]["details"]["action"], "refresh");
+    assert_eq!(payload["error"]["details"]["job_id"], "job_1");
+    assert_eq!(payload["error"]["details"]["last_job"]["status"], "running");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_prepare_failed_or_canceled_returns_details() {
+    for (mode, expected_status) in [
+        (RuntimeMode::JobFailed, "failed"),
+        (RuntimeMode::JobCanceled, "canceled"),
+    ] {
+        let folder = temp_test_dir(expected_status);
+        let folder_string = folder
+            .canonicalize()
+            .expect("folder should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let server = StatusServer::start_with_source_root(mode, folder_string).await;
+
+        let output = faus()
+            .args([
+                "--base-url",
+                &server.base_url,
+                "--json",
+                "find",
+                folder.to_str().unwrap(),
+                "--text",
+                "query",
+                "--library-id",
+                "demo",
+            ])
+            .output()
+            .expect("faus find should run");
+
+        assert!(!output.status.success());
+        let payload = stdout_json(&output);
+        assert_eq!(payload["error"]["code"], "prepare_failed");
+        assert_eq!(
+            payload["error"]["details"]["last_job"]["status"],
+            expected_status
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_human_output_is_short_summary() {
     let server = StatusServer::start(RuntimeMode::Ok).await;
@@ -2153,6 +2725,25 @@ fn temp_test_dir(name: &str) -> PathBuf {
     path
 }
 
+fn expected_faus_find_library_id(folder_path: &str) -> String {
+    let digest = Sha256::digest(folder_path.as_bytes());
+    let suffix = digest
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .take(16)
+        .map(|nibble| char::from_digit(nibble as u32, 16).unwrap())
+        .collect::<String>();
+    format!("faus-find-{suffix}")
+}
+
+fn expected_file_uri(path: &str) -> String {
+    if path.starts_with("file://") {
+        path.to_string()
+    } else {
+        format!("file://{path}")
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RuntimeMode {
     Ok,
@@ -2160,6 +2751,9 @@ enum RuntimeMode {
     MissingData,
     NotJson,
     EmptyHealth,
+    JobCompleted,
+    JobFailed,
+    JobCanceled,
 }
 
 struct StatusServer {
@@ -2172,6 +2766,17 @@ struct StatusServer {
 
 impl StatusServer {
     async fn start(runtime_mode: RuntimeMode) -> Self {
+        Self::start_with_optional_source_root(runtime_mode, None).await
+    }
+
+    async fn start_with_source_root(runtime_mode: RuntimeMode, source_root_path: String) -> Self {
+        Self::start_with_optional_source_root(runtime_mode, Some(source_root_path)).await
+    }
+
+    async fn start_with_optional_source_root(
+        runtime_mode: RuntimeMode,
+        source_root_path: Option<String>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test server should bind");
@@ -2182,6 +2787,7 @@ impl StatusServer {
             requests: requests.clone(),
             records: records.clone(),
             runtime_mode,
+            source_root_path,
         };
         let app = Router::new()
             .route("/health", get(health))
@@ -2290,6 +2896,7 @@ struct StatusServerState {
     requests: Arc<Mutex<Vec<String>>>,
     records: Arc<Mutex<Vec<RecordedRequest>>>,
     runtime_mode: RuntimeMode,
+    source_root_path: Option<String>,
 }
 
 impl StatusServerState {
@@ -2347,7 +2954,11 @@ async fn web_root(State(state): State<StatusServerState>) -> Response {
 async fn runtime_status(State(state): State<StatusServerState>) -> Response {
     state.record("/runtime/status");
     match state.runtime_mode {
-        RuntimeMode::Ok | RuntimeMode::EmptyHealth => Json(json!({
+        RuntimeMode::Ok
+        | RuntimeMode::EmptyHealth
+        | RuntimeMode::JobCompleted
+        | RuntimeMode::JobFailed
+        | RuntimeMode::JobCanceled => Json(json!({
             "data": {
                 "app": {
                     "component_id": "app",
@@ -2428,8 +3039,14 @@ async fn list_jobs(State(state): State<StatusServerState>, uri: axum::http::Uri)
 async fn show_job(Path(job_id): Path<String>, State(state): State<StatusServerState>) -> Response {
     let path = format!("/jobs/{job_id}");
     state.record_http("GET", &path, None);
+    let (status, phase) = match state.runtime_mode {
+        RuntimeMode::JobCompleted => ("completed", "activated"),
+        RuntimeMode::JobFailed => ("failed", "failed"),
+        RuntimeMode::JobCanceled => ("canceled", "canceled"),
+        _ => ("running", "indexing"),
+    };
     Json(json!({
-        "data": job_snapshot(&job_id, "demo", "import", "running", "indexing", None)
+        "data": job_snapshot(&job_id, "demo", "import", status, phase, None)
     }))
     .into_response()
 }
@@ -2495,6 +3112,19 @@ async fn show_library(
 ) -> Response {
     let path = format!("/libraries/{library_id}");
     state.record_http("GET", &path, None);
+    if library_id.starts_with("faus-find-") {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "code": "not_found",
+                    "message": "Library was not found.",
+                    "retryable": false,
+                }
+            })),
+        )
+            .into_response();
+    }
     Json(json!({
         "data": library_snapshot(&library_id, "Demo Library", "active")
     }))
@@ -2570,14 +3200,17 @@ async fn list_source_roots(
         RuntimeMode::ErrorEnvelope => server_error_envelope(),
         RuntimeMode::MissingData => Json(json!({ "meta": {} })).into_response(),
         RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
-        _ => Json(json!({
-            "data": {
-                "source_roots": [
-                    source_root_snapshot("root_1", "/tmp/demo", true)
-                ]
-            }
-        }))
-        .into_response(),
+        _ => {
+            let root_path = state.source_root_path.as_deref().unwrap_or("/tmp/demo");
+            Json(json!({
+                "data": {
+                    "source_roots": [
+                        source_root_snapshot("root_1", root_path, true)
+                    ]
+                }
+            }))
+            .into_response()
+        }
     }
 }
 
@@ -2878,7 +3511,7 @@ fn source_root_snapshot(source_root_id: &str, root_path: &str, enabled: bool) ->
 fn source_snapshot(library_id: &str, source_id: &str, source_root_id: &str) -> Value {
     json!({
         "source_id": source_id,
-        "source_path": format!("/tmp/{library_id}/report.pdf"),
+        "source_uri": format!("file:///tmp/{library_id}/report.pdf"),
         "source_type": "pdf",
         "kind": "document",
         "status": "ready",
@@ -2886,16 +3519,16 @@ fn source_snapshot(library_id: &str, source_id: &str, source_root_id: &str) -> V
         "source_root_id": source_root_id,
         "source_root_path": format!("/tmp/{library_id}"),
         "source_root_label": source_root_id,
-        "visual_unit_count": 2,
-        "representative_visual_unit": {
-            "visual_unit_id": "vu_1",
+        "asset_count": 2,
+        "representative_asset": {
+            "asset_id": "asset_1",
             "source_id": source_id,
-            "kind": "document_page",
+            "asset_type": "document_page",
             "source_type": "pdf",
             "locator": { "page": 1 }
         },
         "representative_preview": {
-            "url": format!("/libraries/{library_id}/visual-units/vu_1/preview")
+            "url": format!("/libraries/{library_id}/assets/asset_1/preview")
         }
     })
 }
@@ -2926,24 +3559,25 @@ fn search_snapshot(search_kind: &str, body: &Value) -> Value {
         "results": [
             {
                 "library_id": library_id,
-                "visual_unit_id": "vu_1",
-                "source_id": "src_1",
-                "preview": {
-                    "url": format!("/libraries/{library_id}/visual-units/vu_1/preview")
-                },
-                "source_path": format!("/tmp/{search_kind}-source"),
-                "source_type": search_kind,
-                "kind": match search_kind {
+                "asset_id": "asset_1",
+                "asset_type": match search_kind {
                     "video" => "video_segment",
                     "document" => "document_page",
                     "image" => "image",
                     _ => "text_chunk",
                 },
+                "source_id": "src_1",
+                "preview": {
+                    "url": format!("/libraries/{library_id}/assets/asset_1/preview")
+                },
+                "source_uri": format!("file:///tmp/{search_kind}-source"),
+                "source_type": search_kind,
                 "locator": match search_kind {
                     "video" => json!({ "start_ms": 42000, "end_ms": 50000 }),
                     "document" => json!({ "page": 1 }),
                     _ => json!({ "path": format!("/tmp/{search_kind}-source") }),
                 },
+                "matched_units": [],
                 "cursor": "cursor_1",
                 "score": 8.25
             }
@@ -2984,7 +3618,7 @@ fn import_snapshot(library_id: &str, body: &Value) -> Value {
                 "source_id": "src_1",
                 "source_type": "document",
                 "kind": "document_page",
-                "visual_units": [],
+                "assets": [],
             }));
         }
     }

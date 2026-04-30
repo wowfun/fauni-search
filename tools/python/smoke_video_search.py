@@ -173,11 +173,11 @@ def search_video(
     return assert_success(search_status, search_payload, "video search")
 
 
-def require_result_kinds(payload: dict, expected: set[str], label: str) -> None:
-    result_kinds = {item["kind"] for item in payload.get("results", [])}
-    if not expected.issubset(result_kinds):
+def require_result_asset_types(payload: dict, expected: set[str], label: str) -> None:
+    result_asset_types = {item["asset_type"] for item in payload.get("results", [])}
+    if not expected.issubset(result_asset_types):
         raise SystemExit(
-            f"[error] {label} did not return expected result kinds {sorted(expected)}: "
+            f"[error] {label} did not return expected result asset types {sorted(expected)}: "
             + json.dumps(payload, ensure_ascii=False)
         )
     debug = payload.get("debug") or {}
@@ -201,7 +201,7 @@ def main() -> int:
 
     manifest_path = select_manifest(args.manifest)
     manifest = load_manifest(manifest_path)
-    video_path = (args.video or ROOT / manifest.get("source_path", "")).resolve()
+    video_path = (args.video or ROOT / manifest.get("source" "_path", "")).resolve()
     if not video_path.is_file():
         raise SystemExit(f"[error] local video smoke source is missing: {video_path}")
 
@@ -287,7 +287,7 @@ def main() -> int:
             },
         },
     )
-    require_result_kinds(
+    require_result_asset_types(
         temp_asset_search,
         {"video_segment", "image", "document_page"},
         "temp-asset video search",
@@ -311,7 +311,7 @@ def main() -> int:
             "temp_asset_id": clip_temp_asset_id,
         },
     )
-    require_result_kinds(
+    require_result_asset_types(
         whole_clip_search,
         {"video_segment", "image", "document_page"},
         "whole-clip video search",
@@ -328,7 +328,7 @@ def main() -> int:
             },
         },
     )
-    require_result_kinds(
+    require_result_asset_types(
         library_object_search,
         {"video_segment", "image", "document_page"},
         "library-object video search",
@@ -338,7 +338,7 @@ def main() -> int:
         (
             item
             for item in temp_asset_search.get("results", [])
-            if item.get("kind") == "video_segment" and item.get("visual_unit_id")
+            if item.get("asset_type") == "video_segment" and item.get("asset_id")
         ),
         None,
     )
@@ -352,10 +352,10 @@ def main() -> int:
         library_id,
         {
             "kind": "library_object",
-            "visual_unit_id": first_video_segment["visual_unit_id"],
+            "asset_id": first_video_segment["asset_id"],
         },
     )
-    require_result_kinds(
+    require_result_asset_types(
         video_segment_object_search,
         {"video_segment", "image", "document_page"},
         "video-segment library-object search",
@@ -370,13 +370,13 @@ def main() -> int:
         "moment_id": primary_moment["id"],
         "temp_asset_duration_ms": uploaded.get("duration_ms"),
         "clip_temp_asset_duration_ms": clip_uploaded.get("duration_ms"),
-        "result_kinds": sorted({item["kind"] for item in temp_asset_search["results"]}),
-        "whole_clip_result_kinds": sorted({item["kind"] for item in whole_clip_search["results"]}),
-        "library_object_result_kinds": sorted(
-            {item["kind"] for item in library_object_search["results"]}
+        "result_asset_types": sorted({item["asset_type"] for item in temp_asset_search["results"]}),
+        "whole_clip_result_asset_types": sorted({item["asset_type"] for item in whole_clip_search["results"]}),
+        "library_object_result_asset_types": sorted(
+            {item["asset_type"] for item in library_object_search["results"]}
         ),
-        "video_segment_object_result_kinds": sorted(
-            {item["kind"] for item in video_segment_object_search["results"]}
+        "video_segment_object_result_asset_types": sorted(
+            {item["asset_type"] for item in video_segment_object_search["results"]}
         ),
         "backend": temp_asset_search.get("debug", {}).get("backend"),
         "vector_type": temp_asset_search.get("debug", {}).get("vector_type"),
@@ -394,12 +394,12 @@ def main() -> int:
         print(f"moment_id: {payload['moment_id']}")
         print(f"temp_asset_duration_ms: {payload['temp_asset_duration_ms']}")
         print(f"clip_temp_asset_duration_ms: {payload['clip_temp_asset_duration_ms']}")
-        print(f"result_kinds: {payload['result_kinds']}")
-        print(f"whole_clip_result_kinds: {payload['whole_clip_result_kinds']}")
-        print(f"library_object_result_kinds: {payload['library_object_result_kinds']}")
+        print(f"result_asset_types: {payload['result_asset_types']}")
+        print(f"whole_clip_result_asset_types: {payload['whole_clip_result_asset_types']}")
+        print(f"library_object_result_asset_types: {payload['library_object_result_asset_types']}")
         print(
-            "video_segment_object_result_kinds: "
-            f"{payload['video_segment_object_result_kinds']}"
+            "video_segment_object_result_asset_types: "
+            f"{payload['video_segment_object_result_asset_types']}"
         )
         print(f"backend: {payload['backend']}")
         print(f"vector_type: {payload['vector_type']}")

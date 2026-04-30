@@ -368,10 +368,10 @@ fn print_human_output(response: SearchResponse) {
             "{}\tlibrary={}\tkind={}\tscore={}\tlocator={}\tsource={}\tpreview={}",
             index + 1,
             string_field(result, "library_id"),
-            string_field(result, "kind"),
+            string_field(result, "asset_type"),
             score_field(result),
             locator_field(result),
-            string_field(result, "source_path"),
+            string_field(result, "source_uri"),
             result
                 .get("preview")
                 .and_then(|preview| preview.get("url"))

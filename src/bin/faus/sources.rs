@@ -538,7 +538,7 @@ fn source_root_summary(root: &Value) -> String {
 
 fn source_summary(source: &Value) -> String {
     format!(
-        "{}\t{}\t{}\tstatus={}\troot={}\tvisual_units={}\t{}",
+        "{}\t{}\t{}\tstatus={}\troot={}\tassets={}\t{}",
         string_field(source, "source_id"),
         string_field(source, "source_type"),
         string_field(source, "kind"),
@@ -547,8 +547,8 @@ fn source_summary(source: &Value) -> String {
             .get("source_root_id")
             .and_then(Value::as_str)
             .unwrap_or("none"),
-        number_field(source, "visual_unit_count"),
-        string_field(source, "source_path"),
+        number_field(source, "asset_count"),
+        string_field(source, "source_uri"),
     )
 }
 

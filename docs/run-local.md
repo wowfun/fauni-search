@@ -188,6 +188,52 @@ bash scripts/local/smoke-document-search.sh --dev --json
 - 统一结果列表能稳定返回 `document_page` 与 `image`
 - 搜索后端是 `qdrant`，表征类型是 `multi_vector_late_interaction`
 
+## Agent 场景：用 `faus find` 定位资料
+
+`faus find` 面向已配置 CLI 的 agent。它不会启动 runtime，也不会直接读写 SQLite、Qdrant 或 sidecar；调用前必须先有 app、modeld、sidecar 和 Qdrant ready。使用 `--dev` 运行面时，显式传入 dev app 地址：
+
+```bash
+target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find data/example/lib1 --text "How much is the VAS segment revenue?" --wait-timeout-ms 600000
+```
+
+图片查询使用同一个 folder，再传一张本地图片作为 query：
+
+```bash
+target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find data/example/lib1 --image data/example/queries/AgentInteligenceLevel.png --wait-timeout-ms 600000
+```
+
+如果 agent 只需要搜索已有 active 索引，不需要准备某个新 folder，可以显式给出 scope。全库文本查找不会创建库、不会创建 source root，也不会触发 refresh / rescan：
+
+```bash
+target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find --all-libraries --text "financial statement analysis"
+```
+
+也可以限定到某个已有库：
+
+```bash
+target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find --library-id demo --text "financial statement analysis"
+```
+
+无 folder 时必须显式传 `--all-libraries` 或 `--library-id <id>`。全库图片 find 当前不支持，因为 query image 上传仍是库级 API；需要图片查询时使用 `--library-id <id> --image <path>`。
+
+默认情况下，`faus find` 会按规范化 folder path 派生 `faus-find-<16 hex>` 托管库，创建或复用该库的 source root，触发 source-root `refresh`，等待本次 job 完成后再搜索。第二次查同一个 folder 应复用同一个库和 source root，JSON 中对应 `data.library.reused_library=true` 与 `data.library.reused_source_root=true`。
+
+Agent 读取结果时，先看 `data.scope` 确认本次范围，再优先看 `data.results[].locations[]`。每个 location 是可操作位置，包含 `source_uri`、`asset_type`、`locator` 和 `preview`。`asset_type=document_page` 时，`locator.page` 表示 PDF 页；`asset_type=image` 时，`source_uri` 指向图片来源；后续 `video_segment` 结果会通过 `locator.start_ms` / `locator.end_ms` 表示时间片段。`matched_units[]` 是命中证据，用来解释是哪一个 Unit 和 `vector_space_id` 命中，不应替代 `locations[]` 作为最终定位。需要检查 `data.debug.vector_spaces` 或 `data.debug.prefilter` 时必须传全局 `--debug`；不带 `--debug` 时搜索仍可用，但 JSON 不保证包含 `data.debug`。
+
+常见错误处理：
+
+- `connection_failed`：目标 app 不可达。先用 `bash scripts/local/status.sh --dev --json` 确认服务，再检查 `--base-url`。
+- `wait_timeout`：folder 准备 job 未在指定时间内完成。保留错误里的 `job_id`，用 `faus jobs show <job_id>` 或查看 app/modeld/sidecar/Qdrant 日志继续排查。
+- `not_ready`：库或目标 content type 没有 active 索引。通常等待当前 job 完成或重新运行 complete 模式。
+- `not_supported`：请求了当前服务端尚未支持的输入或搜索范围。
+
+需要更快拿到已有结果时，可以显式使用 `--wait-mode partial`。该模式会在准备 job 运行期间轮询 active 搜索，一旦当前 folder 已有 Source 级 active 结果就返回。
+
+当前实现与 `specs/230-faus-find-cli` 的目标态还有两个明确差距：
+
+- 搜索结果目前由 CLI 把普通 `/search/*` 单个 Asset 结果包装成单个 `locations[]`；多位置折叠仍是目标态。
+- 服务端不公开未提交搜索结果；未提交为 active 的检索后端载荷会被搜索过滤隐藏。
+
 运行时健康与 `vector_space` 诊断对应 smoke：
 
 ```bash

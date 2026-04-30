@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{env, fs, path::Path, time::Duration};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:53210";
-const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const APP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug)]
 pub(crate) struct ResolvedBaseUrl {
@@ -173,7 +173,7 @@ async fn send_json_request(
     context: &AppRequest,
 ) -> Result<FetchedJson, CliError> {
     let response = request
-        .timeout(STATUS_REQUEST_TIMEOUT)
+        .timeout(APP_REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|error| {

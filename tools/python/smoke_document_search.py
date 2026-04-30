@@ -131,11 +131,11 @@ def create_document_search_fixtures(target_dir: Path) -> tuple[Path, Path]:
     return image_path, pdf_path
 
 
-def assert_result_kinds(label: str, search_data: dict, required_kinds: set[str]) -> set[str]:
-    result_kinds = {item["kind"] for item in search_data.get("results", [])}
-    if missing := required_kinds - result_kinds:
+def assert_result_asset_types(label: str, search_data: dict, required_asset_types: set[str]) -> set[str]:
+    result_asset_types = {item["asset_type"] for item in search_data.get("results", [])}
+    if missing := required_asset_types - result_asset_types:
         raise SystemExit(
-            f"[error] {label} did not return required result kinds {sorted(missing)}: "
+            f"[error] {label} did not return required result asset types {sorted(missing)}: "
             + json.dumps(search_data, ensure_ascii=False)
         )
     debug = search_data.get("debug") or {}
@@ -146,7 +146,7 @@ def assert_result_kinds(label: str, search_data: dict, required_kinds: set[str])
         raise SystemExit(
             f"[error] {label} did not report the qdrant multi_vector_late_interaction backend"
         )
-    return result_kinds
+    return result_asset_types
 
 
 def main() -> int:
@@ -188,9 +188,9 @@ def main() -> int:
         )
 
     document_import = next((item for item in imported["accepted"] if item.get("source_type") == "pdf"), None)
-    if not document_import or len(document_import.get("visual_units", [])) != 2:
+    if not document_import or len(document_import.get("assets", [])) != 2:
         raise SystemExit(
-            "[error] PDF import did not expand into two document_page visual units: "
+            "[error] PDF import did not expand into two document_page assets: "
             + json.dumps(imported, ensure_ascii=False)
         )
 
@@ -229,7 +229,7 @@ def main() -> int:
         },
     )
     temp_search = assert_success(temp_search_status, temp_search_payload, "temp-asset document search")
-    temp_result_kinds = assert_result_kinds("temp-asset document search", temp_search, {"document_page", "image"})
+    temp_result_asset_types = assert_result_asset_types("temp-asset document search", temp_search, {"document_page", "image"})
 
     source_search_status, source_search_payload = post_json(
         f"{APP_URL}/search/document",
@@ -244,7 +244,7 @@ def main() -> int:
         },
     )
     source_search = assert_success(source_search_status, source_search_payload, "source-id document search")
-    source_result_kinds = assert_result_kinds("source-id document search", source_search, {"document_page", "image"})
+    source_result_asset_types = assert_result_asset_types("source-id document search", source_search, {"document_page", "image"})
 
     ranged_search_status, ranged_search_payload = post_json(
         f"{APP_URL}/search/document",
@@ -263,10 +263,10 @@ def main() -> int:
         },
     )
     ranged_search = assert_success(ranged_search_status, ranged_search_payload, "ranged document search")
-    ranged_result_kinds = assert_result_kinds("ranged document search", ranged_search, {"document_page", "image"})
+    ranged_result_asset_types = assert_result_asset_types("ranged document search", ranged_search, {"document_page", "image"})
 
     document_page_result = next(
-        (item for item in temp_search.get("results", []) if item.get("kind") == "document_page"),
+        (item for item in temp_search.get("results", []) if item.get("asset_type") == "document_page"),
         None,
     )
     if not document_page_result:
@@ -294,7 +294,7 @@ def main() -> int:
         },
     )
     reuse_search = assert_success(reuse_search_status, reuse_search_payload, "document_page reuse search")
-    reuse_result_kinds = assert_result_kinds("document_page reuse search", reuse_search, {"document_page", "image"})
+    reuse_result_asset_types = assert_result_asset_types("document_page reuse search", reuse_search, {"document_page", "image"})
 
     summary = {
         "status": "ok",
@@ -302,10 +302,10 @@ def main() -> int:
         "job_id": job_id,
         "source_id": source_id,
         "temp_asset_id": temp_asset_id,
-        "result_kinds": sorted(temp_result_kinds),
-        "source_id_result_kinds": sorted(source_result_kinds),
-        "ranged_result_kinds": sorted(ranged_result_kinds),
-        "document_page_reuse_result_kinds": sorted(reuse_result_kinds),
+        "result_asset_types": sorted(temp_result_asset_types),
+        "source_id_result_asset_types": sorted(source_result_asset_types),
+        "ranged_result_asset_types": sorted(ranged_result_asset_types),
+        "document_page_reuse_result_asset_types": sorted(reuse_result_asset_types),
         "backend": temp_search.get("debug", {}).get("backend"),
         "vector_type": temp_search.get("debug", {}).get("vector_type"),
         "pdf_path": str(pdf_path),

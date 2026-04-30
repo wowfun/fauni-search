@@ -130,7 +130,7 @@ def create_source_management_fixtures(target_dir: Path) -> dict:
 
     return {
         "managed_image_path": managed_image_path,
-        "added_image_source_path": second_image,
+        "added_image_fixture_path": second_image,
         "added_image_path": added_image_path,
         "pdf_path": pdf_path,
         "image_query": first_entry["query"],
@@ -147,9 +147,17 @@ def list_sources(library_id: str, **filters: str) -> list[dict]:
     return data.get("sources", [])
 
 
+def source_uri_path(source: dict) -> str:
+    source_uri = source.get("source_uri", "")
+    parsed = urllib.parse.urlparse(source_uri)
+    if parsed.scheme == "file":
+        return urllib.request.url2pathname(parsed.path)
+    return source_uri
+
+
 def source_by_path(sources: list[dict], suffix: str) -> dict:
     for source in sources:
-        if source["source_path"].endswith(suffix):
+        if source_uri_path(source).endswith(suffix):
             return source
     raise SystemExit(f"[error] source inventory did not contain a source ending with {suffix}")
 
@@ -251,9 +259,9 @@ def main() -> int:
 
     image_source = source_by_path(active_sources, "chart.png")
     pdf_source = source_by_path(active_sources, "report.pdf")
-    if pdf_source.get("visual_unit_count") != 2:
+    if pdf_source.get("asset_count") != 2:
         raise SystemExit(
-            "[error] initial managed PDF did not expose two active document_page visual units: "
+            "[error] initial managed PDF did not expose two active document_page assets: "
             + json.dumps(pdf_source, ensure_ascii=False)
         )
 
@@ -263,7 +271,7 @@ def main() -> int:
     pdf_search = run_text_search(library_id, fixtures["pdf_query"])
     assert_contains_source("initial managed-pdf search", pdf_search, pdf_source["source_id"])
 
-    shutil.copy2(fixtures["added_image_source_path"], fixtures["added_image_path"])
+    shutil.copy2(fixtures["added_image_fixture_path"], fixtures["added_image_path"])
     watcher_add_job = wait_for_new_job(library_id, known_job_ids, kind="refresh")
     known_job_ids.add(watcher_add_job["job_id"])
     watcher_add_job = wait_for_job_terminal(watcher_add_job["job_id"])
@@ -287,9 +295,9 @@ def main() -> int:
 
     active_sources = list_sources(library_id, status="active")
     modified_pdf_source = source_by_path(active_sources, "report.pdf")
-    if modified_pdf_source.get("visual_unit_count") != 1:
+    if modified_pdf_source.get("asset_count") != 1:
         raise SystemExit(
-            "[error] watcher-driven modify did not shrink the managed PDF to one visual unit: "
+            "[error] watcher-driven modify did not shrink the managed PDF to one asset: "
             + json.dumps(modified_pdf_source, ensure_ascii=False)
         )
 

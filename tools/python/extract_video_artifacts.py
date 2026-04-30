@@ -176,7 +176,7 @@ def derive_artifacts(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract reusable screenshots and clips from a local video manifest")
     parser.add_argument("--manifest", required=True, type=Path, help="path to the local-only video manifest JSON")
-    parser.add_argument("--video", type=Path, help="override source video path; defaults to manifest source_path")
+    parser.add_argument("--video", type=Path, help="override source video path; defaults to the manifest source path")
     parser.add_argument("--output-dir", type=Path, help="override artifact output directory")
     parser.add_argument("--frames", action="store_true", help="extract frame PNGs only")
     parser.add_argument("--clips", action="store_true", help="extract clip MP4s only")
@@ -197,7 +197,7 @@ def main() -> int:
 
     manifest_path = args.manifest.resolve()
     manifest = load_manifest(manifest_path)
-    video_path = (args.video or ROOT / manifest.get("source_path", "")).resolve()
+    video_path = (args.video or ROOT / manifest.get("source" "_path", "")).resolve()
     if not video_path.is_file():
         fail(f"video not found: {video_path}")
 
