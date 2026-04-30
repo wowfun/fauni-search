@@ -1,6 +1,6 @@
 use crate::{
     api::{ApiError, EmbeddingCapabilities, ProviderProbeSnapshot},
-    model::{ProviderConfigRecord, VisualUnitRecord},
+    model::{ProviderConfigRecord, UnitRecord},
     provider::{
         current_rfc3339_timestamp, local_sidecar_embedding_capabilities,
         local_sidecar_execution_input_types, ProviderRuntimeModelSnapshot, QUERY_KIND_DOCUMENT,
@@ -14,7 +14,6 @@ use serde_json::{json, Value};
 use std::{env, time::Duration};
 
 pub(crate) struct IndexingError {
-    pub(crate) phase: &'static str,
     pub(crate) message: String,
 }
 
@@ -67,15 +66,15 @@ pub(crate) struct SidecarErrorPayload {
 }
 
 pub(crate) async fn embed_documents(
-    visual_units: &[VisualUnitRecord],
+    units: &[UnitRecord],
     provider_context: Option<Value>,
 ) -> Result<Vec<SidecarEmbeddingItem>, IndexingError> {
-    let documents: Vec<_> = visual_units
+    let documents: Vec<_> = units
         .iter()
-        .map(|visual_unit| {
+        .map(|unit| {
             json!({
-                "path": visual_unit.source_path,
-                "locator": visual_unit.locator,
+                "path": unit.source_path,
+                "locator": unit.locator,
             })
         })
         .collect();
@@ -93,7 +92,6 @@ pub(crate) async fn embed_documents(
         .post(format!(
             "{}/embed",
             sidecar_base_url().map_err(|error| IndexingError {
-                phase: "encode",
                 message: error.payload.message,
             })?
         ))
@@ -101,7 +99,6 @@ pub(crate) async fn embed_documents(
         .send()
         .await
         .map_err(|error| IndexingError {
-            phase: "encode",
             message: format!("Sidecar document embedding request failed: {error}"),
         })?;
 
@@ -110,79 +107,71 @@ pub(crate) async fn embed_documents(
         let body = response.text().await.unwrap_or_default();
         let message = parse_sidecar_error_message(&body)
             .unwrap_or_else(|| format!("Sidecar document embedding request failed with {status}."));
-        return Err(IndexingError {
-            phase: "encode",
-            message,
-        });
+        return Err(IndexingError { message });
     }
 
     let envelope: SidecarEnvelope<SidecarEmbedPayload> =
         response.json().await.map_err(|error| IndexingError {
-            phase: "encode",
             message: format!("Sidecar document embedding response was invalid JSON: {error}"),
         })?;
 
-    if envelope.data.embeddings.len() != visual_units.len() {
+    if envelope.data.embeddings.len() != units.len() {
         return Err(IndexingError {
-            phase: "encode",
             message: format!(
-                "Sidecar returned {} document embedding(s) for {} visual unit(s).",
+                "Sidecar returned {} document embedding(s) for {} unit(s).",
                 envelope.data.embeddings.len(),
-                visual_units.len()
+                units.len()
             ),
         });
     }
 
-    for (visual_unit, embedding) in visual_units.iter().zip(envelope.data.embeddings.iter()) {
+    for (unit, embedding) in units.iter().zip(envelope.data.embeddings.iter()) {
         if embedding.vectors.is_empty() || embedding.vectors[0].is_empty() {
             return Err(IndexingError {
-                phase: "encode",
                 message: format!(
                     "Sidecar returned an empty document embedding for {}.",
-                    visual_unit.source_path
+                    unit.source_path
                 ),
             });
         }
         if let Some(source_type) = &embedding.source_type {
-            if source_type != &visual_unit.source_type {
+            if source_type != &unit.source_type {
                 return Err(IndexingError {
-                    phase: "encode",
                     message: format!(
                         "Sidecar returned source_type {} for {}, but the expected source_type was {}.",
-                        source_type, visual_unit.source_path, visual_unit.source_type
+                        source_type,
+                        unit.source_path,
+                        unit.source_type
                     ),
                 });
             }
         }
         if let Some(kind) = &embedding.kind {
-            if kind != &visual_unit.kind {
+            if kind != &unit.asset_type {
                 return Err(IndexingError {
-                    phase: "encode",
                     message: format!(
                         "Sidecar returned kind {} for {}, but the expected kind was {}.",
-                        kind, visual_unit.source_path, visual_unit.kind
+                        kind, unit.source_path, unit.asset_type
                     ),
                 });
             }
         }
         if let Some(path) = &embedding.path {
-            if path != &visual_unit.source_path {
+            if path != &unit.source_path {
                 return Err(IndexingError {
-                    phase: "encode",
                     message: format!(
                         "Sidecar returned a document embedding for {}, but the expected path was {}.",
-                        path, visual_unit.source_path
+                        path, unit.source_path
                     ),
                 });
             }
         }
         if let Some(locator) = &embedding.locator {
-            if locator != &visual_unit.locator {
+            if locator != &unit.locator {
                 return Err(IndexingError {
-                    phase: "encode",
                     message: format!(
                         "Sidecar returned locator {} for {}, but the expected locator was {}.",
-                        locator, visual_unit.source_path, visual_unit.locator
+                        locator, unit.source_path, unit.locator
                     ),
                 });
             }

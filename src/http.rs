@@ -7,7 +7,7 @@ use crate::{
         SourceActionTrigger, StagedSettingsModelTestFile,
     },
     provider::{provider_context_payload, QUERY_KIND_IMAGE, QUERY_KIND_TEXT},
-    qdrant::{cleanup_retired_vector_space_namespace, query_qdrant},
+    qdrant::query_qdrant,
     query_assets::*,
     runtime::{run_import_job, run_maintenance_action_job, run_source_action_job},
     sidecar::{embed_query_document, embed_query_image, embed_query_text, embed_query_video},
@@ -103,8 +103,8 @@ pub fn build_app(state: SharedState) -> Router {
         .routes(routes!(get_query_video_preview))
         .routes(routes!(get_query_document_preview))
         .routes(routes!(get_video_source_preview))
-        .routes(routes!(get_visual_unit))
-        .routes(routes!(get_visual_unit_preview))
+        .routes(routes!(get_asset))
+        .routes(routes!(get_asset_preview))
         .routes(routes!(list_jobs))
         .routes(routes!(get_job))
         .routes(routes!(cancel_job))
@@ -186,7 +186,7 @@ async fn route_discovery() -> Json<RootPayload> {
             "POST /libraries/{library_id}/query-assets/videos",
             "POST /libraries/{library_id}/query-assets/documents",
             "GET /libraries/{library_id}/video-sources/{source_id}/preview",
-            "GET /libraries/{library_id}/visual-units/{visual_unit_id}",
+            "GET /libraries/{library_id}/assets/{asset_id}",
             "GET /libraries/{library_id}/query-assets/images/{temp_asset_id}/preview",
             "GET /libraries/{library_id}/query-assets/videos/{temp_asset_id}/preview",
             "GET /libraries/{library_id}/query-assets/documents/{temp_asset_id}/preview",
@@ -628,7 +628,7 @@ async fn delete_library(
 
     for vector_space_id in cleanup_plan.vector_space_ids {
         if let Err(error) =
-            cleanup_retired_vector_space_namespace(&library_id, &vector_space_id).await
+            crate::qdrant::cleanup_retired_vector_space_namespace(&vector_space_id).await
         {
             tracing::warn!(
                 library_id = %library_id,
@@ -1560,54 +1560,54 @@ async fn upload_query_document(
 
 #[utoipa::path(
     get,
-    path = "/libraries/{library_id}/visual-units/{visual_unit_id}",
+    path = "/libraries/{library_id}/assets/{asset_id}",
     params(
         ("library_id" = String, Path, description = "Library id"),
-        ("visual_unit_id" = String, Path, description = "Visual unit id"),
+        ("asset_id" = String, Path, description = "Asset id"),
     ),
     responses(
-        (status = 200, description = "Visual unit detail", body = SuccessEnvelope<VisualUnitDetailData>),
+        (status = 200, description = "Asset detail", body = SuccessEnvelope<AssetDetailData>),
         (status = "default", description = "Error response", body = ErrorEnvelope),
     ),
-    tag = "visual-units",
+    tag = "assets",
 )]
-async fn get_visual_unit(
+async fn get_asset(
     State(state): State<SharedState>,
-    Path((library_id, visual_unit_id)): Path<(String, String)>,
-) -> Result<Json<SuccessEnvelope<VisualUnitDetailData>>, ApiError> {
+    Path((library_id, asset_id)): Path<(String, String)>,
+) -> Result<Json<SuccessEnvelope<AssetDetailData>>, ApiError> {
     let state = state.read().await;
-    let snapshot = state.get_visual_unit(&library_id, &visual_unit_id)?;
+    let snapshot = state.get_asset(&library_id, &asset_id)?;
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
 #[utoipa::path(
     get,
-    path = "/libraries/{library_id}/visual-units/{visual_unit_id}/preview",
+    path = "/libraries/{library_id}/assets/{asset_id}/preview",
     params(
         ("library_id" = String, Path, description = "Library id"),
-        ("visual_unit_id" = String, Path, description = "Visual unit id"),
+        ("asset_id" = String, Path, description = "Asset id"),
     ),
     responses(
-        (status = 200, description = "Visual unit preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = 200, description = "Asset preview media", body = Vec<u8>, content_type = "application/octet-stream"),
         (status = "default", description = "Error response", body = ErrorEnvelope),
     ),
-    tag = "visual-units",
+    tag = "assets",
 )]
-async fn get_visual_unit_preview(
+async fn get_asset_preview(
     State(state): State<SharedState>,
-    Path((library_id, visual_unit_id)): Path<(String, String)>,
+    Path((library_id, asset_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let visual_unit = {
+    let asset = {
         let state = state.read().await;
-        state.get_library_visual_unit(&library_id, &visual_unit_id)?
+        state.get_library_asset(&library_id, &asset_id)?
     };
 
-    let bytes = fs::read(&visual_unit.source_path)
+    let bytes = fs::read(&asset.source_path)
         .map_err(|_| ApiError::not_found("Preview source file is not available."))?;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type_for_visual_unit(&visual_unit)),
+        HeaderValue::from_static(content_type_for_asset(&asset)),
     );
     headers.insert(
         header::CACHE_CONTROL,
@@ -1963,15 +1963,16 @@ async fn search_text(
         )
         .await?;
         let candidates = query_qdrant(
-            &group.library_id,
             &group.vector_space_id,
-            group.active_visual_unit_count,
+            group.active_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
+            &group.eligible_point_ids,
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
             library_id: group.library_id.clone(),
+            vector_space_id: group.vector_space_id.clone(),
             query_embedding,
             candidates,
         });
@@ -2004,7 +2005,7 @@ async fn search_image(
         .as_ref()
         .map(|scope| scope.kind.clone())
         .unwrap_or_else(|| "library".to_string());
-    let plan_library_id = (!plan.library_id.trim().is_empty())
+    let _plan_library_id = (!plan.library_id.trim().is_empty())
         .then_some(plan.library_id.as_str())
         .ok_or_else(|| {
             ApiError::not_supported(
@@ -2019,10 +2020,9 @@ async fn search_image(
 
     let (query_path, query_locator) = match &query_input {
         ResolvedImageQueryInput::TempAsset(asset) => (asset.path.as_str(), None),
-        ResolvedImageQueryInput::LibraryVisualUnit(visual_unit) => (
-            visual_unit.source_path.as_str(),
-            Some(visual_unit.locator.clone()),
-        ),
+        ResolvedImageQueryInput::LibraryAsset(asset) => {
+            (asset.source_path.as_str(), Some(asset.locator.clone()))
+        }
     };
     let mut executed_groups = Vec::new();
     for group in &plan.execution_groups {
@@ -2033,15 +2033,16 @@ async fn search_image(
         )
         .await?;
         let candidates = query_qdrant(
-            plan_library_id,
             &group.vector_space_id,
-            group.active_visual_unit_count,
+            group.active_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
+            &group.eligible_point_ids,
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
             library_id: group.library_id.clone(),
+            vector_space_id: group.vector_space_id.clone(),
             query_embedding,
             candidates,
         });
@@ -2074,7 +2075,7 @@ async fn search_video(
         .as_ref()
         .map(|scope| scope.kind.clone())
         .unwrap_or_else(|| "library".to_string());
-    let plan_library_id = (!plan.library_id.trim().is_empty())
+    let _plan_library_id = (!plan.library_id.trim().is_empty())
         .then_some(plan.library_id.as_str())
         .ok_or_else(|| {
             ApiError::not_supported(
@@ -2096,15 +2097,16 @@ async fn search_video(
         )
         .await?;
         let candidates = query_qdrant(
-            plan_library_id,
             &group.vector_space_id,
-            group.active_visual_unit_count,
+            group.active_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
+            &group.eligible_point_ids,
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
             library_id: group.library_id.clone(),
+            vector_space_id: group.vector_space_id.clone(),
             query_embedding,
             candidates,
         });
@@ -2137,7 +2139,7 @@ async fn search_document(
         .as_ref()
         .map(|scope| scope.kind.clone())
         .unwrap_or_else(|| "library".to_string());
-    let plan_library_id = (!plan.library_id.trim().is_empty())
+    let _plan_library_id = (!plan.library_id.trim().is_empty())
         .then_some(plan.library_id.as_str())
         .ok_or_else(|| {
             ApiError::not_supported(
@@ -2159,15 +2161,16 @@ async fn search_document(
         )
         .await?;
         let candidates = query_qdrant(
-            plan_library_id,
             &group.vector_space_id,
-            group.active_visual_unit_count,
+            group.active_unit_count,
             plan.cursor_offset.saturating_add(plan.top_k),
+            &group.eligible_point_ids,
             &query_embedding,
         )
         .await?;
         executed_groups.push(ExecutedSearchGroup {
             library_id: group.library_id.clone(),
+            vector_space_id: group.vector_space_id.clone(),
             query_embedding,
             candidates,
         });

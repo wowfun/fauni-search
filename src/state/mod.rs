@@ -1,7 +1,7 @@
 mod jobs;
 mod providers;
 mod search;
-mod sources;
+pub(crate) mod sources;
 #[cfg(test)]
 mod tests;
 
@@ -16,6 +16,7 @@ use crate::{
     provider::*,
     qdrant::{probe_active_qdrant_namespace, stable_vector_space_name},
     source_roots::*,
+    ACTIVE_INDEX_VISIBILITY,
 };
 use serde_json::json;
 use std::{
@@ -40,7 +41,9 @@ pub async fn new_state() -> Result<SharedState, io::Error> {
 pub struct AppState {
     durable_store_path: Option<PathBuf>,
     next_job_seq: u64,
-    next_visual_unit_seq: u64,
+    next_content_seq: u64,
+    next_asset_seq: u64,
+    next_unit_seq: u64,
     next_source_seq: u64,
     next_source_root_seq: u64,
     next_temp_asset_seq: u64,
@@ -67,7 +70,9 @@ impl Default for AppState {
         Self {
             durable_store_path: None,
             next_job_seq: 0,
-            next_visual_unit_seq: 0,
+            next_content_seq: 0,
+            next_asset_seq: 0,
+            next_unit_seq: 0,
             next_source_seq: 0,
             next_source_root_seq: 0,
             next_temp_asset_seq: 0,
@@ -123,7 +128,7 @@ impl AppState {
         state.reseed_source_root_runtime_fields();
         state.sync_config_backed_model_state()?;
         state
-            .reconcile_active_vector_spaces_on_boot_with_probe(probe_collection)
+            .reconcile_unit_indexes_on_boot_with_probe(probe_collection)
             .await;
         state.refresh_boot_provider_probe_cache().await;
 
@@ -150,7 +155,7 @@ impl AppState {
 
     fn durable_snapshot(&self) -> DurableAppStateSnapshot {
         DurableAppStateSnapshot {
-            version: 3,
+            version: 6,
             library_order: self.library_order.clone(),
             libraries: self
                 .libraries
@@ -179,12 +184,20 @@ impl AppState {
                                 })
                                 .collect(),
                             source_root_order: library.source_root_order.clone(),
+                            contents: library.contents.clone(),
                             sources: library.sources.clone(),
                             source_order: library.source_order.clone(),
-                            visual_units: library.visual_units.clone(),
-                            visual_unit_order: library.visual_unit_order.clone(),
-                            active_vector_spaces: library.active_vector_spaces.clone(),
-                            retired_vector_spaces: library.retired_vector_spaces.clone(),
+                            source_asset_locations: library.source_asset_locations.clone(),
+                            source_asset_location_order: library
+                                .source_asset_location_order
+                                .clone(),
+                            assets: library.assets.clone(),
+                            asset_order: library.asset_order.clone(),
+                            units: library.units.clone(),
+                            unit_order: library.unit_order.clone(),
+                            vector_spaces: library.vector_spaces.clone(),
+                            unit_indexes: library.unit_indexes.clone(),
+                            content_e2e_index_states: library.content_e2e_index_states.clone(),
                         },
                     )
                 })
@@ -235,13 +248,19 @@ impl AppState {
                             })
                             .collect(),
                         source_root_order: library.source_root_order,
+                        contents: library.contents,
                         sources: library.sources,
                         source_order: library.source_order,
-                        visual_units: library.visual_units,
-                        visual_unit_order: library.visual_unit_order,
+                        source_asset_locations: library.source_asset_locations,
+                        source_asset_location_order: library.source_asset_location_order,
+                        assets: library.assets,
+                        asset_order: library.asset_order,
+                        units: library.units,
+                        unit_order: library.unit_order,
+                        vector_spaces: library.vector_spaces,
+                        unit_indexes: library.unit_indexes,
+                        content_e2e_index_states: library.content_e2e_index_states,
                         latest_job_id: None,
-                        active_vector_spaces: library.active_vector_spaces,
-                        retired_vector_spaces: library.retired_vector_spaces,
                     },
                 )
             })
@@ -381,26 +400,48 @@ impl AppState {
                 .configured_vector_space_bindings_for_library(&library_id)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.payload.message))?
                 .into_iter()
-                .map(|binding| binding.vector_space_id)
-                .collect::<BTreeSet<_>>();
+                .collect::<Vec<_>>();
             if let Some(library) = self.libraries.get_mut(&library_id) {
-                let removed_vector_spaces = library
-                    .active_vector_spaces
+                let configured_ids = configured_vector_spaces
                     .iter()
-                    .filter(|vector_space_id| !configured_vector_spaces.contains(*vector_space_id))
+                    .map(|binding| binding.vector_space_id.clone())
+                    .collect::<BTreeSet<_>>();
+                for binding in configured_vector_spaces {
+                    let selection = binding.selection;
+                    let model_version =
+                        configured_model_version_from_maps(&self.provider_models, &selection);
+                    let model_revision =
+                        configured_model_revision_from_maps(&self.provider_models, &selection);
+                    if !library.vector_spaces.contains_key(&binding.vector_space_id) {
+                        library.vector_spaces.insert(
+                            binding.vector_space_id.clone(),
+                            VectorSpaceRecord {
+                                id: binding.vector_space_id,
+                                provider_id: selection.provider_id,
+                                model_id: selection.model_id,
+                                model_version,
+                                model_revision,
+                                vector_type: binding.vector_type,
+                            },
+                        );
+                        durable_changed = true;
+                    }
+                }
+                let removed = library
+                    .vector_spaces
+                    .keys()
+                    .filter(|vector_space_id| !configured_ids.contains(*vector_space_id))
                     .cloned()
                     .collect::<Vec<_>>();
-                library
-                    .active_vector_spaces
-                    .retain(|vector_space_id| configured_vector_spaces.contains(vector_space_id));
-                for vector_space_id in removed_vector_spaces {
-                    library.retired_vector_spaces.insert(
-                        vector_space_id,
-                        RetiredVectorSpaceRecord {
-                            retired_at_ms: current_unix_ms(),
-                        },
-                    );
-                    durable_changed = true;
+                for vector_space_id in removed {
+                    for index in library.unit_indexes.values_mut() {
+                        if index.vector_space_id == vector_space_id
+                            && index.visibility == ACTIVE_INDEX_VISIBILITY
+                        {
+                            index.visibility = "retired".to_string();
+                            durable_changed = true;
+                        }
+                    }
                 }
             }
         }
@@ -432,11 +473,25 @@ impl AppState {
             .map(|id| parse_id_seq(id, "src_"))
             .max()
             .unwrap_or(0);
-        self.next_visual_unit_seq = self
+        self.next_content_seq = self
             .libraries
             .values()
-            .flat_map(|library| library.visual_units.keys())
-            .map(|id| parse_id_seq(id, "vu_"))
+            .flat_map(|library| library.contents.keys())
+            .map(|id| parse_id_seq(id, "content_"))
+            .max()
+            .unwrap_or(0);
+        self.next_asset_seq = self
+            .libraries
+            .values()
+            .flat_map(|library| library.assets.keys())
+            .map(|id| parse_id_seq(id, "asset_"))
+            .max()
+            .unwrap_or(0);
+        self.next_unit_seq = self
+            .libraries
+            .values()
+            .flat_map(|library| library.units.keys())
+            .map(|id| parse_id_seq(id, "unit_"))
             .max()
             .unwrap_or(0);
     }
@@ -525,35 +580,40 @@ impl AppState {
         Ok(value)
     }
 
-    async fn reconcile_active_vector_spaces_on_boot_with_probe<F, Fut>(
-        &mut self,
-        mut probe_collection: F,
-    ) where
+    async fn reconcile_unit_indexes_on_boot_with_probe<F, Fut>(&mut self, mut probe_collection: F)
+    where
         F: FnMut(&str) -> Fut,
         Fut: Future<Output = Result<ActiveNamespaceProbeResult, String>>,
     {
         let mut changed = false;
         let library_ids = self.library_order.clone();
         for library_id in library_ids {
-            let active_vector_spaces = self
+            let active_vector_space_ids = self
                 .libraries
                 .get(&library_id)
                 .map(|library| {
                     library
-                        .active_vector_spaces
-                        .iter()
-                        .cloned()
+                        .unit_indexes
+                        .values()
+                        .filter(|index| {
+                            index.status == "ready"
+                                && index.visibility == ACTIVE_INDEX_VISIBILITY
+                                && index.vector_ref.is_some()
+                        })
+                        .map(|index| index.vector_space_id.clone())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
 
-            for vector_space_id in active_vector_spaces {
-                let collection_name = stable_vector_space_name(&library_id, &vector_space_id);
+            for vector_space_id in active_vector_space_ids {
+                let collection_name = stable_vector_space_name(&vector_space_id);
                 match probe_collection(&collection_name).await {
                     Ok(ActiveNamespaceProbeResult::Ready { .. }) => {}
                     Ok(ActiveNamespaceProbeResult::Missing) => {
                         if let Some(library) = self.libraries.get_mut(&library_id) {
-                            changed |= library.active_vector_spaces.remove(&vector_space_id);
+                            changed |= mark_vector_space_not_ready(library, &vector_space_id);
                         }
                     }
                     Ok(ActiveNamespaceProbeResult::MissingTarget { target_collection }) => {
@@ -564,7 +624,7 @@ impl AppState {
                             "Active Qdrant namespace alias points to a missing collection during restart restore"
                         );
                         if let Some(library) = self.libraries.get_mut(&library_id) {
-                            changed |= library.active_vector_spaces.remove(&vector_space_id);
+                            changed |= mark_vector_space_not_ready(library, &vector_space_id);
                         }
                     }
                     Ok(ActiveNamespaceProbeResult::LegacyDirectCollection) => {
@@ -574,7 +634,7 @@ impl AppState {
                             "Direct Qdrant collection collides with the active alias namespace during restart restore; manual cleanup is required"
                         );
                         if let Some(library) = self.libraries.get_mut(&library_id) {
-                            changed |= library.active_vector_spaces.remove(&vector_space_id);
+                            changed |= mark_vector_space_not_ready(library, &vector_space_id);
                         }
                     }
                     Err(error) => {
@@ -584,7 +644,7 @@ impl AppState {
                             "Failed to probe Qdrant collection during restart restore: {error}"
                         );
                         if let Some(library) = self.libraries.get_mut(&library_id) {
-                            changed |= library.active_vector_spaces.remove(&vector_space_id);
+                            changed |= mark_vector_space_not_ready(library, &vector_space_id);
                         }
                     }
                 }
@@ -602,28 +662,28 @@ impl AppState {
         &self,
         now_ms: u128,
     ) -> Vec<RetiredVectorSpaceCleanupCandidate> {
-        self.library_order
-            .iter()
-            .filter_map(|library_id| {
-                self.libraries
-                    .get(library_id)
-                    .map(|library| (library_id, library))
-            })
-            .flat_map(|(library_id, library)| {
-                library
-                    .retired_vector_spaces
-                    .iter()
-                    .filter(move |(vector_space_id, retired)| {
-                        !library.active_vector_spaces.contains(*vector_space_id)
-                            && now_ms.saturating_sub(retired.retired_at_ms)
-                                >= crate::RETIRED_VECTOR_SPACE_RETENTION_MS
-                    })
-                    .map(
-                        move |(vector_space_id, _)| RetiredVectorSpaceCleanupCandidate {
-                            library_id: library_id.clone(),
-                            vector_space_id: vector_space_id.clone(),
-                        },
-                    )
+        let _ = now_ms;
+        let active = self
+            .libraries
+            .values()
+            .flat_map(|library| library.unit_indexes.values())
+            .filter(|index| index.visibility == ACTIVE_INDEX_VISIBILITY)
+            .map(|index| index.vector_space_id.clone())
+            .collect::<BTreeSet<_>>();
+        let retired = self
+            .libraries
+            .values()
+            .flat_map(|library| library.unit_indexes.values())
+            .filter(|index| index.visibility == "retired")
+            .map(|index| index.vector_space_id.clone())
+            .collect::<BTreeSet<_>>();
+        let owner_library_id = self.library_order.first().cloned().unwrap_or_default();
+        retired
+            .into_iter()
+            .filter(|vector_space_id| !active.contains(vector_space_id))
+            .map(|vector_space_id| RetiredVectorSpaceCleanupCandidate {
+                library_id: owner_library_id.clone(),
+                vector_space_id,
             })
             .collect()
     }
@@ -637,12 +697,15 @@ impl AppState {
         }
 
         let before = self.clone();
-        for cleaned_candidate in cleaned {
-            if let Some(library) = self.libraries.get_mut(&cleaned_candidate.library_id) {
-                library
-                    .retired_vector_spaces
-                    .remove(&cleaned_candidate.vector_space_id);
-            }
+        let cleaned_vector_spaces = cleaned
+            .iter()
+            .map(|candidate| candidate.vector_space_id.clone())
+            .collect::<BTreeSet<_>>();
+        for library in self.libraries.values_mut() {
+            library.unit_indexes.retain(|_, index| {
+                !(index.visibility == "retired"
+                    && cleaned_vector_spaces.contains(&index.vector_space_id))
+            });
         }
 
         if let Err(message) = self.persist_durable_state() {
@@ -662,9 +725,19 @@ impl AppState {
         format!("job_{:06}", self.next_job_seq)
     }
 
-    fn next_visual_unit_id(&mut self) -> String {
-        self.next_visual_unit_seq += 1;
-        format!("vu_{:06}", self.next_visual_unit_seq)
+    fn next_content_id(&mut self) -> String {
+        self.next_content_seq += 1;
+        format!("content_{:06}", self.next_content_seq)
+    }
+
+    fn next_asset_id(&mut self) -> String {
+        self.next_asset_seq += 1;
+        format!("asset_{:06}", self.next_asset_seq)
+    }
+
+    fn next_unit_id(&mut self) -> String {
+        self.next_unit_seq += 1;
+        format!("unit_{:06}", self.next_unit_seq)
     }
 
     fn next_source_id(&mut self) -> String {
@@ -687,6 +760,44 @@ fn parse_id_seq(id: &str, prefix: &str) -> u64 {
     id.strip_prefix(prefix)
         .and_then(|suffix| suffix.parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+fn mark_vector_space_not_ready(library: &mut LibraryRecord, vector_space_id: &str) -> bool {
+    let mut changed = false;
+    for index in library.unit_indexes.values_mut() {
+        if index.vector_space_id == vector_space_id
+            && index.status == "ready"
+            && index.visibility == ACTIVE_INDEX_VISIBILITY
+        {
+            index.status = "not_ready".to_string();
+            index.vector_ref = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn configured_model_version_from_maps(
+    provider_models: &BTreeMap<String, BTreeMap<String, ProviderModelConfigRecord>>,
+    selection: &ModelSelectionPayload,
+) -> String {
+    provider_models
+        .get(&selection.provider_id)
+        .and_then(|models| models.get(&selection.model_id))
+        .map(|model| model.version.clone())
+        .filter(|version| !version.trim().is_empty())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+fn configured_model_revision_from_maps(
+    provider_models: &BTreeMap<String, BTreeMap<String, ProviderModelConfigRecord>>,
+    selection: &ModelSelectionPayload,
+) -> Option<String> {
+    provider_models
+        .get(&selection.provider_id)
+        .and_then(|models| models.get(&selection.model_id))
+        .and_then(|model| model.backend.clone())
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn current_unix_ms() -> u128 {

@@ -2,13 +2,25 @@ mod support;
 
 use axum::http::StatusCode;
 use serde_json::json;
-use std::path::PathBuf;
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 use support::{MultipartFile, TestEnv};
 use tokio::time::{sleep, Duration};
 
 fn example_video_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("data/example/lib/generate_q2_report_from_csv_bank_data-720-512.mp4")
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    [
+        "data/example/lib1/generate_q2_report_from_csv_bank_data-720-512.mp4",
+        "data/generate_q2_report_from_csv_bank_data-720-512.mp4",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .find(|path| path.exists())
+    .unwrap_or_else(|| {
+        root.join("data/example/lib1/generate_q2_report_from_csv_bank_data-720-512.mp4")
+    })
 }
 
 async fn wait_for_job_completion(app: &support::TestApp, job_id: &str) -> serde_json::Value {
@@ -25,6 +37,15 @@ async fn wait_for_job_completion(app: &support::TestApp, job_id: &str) -> serde_
     }
 
     panic!("timed out waiting for import job {job_id} to complete");
+}
+
+fn test_file_uri(path: &Path) -> String {
+    let path = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    format!("file://{path}")
 }
 
 #[tokio::test]
@@ -232,14 +253,17 @@ async fn search_text_returns_results_with_debug_vector_type_after_import() {
     let data = &body["data"];
     let results = data["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|item| item["kind"] == "document_page"));
+    assert!(results
+        .iter()
+        .all(|item| item["asset_type"] == "document_page"));
     assert!(results.iter().all(|item| item["source_type"] == "pdf"));
     assert!(results.iter().all(|item| {
-        item["source_path"]
+        item["source_uri"]
             .as_str()
             .map(|value| value.ends_with("ready.pdf"))
             .unwrap_or(false)
     }));
+    assert!(results.iter().all(|item| item.get("visibility").is_none()));
     assert_eq!(data["next_cursor"], serde_json::Value::Null);
     assert_eq!(data["unsupported_content_types"], serde_json::Value::Null);
     assert_eq!(
@@ -266,6 +290,198 @@ async fn search_text_returns_results_with_debug_vector_type_after_import() {
     assert_eq!(
         data["debug"]["vector_spaces"][0]["content_types"],
         json!(["document"])
+    );
+    assert_eq!(data["debug"]["prefilter"][0]["mode"], "point_allow_list");
+    assert_eq!(data["debug"]["prefilter"][0]["candidate_point_count"], 2);
+}
+
+#[tokio::test]
+async fn search_prefilter_applies_path_prefix_before_qdrant_allow_list() {
+    let env = TestEnv::new_with_qdrant("search-api-prefilter-path").await;
+    let first_pdf = env.write_test_pdf("fixtures/search/scope-a.pdf", 2);
+    let second_pdf = env.write_test_pdf("fixtures/search/scope-b.pdf", 2);
+    let first_uri = test_file_uri(&first_pdf);
+    let app = env.boot().await;
+    let library = app
+        .post_json(
+            "/libraries",
+            json!({
+                "display_name": "search-prefilter-path"
+            }),
+        )
+        .await
+        .json();
+    let library_id = library["data"]["id"].as_str().unwrap();
+
+    let import = app
+        .post_json(
+            &format!("/libraries/{library_id}/imports"),
+            json!({
+                "paths": [
+                    first_pdf.to_string_lossy().to_string(),
+                    second_pdf.to_string_lossy().to_string(),
+                ]
+            }),
+        )
+        .await
+        .json();
+    let job_id = import["data"]["job_handle"].as_str().unwrap();
+    let job_body = wait_for_job_completion(&app, job_id).await;
+    assert_eq!(job_body["data"]["status"], "completed");
+
+    let search = app
+        .post_json(
+            "/search/text",
+            json!({
+                "library_id": library_id,
+                "text": "chart",
+                "debug": true,
+                "target_content_types": ["document"],
+                "filters": {
+                    "path_prefix": first_uri
+                }
+            }),
+        )
+        .await;
+    assert_eq!(search.status, StatusCode::OK);
+    let body = search.json();
+    let data = &body["data"];
+    let results = data["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|item| item["source_uri"] == first_uri));
+    assert_eq!(data["debug"]["prefilter"][0]["mode"], "point_allow_list");
+    assert_eq!(data["debug"]["prefilter"][0]["candidate_point_count"], 2);
+    assert_eq!(
+        data["debug"]["content_types"][0]["raw_scores"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn search_prefilter_empty_filters_do_not_require_qdrant() {
+    let env = TestEnv::new_with_qdrant("search-api-prefilter-empty").await;
+    let pdf_path = env.write_test_pdf("fixtures/search/filter-empty.pdf", 2);
+    let app = env.boot().await;
+    let library = app
+        .post_json(
+            "/libraries",
+            json!({
+                "display_name": "search-prefilter-empty"
+            }),
+        )
+        .await
+        .json();
+    let library_id = library["data"]["id"].as_str().unwrap();
+
+    let import = app
+        .post_json(
+            &format!("/libraries/{library_id}/imports"),
+            json!({
+                "paths": [pdf_path.to_string_lossy().to_string()]
+            }),
+        )
+        .await
+        .json();
+    let job_id = import["data"]["job_handle"].as_str().unwrap();
+    let job_body = wait_for_job_completion(&app, job_id).await;
+    assert_eq!(job_body["data"]["status"], "completed");
+
+    env::set_var("QDRANT_URL", "http://127.0.0.1:1");
+    for filters in [
+        json!({ "asset_type": "image" }),
+        json!({ "source_type": "image" }),
+        json!({ "time_range": { "start_ms": 1, "end_ms": 2 } }),
+    ] {
+        let search = app
+            .post_json(
+                "/search/text",
+                json!({
+                    "library_id": library_id,
+                    "text": "chart",
+                    "debug": true,
+                    "target_content_types": ["document"],
+                    "filters": filters
+                }),
+            )
+            .await;
+        assert_eq!(search.status, StatusCode::OK);
+        let body = search.json();
+        assert!(body["data"]["results"].as_array().unwrap().is_empty());
+        assert_eq!(
+            body["data"]["debug"]["prefilter"][0]["candidate_point_count"],
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn same_source_content_reuses_global_units_across_libraries() {
+    let env = TestEnv::new_with_qdrant("search-api-global-reuse").await;
+    let pdf_path = env.write_test_pdf("fixtures/search/shared.pdf", 2);
+    let app = env.boot().await;
+
+    let first_library = app
+        .post_json("/libraries", json!({ "display_name": "global-reuse-a" }))
+        .await
+        .json();
+    let first_library_id = first_library["data"]["id"].as_str().unwrap();
+    let first_import = app
+        .post_json(
+            &format!("/libraries/{first_library_id}/imports"),
+            json!({ "paths": [pdf_path.to_string_lossy().to_string()] }),
+        )
+        .await
+        .json();
+    let first_job_id = first_import["data"]["job_handle"].as_str().unwrap();
+    let first_job = wait_for_job_completion(&app, first_job_id).await;
+    assert!(first_job["data"]["current_attempt"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("indexed 2 unit(s)"));
+
+    let second_library = app
+        .post_json("/libraries", json!({ "display_name": "global-reuse-b" }))
+        .await
+        .json();
+    let second_library_id = second_library["data"]["id"].as_str().unwrap();
+    let second_import = app
+        .post_json(
+            &format!("/libraries/{second_library_id}/imports"),
+            json!({ "paths": [pdf_path.to_string_lossy().to_string()] }),
+        )
+        .await
+        .json();
+    let second_job_id = second_import["data"]["job_handle"].as_str().unwrap();
+    let second_job = wait_for_job_completion(&app, second_job_id).await;
+    assert!(second_job["data"]["current_attempt"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("indexed 0 unit(s)"));
+
+    let search = app
+        .post_json(
+            "/search/text",
+            json!({
+                "library_id": second_library_id,
+                "text": "chart",
+                "debug": true,
+                "target_content_types": ["document"]
+            }),
+        )
+        .await;
+    assert_eq!(search.status, StatusCode::OK);
+    let body = search.json();
+    let results = body["data"]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results
+        .iter()
+        .all(|item| item["library_id"] == second_library_id));
+    assert_eq!(
+        body["data"]["debug"]["prefilter"][0]["candidate_point_count"],
+        2
     );
 }
 

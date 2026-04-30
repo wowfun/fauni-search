@@ -248,9 +248,10 @@ pub(crate) struct ResolvedContentModelsData {
 #[derive(ToSchema, Clone, Debug, Serialize)]
 pub(crate) struct VectorSpaceDiagnosticSnapshot {
     pub(crate) vector_space_id: String,
-    pub(crate) lifecycle_state: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) content_types: Vec<String>,
+    pub(crate) unit_index_summary: UnitIndexSummary,
+    pub(crate) content_e2e_index_summary: ContentE2eIndexSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,7 +263,21 @@ pub(crate) struct VectorSpaceDiagnosticSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vector_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) retired_at_ms: Option<u128>,
+    pub(crate) cleanup_summary: Option<Value>,
+}
+
+#[derive(ToSchema, Clone, Debug, Default, Serialize)]
+pub(crate) struct UnitIndexSummary {
+    pub(crate) active: usize,
+    pub(crate) retired: usize,
+    pub(crate) failed: usize,
+    pub(crate) not_ready: usize,
+}
+
+#[derive(ToSchema, Clone, Debug, Default, Serialize)]
+pub(crate) struct ContentE2eIndexSummary {
+    pub(crate) completed: usize,
+    pub(crate) missing: usize,
 }
 
 #[derive(ToSchema, Debug, Serialize, Default)]
@@ -450,8 +465,9 @@ pub(crate) struct SourcesListData {
 #[derive(ToSchema, Debug, Serialize)]
 pub(crate) struct SourceInventoryItem {
     pub(crate) source_id: String,
-    pub(crate) source_path: String,
+    pub(crate) source_uri: String,
     pub(crate) source_type: String,
+    pub(crate) media_type: String,
     pub(crate) kind: String,
     pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -463,9 +479,9 @@ pub(crate) struct SourceInventoryItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_root_path: Option<String>,
     pub(crate) source_root_label: String,
-    pub(crate) visual_unit_count: usize,
+    pub(crate) asset_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) representative_visual_unit: Option<VisualUnitSummary>,
+    pub(crate) representative_asset: Option<AssetSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) representative_preview: Option<PreviewReference>,
 }
@@ -553,7 +569,7 @@ pub(crate) struct ImportAcceptedItem {
     pub(crate) source_id: Option<String>,
     pub(crate) source_type: String,
     pub(crate) kind: String,
-    pub(crate) visual_units: Vec<VisualUnitSummary>,
+    pub(crate) assets: Vec<AssetSummary>,
 }
 
 #[derive(ToSchema, Debug, Serialize, Clone)]
@@ -600,29 +616,37 @@ pub(crate) struct JobsListData {
 }
 
 #[derive(ToSchema, Debug, Serialize, Clone)]
-pub(crate) struct VisualUnitSummary {
-    pub(crate) visual_unit_id: String,
+pub(crate) struct AssetSummary {
+    pub(crate) asset_id: String,
     pub(crate) source_id: String,
-    pub(crate) kind: String,
+    pub(crate) asset_type: String,
     pub(crate) source_type: String,
     pub(crate) locator: Value,
 }
 
 #[derive(ToSchema, Debug, Serialize, Clone)]
-pub(crate) struct VisualUnitSnapshot {
-    pub(crate) visual_unit_id: String,
+pub(crate) struct AssetSnapshot {
+    pub(crate) asset_id: String,
     pub(crate) source_id: String,
-    pub(crate) kind: String,
+    pub(crate) asset_type: String,
     pub(crate) source_type: String,
-    pub(crate) source_path: String,
+    pub(crate) source_uri: String,
     pub(crate) locator: Value,
 }
 
 #[derive(ToSchema, Debug, Serialize)]
-pub(crate) struct VisualUnitDetailData {
-    pub(crate) visual_unit: VisualUnitSnapshot,
+pub(crate) struct AssetDetailData {
+    pub(crate) asset: AssetSnapshot,
     pub(crate) preview: PreviewReference,
     pub(crate) neighbor_context: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) units: Vec<UnitSummary>,
+}
+
+#[derive(ToSchema, Debug, Serialize, Clone)]
+pub(crate) struct UnitSummary {
+    pub(crate) unit_id: String,
+    pub(crate) unit_type: String,
 }
 
 #[derive(ToSchema, Debug, Deserialize)]
@@ -699,7 +723,7 @@ pub(crate) struct DocumentSearchRequest {
 pub(crate) struct QueryImageInputRequest {
     pub(crate) kind: String,
     pub(crate) temp_asset_id: Option<String>,
-    pub(crate) visual_unit_id: Option<String>,
+    pub(crate) asset_id: Option<String>,
 }
 
 #[derive(ToSchema, Debug, Deserialize)]
@@ -707,7 +731,7 @@ pub(crate) struct QueryVideoInputRequest {
     pub(crate) kind: String,
     pub(crate) temp_asset_id: Option<String>,
     pub(crate) source_id: Option<String>,
-    pub(crate) visual_unit_id: Option<String>,
+    pub(crate) asset_id: Option<String>,
     pub(crate) locator: Option<Value>,
 }
 
@@ -741,16 +765,27 @@ pub(crate) struct UnsupportedContentTypeSnapshot {
 #[derive(ToSchema, Debug, Serialize)]
 pub(crate) struct SearchResultItem {
     pub(crate) library_id: String,
-    pub(crate) visual_unit_id: String,
+    pub(crate) asset_id: String,
+    pub(crate) asset_type: String,
     pub(crate) source_id: String,
     pub(crate) preview: PreviewReference,
-    pub(crate) source_path: String,
+    pub(crate) source_uri: String,
     pub(crate) source_type: String,
-    pub(crate) kind: String,
     pub(crate) locator: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) matched_units: Vec<MatchedUnitEvidence>,
     pub(crate) cursor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) score: Option<f32>,
+}
+
+#[derive(ToSchema, Debug, Serialize, Clone)]
+pub(crate) struct MatchedUnitEvidence {
+    pub(crate) unit_id: String,
+    pub(crate) unit_type: String,
+    pub(crate) vector_space_id: String,
+    pub(crate) rank: usize,
+    pub(crate) raw_score: f32,
 }
 
 #[derive(ToSchema, Debug, Serialize, Clone)]
@@ -810,7 +845,7 @@ pub(crate) struct VideoSourcesData {
 #[derive(ToSchema, Debug, Serialize)]
 pub(crate) struct VideoSourceSummary {
     pub(crate) source_id: String,
-    pub(crate) source_path: String,
+    pub(crate) source_uri: String,
     pub(crate) source_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duration_ms: Option<u64>,

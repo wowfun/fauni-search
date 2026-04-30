@@ -1,18 +1,21 @@
 use crate::{
     api::SourceRootRulesPayload,
-    model::{RetiredVectorSpaceRecord, SourceRecord, VisualUnitRecord},
+    model::{
+        AssetRecord, ContentE2eIndexStateRecord, ContentRecord, SourceAssetLocationRecord,
+        SourceRecord, UnitIndexRecord, UnitRecord, VectorSpaceRecord,
+    },
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs, io,
     path::Path as FsPath,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const STRUCTURED_STATE_SCHEMA_VERSION: i64 = 3;
+const STRUCTURED_STATE_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug)]
 pub(crate) struct LoadedDurableStateSnapshot {
@@ -37,14 +40,18 @@ pub(crate) struct DurableLibraryRecord {
     pub(crate) archived_at_ms: Option<u128>,
     pub(crate) source_roots: BTreeMap<String, DurableSourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
+    pub(crate) contents: BTreeMap<String, ContentRecord>,
     pub(crate) sources: BTreeMap<String, SourceRecord>,
     pub(crate) source_order: Vec<String>,
-    pub(crate) visual_units: BTreeMap<String, VisualUnitRecord>,
-    pub(crate) visual_unit_order: Vec<String>,
-    #[serde(default)]
-    pub(crate) active_vector_spaces: BTreeSet<String>,
-    #[serde(default)]
-    pub(crate) retired_vector_spaces: BTreeMap<String, RetiredVectorSpaceRecord>,
+    pub(crate) source_asset_locations: BTreeMap<String, SourceAssetLocationRecord>,
+    pub(crate) source_asset_location_order: Vec<String>,
+    pub(crate) assets: BTreeMap<String, AssetRecord>,
+    pub(crate) asset_order: Vec<String>,
+    pub(crate) units: BTreeMap<String, UnitRecord>,
+    pub(crate) unit_order: Vec<String>,
+    pub(crate) vector_spaces: BTreeMap<String, VectorSpaceRecord>,
+    pub(crate) unit_indexes: BTreeMap<String, UnitIndexRecord>,
+    pub(crate) content_e2e_index_states: BTreeMap<String, ContentE2eIndexStateRecord>,
 }
 
 fn default_library_lifecycle_state() -> String {
@@ -85,7 +92,7 @@ pub(crate) fn load_durable_state_snapshot(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "Unsupported durable state schema version {schema_version} in {}; expected {STRUCTURED_STATE_SCHEMA_VERSION}",
+                "Unsupported durable state schema version {schema_version} in {}; expected {STRUCTURED_STATE_SCHEMA_VERSION}. Reset or cut over the runtime before starting this version.",
                 path.display()
             ),
         ));
@@ -162,11 +169,13 @@ pub(crate) fn initialize_durable_state_store(
             library_id TEXT NOT NULL,
             source_id TEXT NOT NULL,
             position INTEGER NOT NULL,
+            source_content_id TEXT NOT NULL,
             source_root_id TEXT NULL,
             source_root_path TEXT NULL,
-            source_path TEXT NOT NULL,
+            source_uri TEXT NOT NULL,
             relative_path TEXT NULL,
             source_type TEXT NOT NULL,
+            media_type TEXT NOT NULL,
             kind TEXT NOT NULL,
             status TEXT NOT NULL,
             status_reason TEXT NULL,
@@ -177,32 +186,74 @@ pub(crate) fn initialize_durable_state_store(
             PRIMARY KEY (library_id, source_id),
             UNIQUE (library_id, position)
         );
-        CREATE TABLE IF NOT EXISTS visual_units (
+        CREATE TABLE IF NOT EXISTS contents (
+            content_id TEXT NOT NULL,
+            size_bytes INTEGER NULL,
+            fast_fingerprint TEXT NULL,
+            sha256 TEXT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (content_id)
+        );
+        CREATE TABLE IF NOT EXISTS source_asset_locations (
             library_id TEXT NOT NULL,
-            visual_unit_id TEXT NOT NULL,
-            library_position INTEGER NOT NULL,
+            location_id TEXT NOT NULL,
+            position INTEGER NOT NULL,
             source_id TEXT NOT NULL,
-            source_position INTEGER NOT NULL,
+            asset_id TEXT NOT NULL,
+            locator_json TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            PRIMARY KEY (library_id, location_id),
+            UNIQUE (library_id, position),
+            UNIQUE (library_id, source_id, asset_id)
+        );
+        CREATE TABLE IF NOT EXISTS assets (
+            asset_id TEXT NOT NULL,
+            position INTEGER NOT NULL UNIQUE,
+            source_content_id TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            locator_json TEXT NOT NULL,
+            derivation_signature TEXT NOT NULL,
+            neighbor_context_json TEXT NOT NULL,
+            PRIMARY KEY (asset_id)
+        );
+        CREATE TABLE IF NOT EXISTS units (
+            unit_id TEXT NOT NULL,
+            position INTEGER NOT NULL UNIQUE,
+            asset_id TEXT NOT NULL,
+            asset_position INTEGER NOT NULL,
             point_id INTEGER NOT NULL,
-            source_path TEXT NOT NULL,
-            source_type TEXT NOT NULL,
-            kind TEXT NOT NULL,
+            unit_type TEXT NOT NULL,
+            derivation_signature TEXT NOT NULL,
             locator_json TEXT NOT NULL,
             neighbor_context_json TEXT NOT NULL,
-            PRIMARY KEY (library_id, visual_unit_id),
-            UNIQUE (library_id, library_position),
-            UNIQUE (library_id, source_id, source_position)
+            PRIMARY KEY (unit_id),
+            UNIQUE (asset_id, asset_position)
         );
-        CREATE TABLE IF NOT EXISTS library_active_vector_spaces (
-            library_id TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS vector_spaces (
             vector_space_id TEXT NOT NULL,
-            PRIMARY KEY (library_id, vector_space_id)
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            model_revision TEXT NULL,
+            vector_type TEXT NOT NULL,
+            PRIMARY KEY (vector_space_id)
         );
-        CREATE TABLE IF NOT EXISTS retired_vector_spaces (
-            library_id TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS unit_indexes (
+            unit_id TEXT NOT NULL,
             vector_space_id TEXT NOT NULL,
-            retired_at_ms INTEGER NOT NULL,
-            PRIMARY KEY (library_id, vector_space_id)
+            status TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            vector_ref_json TEXT NULL,
+            job_id TEXT NULL,
+            error_summary TEXT NULL,
+            PRIMARY KEY (unit_id, vector_space_id)
+        );
+        CREATE TABLE IF NOT EXISTS content_e2e_index_states (
+            content_id TEXT NOT NULL,
+            pipe_signature TEXT NOT NULL,
+            vector_space_id TEXT NOT NULL,
+            indexed_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (content_id, pipe_signature, vector_space_id)
         );
         ",
     )?;
@@ -283,12 +334,52 @@ fn load_structured_state_snapshot(
 
     load_libraries(path, connection, &mut snapshot)?;
     load_source_roots(path, connection, &mut snapshot)?;
+    load_contents(path, connection, &mut snapshot)?;
     load_sources(path, connection, &mut snapshot)?;
-    load_visual_units(path, connection, &mut snapshot)?;
-    load_active_vector_spaces(path, connection, &mut snapshot)?;
-    load_retired_vector_spaces(path, connection, &mut snapshot)?;
+    load_source_asset_locations(path, connection, &mut snapshot)?;
+    load_assets(path, connection, &mut snapshot)?;
+    load_units(path, connection, &mut snapshot)?;
+    load_vector_spaces(path, connection, &mut snapshot)?;
+    load_unit_indexes(path, connection, &mut snapshot)?;
+    load_content_e2e_index_states(path, connection, &mut snapshot)?;
+    hydrate_location_compat_fields(&mut snapshot);
 
     Ok(LoadedDurableStateSnapshot { snapshot })
+}
+
+fn hydrate_location_compat_fields(snapshot: &mut DurableAppStateSnapshot) {
+    for library in snapshot.libraries.values_mut() {
+        let locations = library
+            .source_asset_location_order
+            .iter()
+            .filter_map(|location_id| library.source_asset_locations.get(location_id).cloned())
+            .collect::<Vec<_>>();
+        for location in locations {
+            let Some(source) = library.sources.get(&location.source_id).cloned() else {
+                continue;
+            };
+            let unit_ids = if let Some(asset) = library.assets.get_mut(&location.asset_id) {
+                asset.source_id = source.id.clone();
+                asset.source_path = source.source_path.clone();
+                asset.source_type = source.source_type.clone();
+                asset.unit_ids.clone()
+            } else {
+                Vec::new()
+            };
+            for unit_id in unit_ids {
+                if let Some(unit) = library.units.get_mut(&unit_id) {
+                    unit.source_id = source.id.clone();
+                    unit.source_path = source.source_path.clone();
+                    unit.source_type = source.source_type.clone();
+                    unit.asset_type = library
+                        .assets
+                        .get(&location.asset_id)
+                        .map(|asset| asset.asset_type.clone())
+                        .unwrap_or_default();
+                }
+            }
+        }
+    }
 }
 
 fn load_libraries(
@@ -336,12 +427,18 @@ fn load_libraries(
                 archived_at_ms,
                 source_roots: BTreeMap::new(),
                 source_root_order: Vec::new(),
+                contents: BTreeMap::new(),
                 sources: BTreeMap::new(),
                 source_order: Vec::new(),
-                visual_units: BTreeMap::new(),
-                visual_unit_order: Vec::new(),
-                active_vector_spaces: BTreeSet::new(),
-                retired_vector_spaces: BTreeMap::new(),
+                source_asset_locations: BTreeMap::new(),
+                source_asset_location_order: Vec::new(),
+                assets: BTreeMap::new(),
+                asset_order: Vec::new(),
+                units: BTreeMap::new(),
+                unit_order: Vec::new(),
+                vector_spaces: BTreeMap::new(),
+                unit_indexes: BTreeMap::new(),
+                content_e2e_index_states: BTreeMap::new(),
             },
         );
     }
@@ -415,8 +512,8 @@ fn load_sources(
 ) -> Result<(), io::Error> {
     let mut statement = connection
         .prepare(
-            "SELECT library_id, source_id, source_root_id, source_root_path, source_path,
-                    relative_path, source_type, kind, status, status_reason, page_count,
+            "SELECT library_id, source_id, source_content_id, source_root_id, source_root_path, source_uri,
+                    relative_path, source_type, media_type, kind, status, status_reason, page_count,
                     duration_ms, observed_size_bytes, observed_modified_at_ms
              FROM sources
              ORDER BY library_id ASC, position ASC",
@@ -435,51 +532,57 @@ fn load_sources(
         let source_id: String = row
             .get(1)
             .map_err(|error| sqlite_io(path, "read source_id", error))?;
-        let source_root_id: Option<String> = row
+        let source_content_id: String = row
             .get(2)
+            .map_err(|error| sqlite_io(path, "read source source_content_id", error))?;
+        let source_root_id: Option<String> = row
+            .get(3)
             .map_err(|error| sqlite_io(path, "read source source_root_id", error))?;
         let source_root_path: Option<String> = row
-            .get(3)
-            .map_err(|error| sqlite_io(path, "read source source_root_path", error))?;
-        let source_path: String = row
             .get(4)
-            .map_err(|error| sqlite_io(path, "read source_path", error))?;
-        let relative_path: Option<String> = row
+            .map_err(|error| sqlite_io(path, "read source source_root_path", error))?;
+        let source_uri: String = row
             .get(5)
+            .map_err(|error| sqlite_io(path, "read source_uri", error))?;
+        let relative_path: Option<String> = row
+            .get(6)
             .map_err(|error| sqlite_io(path, "read relative_path", error))?;
         let source_type: String = row
-            .get(6)
-            .map_err(|error| sqlite_io(path, "read source_type", error))?;
-        let kind: String = row
             .get(7)
+            .map_err(|error| sqlite_io(path, "read source_type", error))?;
+        let media_type: String = row
+            .get(8)
+            .map_err(|error| sqlite_io(path, "read source media_type", error))?;
+        let kind: String = row
+            .get(9)
             .map_err(|error| sqlite_io(path, "read source kind", error))?;
         let status: String = row
-            .get(8)
+            .get(10)
             .map_err(|error| sqlite_io(path, "read source status", error))?;
         let status_reason: Option<String> = row
-            .get(9)
+            .get(11)
             .map_err(|error| sqlite_io(path, "read source status_reason", error))?;
         let page_count = optional_i64_to_usize(
             path,
-            row.get(10)
+            row.get(12)
                 .map_err(|error| sqlite_io(path, "read source page_count", error))?,
             "sources.page_count",
         )?;
         let duration_ms = optional_i64_to_u64(
             path,
-            row.get(11)
+            row.get(13)
                 .map_err(|error| sqlite_io(path, "read source duration_ms", error))?,
             "sources.duration_ms",
         )?;
         let observed_size_bytes = optional_i64_to_u64(
             path,
-            row.get(12)
+            row.get(14)
                 .map_err(|error| sqlite_io(path, "read source observed_size_bytes", error))?,
             "sources.observed_size_bytes",
         )?;
         let observed_modified_at_ms = optional_i64_to_u128(
             path,
-            row.get(13)
+            row.get(15)
                 .map_err(|error| sqlite_io(path, "read source observed_modified_at_ms", error))?,
             "sources.observed_modified_at_ms",
         )?;
@@ -491,6 +594,10 @@ fn load_sources(
         })?;
 
         library.source_order.push(source_id.clone());
+        let source_path = source_uri
+            .strip_prefix("file://")
+            .unwrap_or(&source_uri)
+            .to_string();
         library.sources.insert(
             source_id,
             SourceRecord {
@@ -500,8 +607,10 @@ fn load_sources(
                 source_root_id,
                 source_root_path,
                 source_path,
+                source_uri,
                 relative_path,
                 source_type,
+                media_type,
                 kind,
                 status,
                 status_reason,
@@ -509,209 +618,441 @@ fn load_sources(
                 duration_ms,
                 observed_size_bytes,
                 observed_modified_at_ms,
-                visual_unit_ids: Vec::new(),
+                source_content_id,
+                asset_ids: Vec::new(),
             },
         );
     }
     Ok(())
 }
 
-fn load_visual_units(
+fn load_contents(
     path: &FsPath,
     connection: &Connection,
     snapshot: &mut DurableAppStateSnapshot,
 ) -> Result<(), io::Error> {
-    let mut source_visual_unit_ids = BTreeMap::<(String, String), Vec<(i64, String)>>::new();
     let mut statement = connection
         .prepare(
-            "SELECT library_id, visual_unit_id, source_id, source_position, point_id,
-                    source_path, source_type, kind, locator_json, neighbor_context_json
-             FROM visual_units
-             ORDER BY library_id ASC, library_position ASC",
+            "SELECT content_id, size_bytes, fast_fingerprint, sha256, created_at_ms
+             FROM contents
+             ORDER BY content_id ASC",
         )
-        .map_err(|error| sqlite_io(path, "prepare visual_units query", error))?;
+        .map_err(|error| sqlite_io(path, "prepare contents query", error))?;
     let mut rows = statement
         .query([])
-        .map_err(|error| sqlite_io(path, "query visual_units", error))?;
+        .map_err(|error| sqlite_io(path, "query contents", error))?;
     while let Some(row) = rows
         .next()
-        .map_err(|error| sqlite_io(path, "read visual_unit row", error))?
+        .map_err(|error| sqlite_io(path, "read content row", error))?
     {
-        let library_id: String = row
+        let content_id: String = row
             .get(0)
-            .map_err(|error| sqlite_io(path, "read visual_unit library_id", error))?;
-        let visual_unit_id: String = row
-            .get(1)
-            .map_err(|error| sqlite_io(path, "read visual_unit_id", error))?;
-        let source_id: String = row
-            .get(2)
-            .map_err(|error| sqlite_io(path, "read visual_unit source_id", error))?;
-        let source_position: i64 = row
-            .get(3)
-            .map_err(|error| sqlite_io(path, "read visual_unit source_position", error))?;
-        let point_id = i64_to_u64(
+            .map_err(|error| sqlite_io(path, "read content_id", error))?;
+        let size_bytes = optional_i64_to_u64(
+            path,
+            row.get(1)
+                .map_err(|error| sqlite_io(path, "read content size_bytes", error))?,
+            "contents.size_bytes",
+        )?;
+        let created_at_ms = i64_to_u128(
             path,
             row.get(4)
-                .map_err(|error| sqlite_io(path, "read visual_unit point_id", error))?,
-            "visual_units.point_id",
+                .map_err(|error| sqlite_io(path, "read content created_at_ms", error))?,
+            "contents.created_at_ms",
         )?;
-        let source_path: String = row
-            .get(5)
-            .map_err(|error| sqlite_io(path, "read visual_unit source_path", error))?;
-        let source_type: String = row
-            .get(6)
-            .map_err(|error| sqlite_io(path, "read visual_unit source_type", error))?;
-        let kind: String = row
-            .get(7)
-            .map_err(|error| sqlite_io(path, "read visual_unit kind", error))?;
+        let record = ContentRecord {
+            id: content_id.clone(),
+            size_bytes,
+            fast_fingerprint: row
+                .get(2)
+                .map_err(|error| sqlite_io(path, "read content fast_fingerprint", error))?,
+            sha256: row
+                .get(3)
+                .map_err(|error| sqlite_io(path, "read content sha256", error))?,
+            created_at_ms,
+        };
+        for library in snapshot.libraries.values_mut() {
+            library.contents.insert(content_id.clone(), record.clone());
+        }
+    }
+    Ok(())
+}
+
+fn load_source_asset_locations(
+    path: &FsPath,
+    connection: &Connection,
+    snapshot: &mut DurableAppStateSnapshot,
+) -> Result<(), io::Error> {
+    let mut statement = connection
+        .prepare(
+            "SELECT library_id, location_id, source_id, asset_id, locator_json, visibility
+             FROM source_asset_locations
+             ORDER BY library_id ASC, position ASC",
+        )
+        .map_err(|error| sqlite_io(path, "prepare source_asset_locations query", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| sqlite_io(path, "query source_asset_locations", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_io(path, "read source_asset_location row", error))?
+    {
+        let library_id: String = row
+            .get(0)
+            .map_err(|error| sqlite_io(path, "read source_asset_location library_id", error))?;
+        let location_id: String = row
+            .get(1)
+            .map_err(|error| sqlite_io(path, "read source_asset_location id", error))?;
+        let source_id: String = row
+            .get(2)
+            .map_err(|error| sqlite_io(path, "read source_asset_location source_id", error))?;
+        let asset_id: String = row
+            .get(3)
+            .map_err(|error| sqlite_io(path, "read source_asset_location asset_id", error))?;
         let locator_json: String = row
-            .get(8)
-            .map_err(|error| sqlite_io(path, "read visual_unit locator_json", error))?;
-        let neighbor_context_json: String = row
-            .get(9)
-            .map_err(|error| sqlite_io(path, "read visual_unit neighbor_context_json", error))?;
-        let locator = parse_json::<Value>(path, &locator_json, "visual_units.locator_json")?;
-        let neighbor_context = parse_json::<Value>(
-            path,
-            &neighbor_context_json,
-            "visual_units.neighbor_context_json",
-        )?;
+            .get(4)
+            .map_err(|error| sqlite_io(path, "read source_asset_location locator_json", error))?;
         let library = snapshot.libraries.get_mut(&library_id).ok_or_else(|| {
             invalid_data(
                 path,
-                format!("visual_unit {visual_unit_id} references missing library {library_id}"),
+                format!(
+                    "source_asset_location {location_id} references missing library {library_id}"
+                ),
             )
         })?;
-        if !library.sources.contains_key(&source_id) {
-            return Err(invalid_data(
-                path,
-                format!(
-                    "visual_unit {visual_unit_id} references missing source {source_id} in library {library_id}"
-                ),
-            ));
+        if let Some(source) = library.sources.get_mut(&source_id) {
+            source.asset_ids.push(asset_id.clone());
         }
-
-        library.visual_unit_order.push(visual_unit_id.clone());
-        library.visual_units.insert(
-            visual_unit_id.clone(),
-            VisualUnitRecord {
-                id: visual_unit_id.clone(),
-                point_id,
-                source_id: source_id.clone(),
-                source_path,
-                source_type,
-                kind,
-                locator,
-                neighbor_context,
+        library
+            .source_asset_location_order
+            .push(location_id.clone());
+        library.source_asset_locations.insert(
+            location_id.clone(),
+            SourceAssetLocationRecord {
+                id: location_id,
+                source_id,
+                asset_id,
+                locator: parse_json::<Value>(
+                    path,
+                    &locator_json,
+                    "source_asset_locations.locator_json",
+                )?,
+                visibility: row.get(5).map_err(|error| {
+                    sqlite_io(path, "read source_asset_location visibility", error)
+                })?,
             },
         );
-        source_visual_unit_ids
-            .entry((library_id, source_id))
-            .or_default()
-            .push((source_position, visual_unit_id));
     }
-
-    for ((library_id, source_id), mut visual_unit_ids) in source_visual_unit_ids {
-        visual_unit_ids.sort_by_key(|(position, _)| *position);
-        let library = snapshot.libraries.get_mut(&library_id).ok_or_else(|| {
-            invalid_data(
-                path,
-                format!("missing library {library_id} while assigning visual units"),
-            )
-        })?;
-        let source = library.sources.get_mut(&source_id).ok_or_else(|| {
-            invalid_data(
-                path,
-                format!("missing source {source_id} while assigning visual units"),
-            )
-        })?;
-        source.visual_unit_ids = visual_unit_ids
-            .into_iter()
-            .map(|(_, visual_unit_id)| visual_unit_id)
-            .collect();
-    }
-
     Ok(())
 }
 
-fn load_active_vector_spaces(
+fn load_assets(
     path: &FsPath,
     connection: &Connection,
     snapshot: &mut DurableAppStateSnapshot,
 ) -> Result<(), io::Error> {
     let mut statement = connection
         .prepare(
-            "SELECT library_id, vector_space_id
-             FROM library_active_vector_spaces
-             ORDER BY library_id ASC, vector_space_id ASC",
+            "SELECT asset_id, source_content_id, asset_type, locator_json,
+                    derivation_signature, neighbor_context_json
+             FROM assets
+             ORDER BY position ASC",
         )
-        .map_err(|error| sqlite_io(path, "prepare active vector spaces query", error))?;
+        .map_err(|error| sqlite_io(path, "prepare assets query", error))?;
     let mut rows = statement
         .query([])
-        .map_err(|error| sqlite_io(path, "query active vector spaces", error))?;
+        .map_err(|error| sqlite_io(path, "query assets", error))?;
     while let Some(row) = rows
         .next()
-        .map_err(|error| sqlite_io(path, "read active vector space row", error))?
+        .map_err(|error| sqlite_io(path, "read asset row", error))?
     {
-        let library_id: String = row
+        let asset_id: String = row
             .get(0)
-            .map_err(|error| sqlite_io(path, "read active vector space library_id", error))?;
-        let vector_space_id: String = row
-            .get(1)
-            .map_err(|error| sqlite_io(path, "read active vector_space_id", error))?;
-        let library = snapshot.libraries.get_mut(&library_id).ok_or_else(|| {
-            invalid_data(
+            .map_err(|error| sqlite_io(path, "read asset_id", error))?;
+        let locator_json: String = row
+            .get(3)
+            .map_err(|error| sqlite_io(path, "read asset locator_json", error))?;
+        let neighbor_context_json: String = row
+            .get(5)
+            .map_err(|error| sqlite_io(path, "read asset neighbor_context_json", error))?;
+        let record = AssetRecord {
+            id: asset_id.clone(),
+            source_id: String::new(),
+            content_id: String::new(),
+            source_path: String::new(),
+            source_type: String::new(),
+            source_content_id: row
+                .get(1)
+                .map_err(|error| sqlite_io(path, "read asset source_content_id", error))?,
+            asset_type: row
+                .get(2)
+                .map_err(|error| sqlite_io(path, "read asset asset_type", error))?,
+            locator: parse_json::<Value>(path, &locator_json, "assets.locator_json")?,
+            derivation_signature: row
+                .get(4)
+                .map_err(|error| sqlite_io(path, "read asset derivation_signature", error))?,
+            neighbor_context: parse_json::<Value>(
                 path,
-                format!(
-                    "active vector space {vector_space_id} references missing library {library_id}"
-                ),
-            )
-        })?;
-        library.active_vector_spaces.insert(vector_space_id);
+                &neighbor_context_json,
+                "assets.neighbor_context_json",
+            )?,
+            unit_ids: Vec::new(),
+        };
+        for library in snapshot.libraries.values_mut() {
+            library.asset_order.push(asset_id.clone());
+            library.assets.insert(asset_id.clone(), record.clone());
+        }
     }
     Ok(())
 }
 
-fn load_retired_vector_spaces(
+fn load_units(
     path: &FsPath,
     connection: &Connection,
     snapshot: &mut DurableAppStateSnapshot,
 ) -> Result<(), io::Error> {
+    let mut asset_unit_ids = BTreeMap::<String, Vec<(i64, String)>>::new();
     let mut statement = connection
         .prepare(
-            "SELECT library_id, vector_space_id, retired_at_ms
-             FROM retired_vector_spaces
-             ORDER BY library_id ASC, vector_space_id ASC",
+            "SELECT unit_id, asset_id, asset_position, point_id, unit_type,
+                    derivation_signature, locator_json, neighbor_context_json
+             FROM units
+             ORDER BY position ASC",
         )
-        .map_err(|error| sqlite_io(path, "prepare retired vector spaces query", error))?;
+        .map_err(|error| sqlite_io(path, "prepare units query", error))?;
     let mut rows = statement
         .query([])
-        .map_err(|error| sqlite_io(path, "query retired vector spaces", error))?;
+        .map_err(|error| sqlite_io(path, "query units", error))?;
     while let Some(row) = rows
         .next()
-        .map_err(|error| sqlite_io(path, "read retired vector space row", error))?
+        .map_err(|error| sqlite_io(path, "read unit row", error))?
     {
-        let library_id: String = row
+        let unit_id: String = row
             .get(0)
-            .map_err(|error| sqlite_io(path, "read retired vector space library_id", error))?;
-        let vector_space_id: String = row
+            .map_err(|error| sqlite_io(path, "read unit_id", error))?;
+        let asset_id: String = row
             .get(1)
-            .map_err(|error| sqlite_io(path, "read retired vector_space_id", error))?;
-        let retired_at_ms = i64_to_u128(
+            .map_err(|error| sqlite_io(path, "read unit asset_id", error))?;
+        let asset_position: i64 = row
+            .get(2)
+            .map_err(|error| sqlite_io(path, "read unit asset_position", error))?;
+        let point_id = i64_to_u64(
             path,
-            row.get(2)
-                .map_err(|error| sqlite_io(path, "read retired_at_ms", error))?,
-            "retired_vector_spaces.retired_at_ms",
+            row.get(3)
+                .map_err(|error| sqlite_io(path, "read unit point_id", error))?,
+            "units.point_id",
         )?;
-        let library = snapshot.libraries.get_mut(&library_id).ok_or_else(|| {
-            invalid_data(
+        let locator_json: String = row
+            .get(6)
+            .map_err(|error| sqlite_io(path, "read unit locator_json", error))?;
+        let neighbor_context_json: String = row
+            .get(7)
+            .map_err(|error| sqlite_io(path, "read unit neighbor_context_json", error))?;
+        let record = UnitRecord {
+            id: unit_id.clone(),
+            asset_id: asset_id.clone(),
+            content_id: String::new(),
+            point_id,
+            source_id: String::new(),
+            source_path: String::new(),
+            source_type: String::new(),
+            asset_type: String::new(),
+            unit_type: row
+                .get(4)
+                .map_err(|error| sqlite_io(path, "read unit unit_type", error))?,
+            derivation_signature: row
+                .get(5)
+                .map_err(|error| sqlite_io(path, "read unit derivation_signature", error))?,
+            locator: parse_json::<Value>(path, &locator_json, "units.locator_json")?,
+            neighbor_context: parse_json::<Value>(
                 path,
-                format!("retired vector space {vector_space_id} references missing library {library_id}"),
-            )
+                &neighbor_context_json,
+                "units.neighbor_context_json",
+            )?,
+        };
+        for library in snapshot.libraries.values_mut() {
+            library.unit_order.push(unit_id.clone());
+            library.units.insert(unit_id.clone(), record.clone());
+        }
+        asset_unit_ids
+            .entry(asset_id)
+            .or_default()
+            .push((asset_position, unit_id));
+    }
+    for (asset_id, mut unit_ids) in asset_unit_ids {
+        unit_ids.sort_by_key(|(position, _)| *position);
+        let unit_ids = unit_ids
+            .into_iter()
+            .map(|(_, unit_id)| unit_id)
+            .collect::<Vec<_>>();
+        for library in snapshot.libraries.values_mut() {
+            let asset = library.assets.get_mut(&asset_id).ok_or_else(|| {
+                invalid_data(
+                    path,
+                    format!("missing asset {asset_id} while assigning units"),
+                )
+            })?;
+            asset.unit_ids = unit_ids.clone();
+        }
+    }
+    Ok(())
+}
+
+fn load_vector_spaces(
+    path: &FsPath,
+    connection: &Connection,
+    snapshot: &mut DurableAppStateSnapshot,
+) -> Result<(), io::Error> {
+    let mut statement = connection
+        .prepare(
+            "SELECT vector_space_id, provider_id, model_id, model_version,
+                    model_revision, vector_type
+             FROM vector_spaces
+             ORDER BY vector_space_id ASC",
+        )
+        .map_err(|error| sqlite_io(path, "prepare vector_spaces query", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| sqlite_io(path, "query vector_spaces", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_io(path, "read vector_space row", error))?
+    {
+        let vector_space_id: String = row
+            .get(0)
+            .map_err(|error| sqlite_io(path, "read vector_space_id", error))?;
+        let record = VectorSpaceRecord {
+            id: vector_space_id.clone(),
+            provider_id: row
+                .get(1)
+                .map_err(|error| sqlite_io(path, "read vector_space provider_id", error))?,
+            model_id: row
+                .get(2)
+                .map_err(|error| sqlite_io(path, "read vector_space model_id", error))?,
+            model_version: row
+                .get(3)
+                .map_err(|error| sqlite_io(path, "read vector_space model_version", error))?,
+            model_revision: row
+                .get(4)
+                .map_err(|error| sqlite_io(path, "read vector_space model_revision", error))?,
+            vector_type: row
+                .get(5)
+                .map_err(|error| sqlite_io(path, "read vector_space vector_type", error))?,
+        };
+        for library in snapshot.libraries.values_mut() {
+            library
+                .vector_spaces
+                .insert(vector_space_id.clone(), record.clone());
+        }
+    }
+    Ok(())
+}
+
+fn load_unit_indexes(
+    path: &FsPath,
+    connection: &Connection,
+    snapshot: &mut DurableAppStateSnapshot,
+) -> Result<(), io::Error> {
+    let mut statement = connection
+        .prepare(
+            "SELECT unit_id, vector_space_id, status, visibility,
+                    vector_ref_json, job_id, error_summary
+             FROM unit_indexes
+             ORDER BY unit_id ASC, vector_space_id ASC",
+        )
+        .map_err(|error| sqlite_io(path, "prepare unit_indexes query", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| sqlite_io(path, "query unit_indexes", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_io(path, "read unit_index row", error))?
+    {
+        let unit_id: String = row
+            .get(0)
+            .map_err(|error| sqlite_io(path, "read unit_index unit_id", error))?;
+        let vector_space_id: String = row
+            .get(1)
+            .map_err(|error| sqlite_io(path, "read unit_index vector_space_id", error))?;
+        let vector_ref_json: Option<String> = row
+            .get(4)
+            .map_err(|error| sqlite_io(path, "read unit_index vector_ref_json", error))?;
+        let vector_ref = vector_ref_json
+            .as_deref()
+            .map(|raw| parse_json::<Value>(path, raw, "unit_indexes.vector_ref_json"))
+            .transpose()?;
+        let record = UnitIndexRecord {
+            unit_id: unit_id.clone(),
+            vector_space_id: vector_space_id.clone(),
+            status: row
+                .get(2)
+                .map_err(|error| sqlite_io(path, "read unit_index status", error))?,
+            visibility: row
+                .get(3)
+                .map_err(|error| sqlite_io(path, "read unit_index visibility", error))?,
+            vector_ref,
+            job_id: row
+                .get(5)
+                .map_err(|error| sqlite_io(path, "read unit_index job_id", error))?,
+            error_summary: row
+                .get(6)
+                .map_err(|error| sqlite_io(path, "read unit_index error_summary", error))?,
+        };
+        let key = UnitIndexRecord::key(&unit_id, &vector_space_id);
+        for library in snapshot.libraries.values_mut() {
+            library.unit_indexes.insert(key.clone(), record.clone());
+        }
+    }
+    Ok(())
+}
+
+fn load_content_e2e_index_states(
+    path: &FsPath,
+    connection: &Connection,
+    snapshot: &mut DurableAppStateSnapshot,
+) -> Result<(), io::Error> {
+    let mut statement = connection
+        .prepare(
+            "SELECT content_id, pipe_signature, vector_space_id, indexed_at_ms
+             FROM content_e2e_index_states
+             ORDER BY content_id ASC, pipe_signature ASC, vector_space_id ASC",
+        )
+        .map_err(|error| sqlite_io(path, "prepare content_e2e_index_states query", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| sqlite_io(path, "query content_e2e_index_states", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_io(path, "read content_e2e_index_state row", error))?
+    {
+        let content_id: String = row
+            .get(0)
+            .map_err(|error| sqlite_io(path, "read content_e2e_index_state content_id", error))?;
+        let pipe_signature: String = row.get(1).map_err(|error| {
+            sqlite_io(path, "read content_e2e_index_state pipe_signature", error)
         })?;
-        library
-            .retired_vector_spaces
-            .insert(vector_space_id, RetiredVectorSpaceRecord { retired_at_ms });
+        let vector_space_id: String = row.get(2).map_err(|error| {
+            sqlite_io(path, "read content_e2e_index_state vector_space_id", error)
+        })?;
+        let indexed_at_ms = i64_to_u128(
+            path,
+            row.get(3).map_err(|error| {
+                sqlite_io(path, "read content_e2e_index_state indexed_at_ms", error)
+            })?,
+            "content_e2e_index_states.indexed_at_ms",
+        )?;
+        let record = ContentE2eIndexStateRecord {
+            content_id: content_id.clone(),
+            pipe_signature: pipe_signature.clone(),
+            vector_space_id: vector_space_id.clone(),
+            indexed_at_ms,
+        };
+        let key = ContentE2eIndexStateRecord::key(&content_id, &pipe_signature, &vector_space_id);
+        for library in snapshot.libraries.values_mut() {
+            library
+                .content_e2e_index_states
+                .insert(key.clone(), record.clone());
+        }
     }
     Ok(())
 }
@@ -753,20 +1094,29 @@ fn write_structured_state_snapshot(
 
         write_source_roots(transaction, &library.id, library)?;
         write_sources(transaction, &library.id, library)?;
-        write_visual_units(transaction, &library.id, library)?;
-        write_active_vector_spaces(transaction, &library.id, library)?;
-        write_retired_vector_spaces(transaction, &library.id, library)?;
+        write_source_asset_locations(transaction, &library.id, library)?;
     }
+
+    write_contents(transaction, snapshot)?;
+    write_assets(transaction, snapshot)?;
+    write_units(transaction, snapshot)?;
+    write_vector_spaces(transaction, snapshot)?;
+    write_unit_indexes(transaction, snapshot)?;
+    write_content_e2e_index_states(transaction, snapshot)?;
 
     Ok(())
 }
 
 fn clear_structured_tables(transaction: &Transaction<'_>) -> Result<(), String> {
     for table in [
-        "retired_vector_spaces",
-        "library_active_vector_spaces",
-        "visual_units",
+        "content_e2e_index_states",
+        "unit_indexes",
+        "vector_spaces",
+        "units",
+        "assets",
+        "source_asset_locations",
         "sources",
+        "contents",
         "source_roots",
         "libraries",
         "state_meta",
@@ -829,19 +1179,21 @@ fn write_sources(
         transaction
             .execute(
                 "INSERT INTO sources (
-                    library_id, source_id, position, source_root_id, source_root_path,
-                    source_path, relative_path, source_type, kind, status, status_reason,
+                    library_id, source_id, position, source_content_id, source_root_id, source_root_path,
+                    source_uri, relative_path, source_type, media_type, kind, status, status_reason,
                     page_count, duration_ms, observed_size_bytes, observed_modified_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     library_id,
                     source.id,
                     usize_to_i64(position, "sources.position")?,
+                    source.source_content_id,
                     source.source_root_id,
                     source.source_root_path,
-                    source.source_path,
+                    source.source_uri,
                     source.relative_path,
                     source.source_type,
+                    source.media_type,
                     source.kind,
                     source.status,
                     source.status_reason,
@@ -864,114 +1216,293 @@ fn write_sources(
     Ok(())
 }
 
-fn write_visual_units(
+fn write_contents(
+    transaction: &Transaction<'_>,
+    snapshot: &DurableAppStateSnapshot,
+) -> Result<(), String> {
+    let mut contents = BTreeMap::<String, ContentRecord>::new();
+    for library in snapshot.libraries.values() {
+        contents.extend(
+            library
+                .contents
+                .iter()
+                .map(|(content_id, content)| (content_id.clone(), content.clone())),
+        );
+    }
+    for content in contents.values() {
+        transaction
+            .execute(
+                "INSERT INTO contents (
+                    content_id, size_bytes, fast_fingerprint, sha256, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    content.id,
+                    optional_u64_to_i64(content.size_bytes, "contents.size_bytes")?,
+                    content.fast_fingerprint,
+                    content.sha256,
+                    u128_to_i64(content.created_at_ms, "contents.created_at_ms")?,
+                ],
+            )
+            .map_err(|error| format!("Failed to write content {}: {error}", content.id))?;
+    }
+    Ok(())
+}
+
+fn write_source_asset_locations(
     transaction: &Transaction<'_>,
     library_id: &str,
     library: &DurableLibraryRecord,
 ) -> Result<(), String> {
-    let mut source_positions = BTreeMap::<String, BTreeMap<String, usize>>::new();
-    for source in library.sources.values() {
-        source_positions.insert(
-            source.id.clone(),
-            source
-                .visual_unit_ids
+    for (position, location_id) in library.source_asset_location_order.iter().enumerate() {
+        let location = library.source_asset_locations.get(location_id).ok_or_else(|| {
+            format!(
+                "source_asset_location_order for library `{library_id}` references missing location `{location_id}`"
+            )
+        })?;
+        let locator_json = serde_json::to_string(&location.locator)
+            .map_err(|error| format!("Failed to encode source asset location locator: {error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO source_asset_locations (
+                    library_id, location_id, position, source_id, asset_id, locator_json, visibility
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    library_id,
+                    location.id,
+                    usize_to_i64(position, "source_asset_locations.position")?,
+                    location.source_id,
+                    location.asset_id,
+                    locator_json,
+                    location.visibility,
+                ],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to write source asset location {} for library {library_id}: {error}",
+                    location.id
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn write_assets(
+    transaction: &Transaction<'_>,
+    snapshot: &DurableAppStateSnapshot,
+) -> Result<(), String> {
+    let mut assets = BTreeMap::<String, AssetRecord>::new();
+    for library in snapshot.libraries.values() {
+        assets.extend(
+            library
+                .assets
                 .iter()
-                .enumerate()
-                .map(|(position, visual_unit_id)| (visual_unit_id.clone(), position))
-                .collect(),
+                .map(|(asset_id, asset)| (asset_id.clone(), asset.clone())),
+        );
+    }
+    for (position, asset) in assets.values().enumerate() {
+        let locator_json = serde_json::to_string(&asset.locator)
+            .map_err(|error| format!("Failed to encode asset locator: {error}"))?;
+        let neighbor_context_json = serde_json::to_string(&asset.neighbor_context)
+            .map_err(|error| format!("Failed to encode asset neighbor context: {error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO assets (
+                    asset_id, position, source_content_id, asset_type,
+                    locator_json, derivation_signature, neighbor_context_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    asset.id,
+                    usize_to_i64(position, "assets.position")?,
+                    asset.source_content_id,
+                    asset.asset_type,
+                    locator_json,
+                    asset.derivation_signature,
+                    neighbor_context_json,
+                ],
+            )
+            .map_err(|error| format!("Failed to write asset {}: {error}", asset.id))?;
+    }
+    Ok(())
+}
+
+fn write_units(
+    transaction: &Transaction<'_>,
+    snapshot: &DurableAppStateSnapshot,
+) -> Result<(), String> {
+    let mut asset_positions = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    let mut units = BTreeMap::<String, UnitRecord>::new();
+    for library in snapshot.libraries.values() {
+        for asset in library.assets.values() {
+            asset_positions.entry(asset.id.clone()).or_insert_with(|| {
+                asset
+                    .unit_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(position, unit_id)| (unit_id.clone(), position))
+                    .collect()
+            });
+        }
+        units.extend(
+            library
+                .units
+                .iter()
+                .map(|(unit_id, unit)| (unit_id.clone(), unit.clone())),
         );
     }
 
-    for (library_position, visual_unit_id) in library.visual_unit_order.iter().enumerate() {
-        let visual_unit = library.visual_units.get(visual_unit_id).ok_or_else(|| {
-            format!(
-                "visual_unit_order for library `{library_id}` references missing visual unit `{visual_unit_id}`"
-            )
-        })?;
-        let source_position = source_positions
-            .get(&visual_unit.source_id)
-            .and_then(|positions| positions.get(visual_unit_id))
+    for (position, unit) in units.values().enumerate() {
+        let asset_position = asset_positions
+            .get(&unit.asset_id)
+            .and_then(|positions| positions.get(&unit.id))
             .copied()
             .ok_or_else(|| {
                 format!(
-                    "visual unit `{visual_unit_id}` is missing from source `{}` visual_unit_ids",
-                    visual_unit.source_id
+                    "unit `{}` is missing from asset `{}` unit_ids",
+                    unit.id, unit.asset_id
                 )
             })?;
-        let locator_json = serde_json::to_string(&visual_unit.locator)
-            .map_err(|error| format!("Failed to encode visual unit locator: {error}"))?;
-        let neighbor_context_json = serde_json::to_string(&visual_unit.neighbor_context)
-            .map_err(|error| format!("Failed to encode visual unit neighbor context: {error}"))?;
+        let locator_json = serde_json::to_string(&unit.locator)
+            .map_err(|error| format!("Failed to encode unit locator: {error}"))?;
+        let neighbor_context_json = serde_json::to_string(&unit.neighbor_context)
+            .map_err(|error| format!("Failed to encode unit neighbor context: {error}"))?;
         transaction
             .execute(
-                "INSERT INTO visual_units (
-                    library_id, visual_unit_id, library_position, source_id, source_position,
-                    point_id, source_path, source_type, kind, locator_json, neighbor_context_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO units (
+                    unit_id, position, asset_id, asset_position, point_id, unit_type,
+                    derivation_signature, locator_json, neighbor_context_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    library_id,
-                    visual_unit.id,
-                    usize_to_i64(library_position, "visual_units.library_position")?,
-                    visual_unit.source_id,
-                    usize_to_i64(source_position, "visual_units.source_position")?,
-                    u64_to_i64(visual_unit.point_id, "visual_units.point_id")?,
-                    visual_unit.source_path,
-                    visual_unit.source_type,
-                    visual_unit.kind,
+                    unit.id,
+                    usize_to_i64(position, "units.position")?,
+                    unit.asset_id,
+                    usize_to_i64(asset_position, "units.asset_position")?,
+                    u64_to_i64(unit.point_id, "units.point_id")?,
+                    unit.unit_type,
+                    unit.derivation_signature,
                     locator_json,
                     neighbor_context_json,
                 ],
             )
-            .map_err(|error| {
-                format!(
-                    "Failed to write visual unit {} for library {library_id}: {error}",
-                    visual_unit.id
-                )
-            })?;
+            .map_err(|error| format!("Failed to write unit {}: {error}", unit.id))?;
     }
     Ok(())
 }
 
-fn write_active_vector_spaces(
+fn write_vector_spaces(
     transaction: &Transaction<'_>,
-    library_id: &str,
-    library: &DurableLibraryRecord,
+    snapshot: &DurableAppStateSnapshot,
 ) -> Result<(), String> {
-    for vector_space_id in &library.active_vector_spaces {
+    let mut vector_spaces = BTreeMap::<String, VectorSpaceRecord>::new();
+    for library in snapshot.libraries.values() {
+        vector_spaces.extend(
+            library
+                .vector_spaces
+                .iter()
+                .map(|(id, vector_space)| (id.clone(), vector_space.clone())),
+        );
+    }
+    for vector_space in vector_spaces.values() {
         transaction
             .execute(
-                "INSERT INTO library_active_vector_spaces (library_id, vector_space_id)
-                 VALUES (?1, ?2)",
-                params![library_id, vector_space_id],
+                "INSERT INTO vector_spaces (
+                    vector_space_id, provider_id, model_id, model_version,
+                    model_revision, vector_type
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    vector_space.id,
+                    vector_space.provider_id,
+                    vector_space.model_id,
+                    vector_space.model_version,
+                    vector_space.model_revision,
+                    vector_space.vector_type,
+                ],
             )
             .map_err(|error| {
-                format!(
-                    "Failed to write active vector space {vector_space_id} for library {library_id}: {error}"
-                )
+                format!("Failed to write vector space {}: {error}", vector_space.id)
             })?;
     }
     Ok(())
 }
 
-fn write_retired_vector_spaces(
+fn write_unit_indexes(
     transaction: &Transaction<'_>,
-    library_id: &str,
-    library: &DurableLibraryRecord,
+    snapshot: &DurableAppStateSnapshot,
 ) -> Result<(), String> {
-    for (vector_space_id, retired) in &library.retired_vector_spaces {
+    let mut indexes = BTreeMap::<String, UnitIndexRecord>::new();
+    for library in snapshot.libraries.values() {
+        indexes.extend(
+            library
+                .unit_indexes
+                .iter()
+                .map(|(key, index)| (key.clone(), index.clone())),
+        );
+    }
+    for index in indexes.values() {
+        let vector_ref_json = index
+            .vector_ref
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| format!("Failed to encode unit index vector_ref: {error}"))?;
         transaction
             .execute(
-                "INSERT INTO retired_vector_spaces (library_id, vector_space_id, retired_at_ms)
-                 VALUES (?1, ?2, ?3)",
+                "INSERT INTO unit_indexes (
+                    unit_id, vector_space_id, status, visibility, vector_ref_json,
+                    job_id, error_summary
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    library_id,
-                    vector_space_id,
-                    u128_to_i64(retired.retired_at_ms, "retired_vector_spaces.retired_at_ms")?,
+                    index.unit_id,
+                    index.vector_space_id,
+                    index.status,
+                    index.visibility,
+                    vector_ref_json,
+                    index.job_id,
+                    index.error_summary,
                 ],
             )
             .map_err(|error| {
                 format!(
-                    "Failed to write retired vector space {vector_space_id} for library {library_id}: {error}"
+                    "Failed to write unit index {}/{}: {error}",
+                    index.unit_id, index.vector_space_id
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn write_content_e2e_index_states(
+    transaction: &Transaction<'_>,
+    snapshot: &DurableAppStateSnapshot,
+) -> Result<(), String> {
+    let mut states = BTreeMap::<String, ContentE2eIndexStateRecord>::new();
+    for library in snapshot.libraries.values() {
+        states.extend(
+            library
+                .content_e2e_index_states
+                .iter()
+                .map(|(key, state)| (key.clone(), state.clone())),
+        );
+    }
+    for state in states.values() {
+        transaction
+            .execute(
+                "INSERT INTO content_e2e_index_states (
+                    content_id, pipe_signature, vector_space_id, indexed_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    state.content_id,
+                    state.pipe_signature,
+                    state.vector_space_id,
+                    u128_to_i64(
+                        state.indexed_at_ms,
+                        "content_e2e_index_states.indexed_at_ms"
+                    )?,
+                ],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to write content e2e index state {}/{}/{}: {error}",
+                    state.content_id, state.pipe_signature, state.vector_space_id
                 )
             })?;
     }
@@ -1138,8 +1669,10 @@ mod tests {
                         source_root_id: Some("root_1".to_string()),
                         source_root_path: Some("/tmp/root".to_string()),
                         source_path: "/tmp/root/report.pdf".to_string(),
+                        source_uri: "file:///tmp/root/report.pdf".to_string(),
                         relative_path: Some("report.pdf".to_string()),
                         source_type: "document".to_string(),
+                        media_type: "application/pdf".to_string(),
                         kind: "document_page".to_string(),
                         status: "active".to_string(),
                         status_reason: None,
@@ -1147,44 +1680,142 @@ mod tests {
                         duration_ms: None,
                         observed_size_bytes: Some(99),
                         observed_modified_at_ms: Some(5678),
-                        visual_unit_ids: vec!["vu_2".to_string(), "vu_1".to_string()],
+                        source_content_id: "content_source".to_string(),
+                        asset_ids: vec!["asset_2".to_string(), "asset_1".to_string()],
                     },
                 )]),
                 source_order: vec!["src_1".to_string()],
-                visual_units: BTreeMap::from([
+                contents: BTreeMap::from([
                     (
-                        "vu_1".to_string(),
-                        VisualUnitRecord {
-                            id: "vu_1".to_string(),
-                            point_id: 11,
-                            source_id: "src_1".to_string(),
-                            source_path: "/tmp/root/report.pdf".to_string(),
-                            source_type: "document".to_string(),
-                            kind: "document_page".to_string(),
-                            locator: json!({ "page": 1 }),
-                            neighbor_context: json!({ "next": "vu_2" }),
+                        "content_source".to_string(),
+                        ContentRecord {
+                            id: "content_source".to_string(),
+                            size_bytes: Some(99),
+                            fast_fingerprint: Some("fast-source".to_string()),
+                            sha256: Some("sha256-source".to_string()),
+                            created_at_ms: 1,
                         },
                     ),
                     (
-                        "vu_2".to_string(),
-                        VisualUnitRecord {
-                            id: "vu_2".to_string(),
-                            point_id: 12,
-                            source_id: "src_1".to_string(),
-                            source_path: "/tmp/root/report.pdf".to_string(),
-                            source_type: "document".to_string(),
-                            kind: "document_page".to_string(),
-                            locator: json!({ "page": 2 }),
-                            neighbor_context: json!({ "previous": "vu_1" }),
+                        "content_unit_1".to_string(),
+                        ContentRecord {
+                            id: "content_unit_1".to_string(),
+                            size_bytes: None,
+                            fast_fingerprint: None,
+                            sha256: None,
+                            created_at_ms: 1,
                         },
                     ),
                 ]),
-                visual_unit_order: vec!["vu_1".to_string(), "vu_2".to_string()],
-                active_vector_spaces: BTreeSet::from(["vs_active".to_string()]),
-                retired_vector_spaces: BTreeMap::from([(
-                    "vs_old".to_string(),
-                    RetiredVectorSpaceRecord {
-                        retired_at_ms: 9999,
+                source_asset_locations: BTreeMap::from([
+                    (
+                        SourceAssetLocationRecord::key("src_1", "asset_2"),
+                        SourceAssetLocationRecord {
+                            id: SourceAssetLocationRecord::key("src_1", "asset_2"),
+                            source_id: "src_1".to_string(),
+                            asset_id: "asset_2".to_string(),
+                            locator: json!({ "page": 2 }),
+                            visibility: crate::ACTIVE_INDEX_VISIBILITY.to_string(),
+                        },
+                    ),
+                    (
+                        SourceAssetLocationRecord::key("src_1", "asset_1"),
+                        SourceAssetLocationRecord {
+                            id: SourceAssetLocationRecord::key("src_1", "asset_1"),
+                            source_id: "src_1".to_string(),
+                            asset_id: "asset_1".to_string(),
+                            locator: json!({ "page": 1 }),
+                            visibility: crate::ACTIVE_INDEX_VISIBILITY.to_string(),
+                        },
+                    ),
+                ]),
+                source_asset_location_order: vec![
+                    SourceAssetLocationRecord::key("src_1", "asset_2"),
+                    SourceAssetLocationRecord::key("src_1", "asset_1"),
+                ],
+                assets: BTreeMap::from([
+                    (
+                        "asset_1".to_string(),
+                        AssetRecord {
+                            id: "asset_1".to_string(),
+                            source_id: "src_1".to_string(),
+                            content_id: "content_unit_1".to_string(),
+                            source_path: "/tmp/root/report.pdf".to_string(),
+                            source_type: "document".to_string(),
+                            source_content_id: "content_source".to_string(),
+                            asset_type: "document_page".to_string(),
+                            locator: json!({ "page": 1 }),
+                            derivation_signature: "pdf-page:v1:1".to_string(),
+                            neighbor_context: json!({ "next": "asset_2" }),
+                            unit_ids: vec!["unit_1".to_string()],
+                        },
+                    ),
+                    (
+                        "asset_2".to_string(),
+                        AssetRecord {
+                            id: "asset_2".to_string(),
+                            source_id: "src_1".to_string(),
+                            content_id: "content_unit_1".to_string(),
+                            source_path: "/tmp/root/report.pdf".to_string(),
+                            source_type: "document".to_string(),
+                            source_content_id: "content_source".to_string(),
+                            asset_type: "document_page".to_string(),
+                            locator: json!({ "page": 2 }),
+                            derivation_signature: "pdf-page:v1:2".to_string(),
+                            neighbor_context: json!({ "previous": "asset_1" }),
+                            unit_ids: Vec::new(),
+                        },
+                    ),
+                ]),
+                asset_order: vec!["asset_1".to_string(), "asset_2".to_string()],
+                units: BTreeMap::from([(
+                    "unit_1".to_string(),
+                    UnitRecord {
+                        id: "unit_1".to_string(),
+                        asset_id: "asset_1".to_string(),
+                        content_id: "content_unit_1".to_string(),
+                        point_id: 11,
+                        source_id: "src_1".to_string(),
+                        source_path: "/tmp/root/report.pdf".to_string(),
+                        source_type: "document".to_string(),
+                        asset_type: "document_page".to_string(),
+                        unit_type: "page_image".to_string(),
+                        derivation_signature: "pdf-page-image:v1:1".to_string(),
+                        locator: json!({ "page": 1 }),
+                        neighbor_context: json!({ "next": "asset_2" }),
+                    },
+                )]),
+                unit_order: vec!["unit_1".to_string()],
+                vector_spaces: BTreeMap::from([(
+                    "vs_active".to_string(),
+                    VectorSpaceRecord {
+                        id: "vs_active".to_string(),
+                        provider_id: "local_sidecar".to_string(),
+                        model_id: "model".to_string(),
+                        model_version: "main".to_string(),
+                        model_revision: None,
+                        vector_type: "multi_vector".to_string(),
+                    },
+                )]),
+                unit_indexes: BTreeMap::from([(
+                    UnitIndexRecord::key("unit_1", "vs_active"),
+                    UnitIndexRecord {
+                        unit_id: "unit_1".to_string(),
+                        vector_space_id: "vs_active".to_string(),
+                        status: "ready".to_string(),
+                        visibility: crate::ACTIVE_INDEX_VISIBILITY.to_string(),
+                        vector_ref: Some(json!({ "point_id": 11 })),
+                        job_id: Some("job_1".to_string()),
+                        error_summary: None,
+                    },
+                )]),
+                content_e2e_index_states: BTreeMap::from([(
+                    ContentE2eIndexStateRecord::key("content_source", "document:v1", "vs_active"),
+                    ContentE2eIndexStateRecord {
+                        content_id: "content_source".to_string(),
+                        pipe_signature: "document:v1".to_string(),
+                        vector_space_id: "vs_active".to_string(),
+                        indexed_at_ms: 2,
                     },
                 )]),
             },
@@ -1201,14 +1832,19 @@ mod tests {
         assert_eq!(library.lifecycle_state, "archived");
         assert_eq!(library.source_root_order, vec!["root_1"]);
         assert_eq!(library.source_order, vec!["src_1"]);
-        assert_eq!(library.visual_unit_order, vec!["vu_1", "vu_2"]);
+        assert_eq!(library.asset_order, vec!["asset_1", "asset_2"]);
         assert_eq!(
-            library.sources["src_1"].visual_unit_ids,
-            vec!["vu_2", "vu_1"]
+            library.sources["src_1"].asset_ids,
+            vec!["asset_2", "asset_1"]
         );
-        assert_eq!(library.visual_units["vu_1"].locator, json!({ "page": 1 }));
-        assert!(library.active_vector_spaces.contains("vs_active"));
-        assert_eq!(library.retired_vector_spaces["vs_old"].retired_at_ms, 9999);
+        assert_eq!(library.assets["asset_1"].locator, json!({ "page": 1 }));
+        assert_eq!(library.units["unit_1"].unit_type, "page_image");
+        assert_eq!(library.units["unit_1"].point_id, 11);
+        assert!(library.vector_spaces.contains_key("vs_active"));
+        assert_eq!(
+            library.unit_indexes[&UnitIndexRecord::key("unit_1", "vs_active")].visibility,
+            "active"
+        );
 
         let connection = Connection::open(&path).unwrap();
         let version: i64 = connection
@@ -1283,6 +1919,27 @@ mod tests {
             .snapshot;
         assert!(loaded.library_order.is_empty());
         assert!(loaded.libraries.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unsupported_structured_schema_version_is_rejected() {
+        let path = unique_test_file_path("unsupported-schema.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        initialize_durable_state_store(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO state_meta (id, schema_version, updated_at_ms)
+                 VALUES (1, 5, 0)",
+                [],
+            )
+            .unwrap();
+
+        let error = load_durable_state_snapshot(&path).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Unsupported durable state schema version 5"));
+        assert!(message.contains("Reset or cut over"));
 
         let _ = std::fs::remove_file(path);
     }

@@ -1,8 +1,8 @@
 use crate::{
     api::{ApiError, PreviewReference},
     model::{
-        IncomingQueryDocumentUpload, IncomingQueryImageUpload, IncomingQueryVideoUpload,
-        SourceRecord, StagedQueryAsset, StagedSettingsModelTestFile, VisualUnitRecord,
+        AssetRecord, IncomingQueryDocumentUpload, IncomingQueryImageUpload,
+        IncomingQueryVideoUpload, SourceRecord, StagedQueryAsset, StagedSettingsModelTestFile,
     },
     VIDEO_SEGMENT_OVERLAP_MS, VIDEO_SEGMENT_WINDOW_MS,
 };
@@ -590,22 +590,22 @@ pub(crate) fn resolve_document_query_locator(
     })))
 }
 
-pub(crate) fn visual_unit_preview_reference(
+pub(crate) fn asset_preview_reference(
     library_id: &str,
-    visual_unit_id: &str,
-    kind: &str,
+    asset_id: &str,
+    asset_type: &str,
     locator: &Value,
 ) -> Result<PreviewReference, ApiError> {
     let base = format!(
-        "{}/libraries/{}/visual-units/{}/preview",
+        "{}/libraries/{}/assets/{}/preview",
         app_base_url()?.trim_end_matches('/'),
         library_id,
-        visual_unit_id
+        asset_id
     );
-    let url = if kind == "document_page" {
+    let url = if asset_type == "document_page" {
         let page = locator.get("page").and_then(Value::as_u64).unwrap_or(1);
         format!("{base}#page={page}&view=FitH")
-    } else if kind == "video_segment" {
+    } else if asset_type == "video_segment" {
         let start_seconds =
             locator.get("start_ms").and_then(Value::as_u64).unwrap_or(0) as f64 / 1000.0;
         let end_seconds =
@@ -616,7 +616,7 @@ pub(crate) fn visual_unit_preview_reference(
     };
     Ok(PreviewReference {
         url,
-        handle: Some(format!("preview:{visual_unit_id}")),
+        handle: Some(format!("preview:{asset_id}")),
     })
 }
 
@@ -680,8 +680,8 @@ pub(crate) fn query_image_preview_reference(
     })
 }
 
-pub(crate) fn content_type_for_visual_unit(visual_unit: &VisualUnitRecord) -> &'static str {
-    content_type_for_source_type_and_path(&visual_unit.source_type, &visual_unit.source_path)
+pub(crate) fn content_type_for_asset(asset: &AssetRecord) -> &'static str {
+    content_type_for_source_type_and_path(&asset.source_type, &asset.source_path)
 }
 
 pub(crate) fn content_type_for_source(source: &SourceRecord) -> &'static str {

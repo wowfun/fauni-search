@@ -8,6 +8,7 @@ from fauni_sidecar.app import EmbedRequest, ModeldRuntimeClient, SidecarApiError
 from fauni_sidecar.modeld import ModelLoadRequest, ModeldRuntimeManager, create_modeld_app
 from fauni_sidecar.runtime import (
     LocalSidecarModelConfig,
+    load_document_image,
     resolve_local_sidecar_model_from_runtime_config,
 )
 
@@ -509,6 +510,21 @@ def test_embed_returns_document_vectors() -> None:
     assert payload["embeddings"][0]["locator"] == {"page": 2, "page_label": "2"}
     assert payload["embeddings"][0]["pooled_vector"] == [0.75, 0.25, 0.0]
     assert payload["debug"]["elapsed_ms"] == 2.34
+
+
+def test_load_document_image_preserves_explicit_image_locator(tmp_path) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    image_path = tmp_path / "sample.png"
+    image_module.new("RGB", (1, 1), color=(255, 255, 255)).save(image_path)
+
+    locator = {"source_uri": f"file://{image_path}"}
+    _image, source_type, kind, returned_locator = load_document_image(
+        {"path": str(image_path), "locator": locator}
+    )
+
+    assert source_type == "image"
+    assert kind == "image"
+    assert returned_locator == locator
 
 
 def test_embed_rejects_document_batches_over_runtime_limit(monkeypatch: pytest.MonkeyPatch) -> None:

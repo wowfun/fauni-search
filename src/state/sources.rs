@@ -277,18 +277,9 @@ impl AppState {
                 }
             }
 
-            let vector_space_ids = library
-                .active_vector_spaces
-                .iter()
-                .chain(library.retired_vector_spaces.keys())
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-
             Ok(DeletedLibraryCleanupPlan {
                 snapshot: deleted_library_snapshot(&library),
-                vector_space_ids,
+                vector_space_ids: Vec::new(),
                 temp_asset_paths,
             })
         })
@@ -766,7 +757,7 @@ impl AppState {
             .map(|source| {
                 Ok(VideoSourceSummary {
                     source_id: source.id.clone(),
-                    source_path: source.source_path.clone(),
+                    source_uri: source.source_uri.clone(),
                     source_type: source.source_type.clone(),
                     duration_ms: source.duration_ms,
                     preview: video_source_preview_reference(library_id, &source.id)?,
@@ -825,18 +816,32 @@ impl AppState {
                 content_type_overrides: BTreeMap::new(),
                 source_roots: BTreeMap::new(),
                 source_root_order: Vec::new(),
+                contents: BTreeMap::new(),
                 sources: BTreeMap::new(),
                 source_order: Vec::new(),
-                visual_units: BTreeMap::new(),
-                visual_unit_order: Vec::new(),
+                source_asset_locations: BTreeMap::new(),
+                source_asset_location_order: Vec::new(),
+                assets: BTreeMap::new(),
+                asset_order: Vec::new(),
+                units: BTreeMap::new(),
+                unit_order: Vec::new(),
+                vector_spaces: BTreeMap::new(),
+                unit_indexes: BTreeMap::new(),
+                content_e2e_index_states: BTreeMap::new(),
                 latest_job_id: None,
-                active_vector_spaces: BTreeSet::new(),
-                retired_vector_spaces: BTreeMap::new(),
             };
 
             let snapshot = state.library_snapshot(&record);
             state.library_order.push(library_id.clone());
-            state.libraries.insert(library_id, record);
+            state.libraries.insert(library_id.clone(), record);
+            let vector_spaces = state.configured_vector_space_records_for_library(&library_id)?;
+            if let Some(library) = state.libraries.get_mut(&library_id) {
+                for vector_space in vector_spaces {
+                    library
+                        .vector_spaces
+                        .insert(vector_space.id.clone(), vector_space);
+                }
+            }
             Ok(snapshot)
         })
     }
@@ -846,75 +851,64 @@ impl AppState {
         library_id: &str,
         request: ImportPathsRequest,
     ) -> Result<PreparedImport, ApiError> {
-        let (active_vector_spaces, existing_manual_sources_by_path, existing_manual_visual_units) =
-            self.libraries
-                .get(library_id)
-                .map(|library| {
-                    let existing_manual_sources = library
-                        .sources
-                        .values()
-                        .filter(|source| source.source_root_id.is_none())
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let existing_manual_sources_by_path = existing_manual_sources
-                        .iter()
-                        .map(|source| (source.source_path.clone(), source.clone()))
-                        .collect::<BTreeMap<_, _>>();
-                    let existing_manual_visual_units = existing_manual_sources
-                        .iter()
-                        .map(|source| {
-                            let visual_units = source
-                                .visual_unit_ids
-                                .iter()
-                                .filter_map(|visual_unit_id| {
-                                    library.visual_units.get(visual_unit_id)
-                                })
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            (source.id.clone(), visual_units)
-                        })
-                        .collect::<BTreeMap<_, _>>();
-                    (
-                        library.active_vector_spaces.clone(),
-                        existing_manual_sources_by_path,
-                        existing_manual_visual_units,
-                    )
-                })
-                .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        let existing_manual_sources_by_path = self
+            .libraries
+            .get(library_id)
+            .map(|library| {
+                library
+                    .sources
+                    .values()
+                    .filter(|source| source.source_root_id.is_none())
+                    .cloned()
+                    .map(|source| (source.source_uri.clone(), source))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
         let vector_space_bindings =
             self.configured_vector_space_bindings_for_library(library_id)?;
 
         let request_paths = request.paths.clone();
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
+        let mut new_contents = Vec::new();
         let mut new_sources = Vec::new();
-        let mut new_visual_units = Vec::new();
-        let mut stale_visual_units = Vec::new();
+        let mut new_source_asset_locations = Vec::new();
+        let mut new_assets = Vec::new();
+        let mut new_units = Vec::new();
 
         for original in request.paths {
             match self.inspect_import_path(&original) {
                 Ok(mut classification) => {
-                    if let Some(existing_source) =
-                        existing_manual_sources_by_path.get(&classification.normalized_path)
+                    let source_uri = file_source_uri(&classification.normalized_path);
+                    if let Some(existing_source) = existing_manual_sources_by_path.get(&source_uri)
                     {
                         classification.source_id = existing_source.id.clone();
-                        stale_visual_units.extend(
-                            existing_manual_visual_units
-                                .get(&existing_source.id)
-                                .into_iter()
-                                .flatten()
-                                .cloned(),
-                        );
                     }
-                    let visual_units = self.new_visual_units_from_classification(&classification);
+                    let (contents, source_asset_locations, assets, units) = self
+                        .new_assets_and_units_from_classification(
+                            &classification,
+                            Some(library_id),
+                        );
                     let source = self.source_record_from_classification(
                         &classification,
-                        visual_units.iter().map(|item| item.id.clone()).collect(),
+                        source_asset_locations
+                            .iter()
+                            .map(|item| item.asset_id.clone())
+                            .collect(),
+                        contents
+                            .first()
+                            .map(|content| content.id.clone())
+                            .expect("generated source content should exist"),
                     );
-                    let visual_unit_summaries =
-                        visual_units.iter().map(VisualUnitRecord::summary).collect();
+                    let asset_summaries = assets
+                        .iter()
+                        .map(|asset| asset.summary(&source.id, &source.source_type))
+                        .collect();
+                    new_contents.extend(contents);
                     new_sources.push(source);
-                    new_visual_units.extend(visual_units);
+                    new_source_asset_locations.extend(source_asset_locations);
+                    new_assets.extend(assets);
+                    new_units.extend(units);
 
                     accepted.push(ImportAcceptedItem {
                         original_path: original,
@@ -927,7 +921,7 @@ impl AppState {
                         source_id: Some(classification.source_id),
                         source_type: classification.source_type,
                         kind: classification.kind,
-                        visual_units: visual_unit_summaries,
+                        assets: asset_summaries,
                     });
                 }
                 Err(rejection) => rejected.push(ImportRejectedItem {
@@ -942,36 +936,21 @@ impl AppState {
         let vector_space_batches = vector_space_bindings
             .into_iter()
             .filter_map(|binding| {
-                let mut stale_point_ids = stale_visual_units
+                let units = new_units
                     .iter()
-                    .filter(|visual_unit| {
+                    .filter(|unit| {
                         binding.content_types.iter().any(|content_type| {
-                            import_content_type_matches_visual_unit(content_type, &visual_unit.kind)
-                        })
-                    })
-                    .map(|visual_unit| visual_unit.point_id)
-                    .collect::<Vec<_>>();
-                stale_point_ids.sort_unstable();
-                stale_point_ids.dedup();
-                let visual_units = new_visual_units
-                    .iter()
-                    .filter(|visual_unit| {
-                        binding.content_types.iter().any(|content_type| {
-                            import_content_type_matches_visual_unit(content_type, &visual_unit.kind)
+                            import_content_type_matches_asset(content_type, &unit.asset_type)
                         })
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if visual_units.is_empty() {
-                    if stale_point_ids.is_empty() {
-                        return None;
-                    }
+                if units.is_empty() {
+                    return None;
                 }
                 Some(PreparedImportVectorSpaceBatch {
                     vector_space_id: binding.vector_space_id.clone(),
-                    had_existing_index: active_vector_spaces.contains(&binding.vector_space_id),
-                    stale_point_ids,
-                    visual_units,
+                    units,
                 })
             })
             .collect::<Vec<_>>();
@@ -983,8 +962,11 @@ impl AppState {
             },
             accepted,
             rejected,
+            contents: new_contents,
             sources: new_sources,
-            visual_units: new_visual_units,
+            source_asset_locations: new_source_asset_locations,
+            assets: new_assets,
+            units: new_units,
             vector_space_batches,
         })
     }
@@ -1023,25 +1005,22 @@ impl AppState {
             (None, _) => "manual import".to_string(),
         };
         let representative_record = source
-            .visual_unit_ids
+            .asset_ids
             .first()
-            .and_then(|visual_unit_id| library.visual_units.get(visual_unit_id));
-        let representative_visual_unit = representative_record.map(VisualUnitRecord::summary);
+            .and_then(|asset_id| library.assets.get(asset_id));
+        let representative_asset =
+            representative_record.map(|asset| asset.summary(&source.id, &source.source_type));
         let representative_preview = representative_record
-            .map(|visual_unit| {
-                visual_unit_preview_reference(
-                    library_id,
-                    &visual_unit.id,
-                    &visual_unit.kind,
-                    &visual_unit.locator,
-                )
+            .map(|asset| {
+                asset_preview_reference(library_id, &asset.id, &asset.asset_type, &asset.locator)
             })
             .transpose()?;
 
         Ok(SourceInventoryItem {
             source_id: source.id.clone(),
-            source_path: source.source_path.clone(),
+            source_uri: source.source_uri.clone(),
             source_type: source.source_type.clone(),
+            media_type: source.media_type.clone(),
             kind: source.kind.clone(),
             status: source.status.clone(),
             status_reason: source.status_reason.clone(),
@@ -1049,8 +1028,8 @@ impl AppState {
             source_root_id: source.source_root_id.clone(),
             source_root_path,
             source_root_label,
-            visual_unit_count: source.visual_unit_ids.len(),
-            representative_visual_unit,
+            asset_count: source.asset_ids.len(),
+            representative_asset,
             representative_preview,
         })
     }
@@ -1194,15 +1173,22 @@ impl AppState {
     pub(crate) fn source_record_from_classification(
         &self,
         classification: &PathClassification,
-        visual_unit_ids: Vec<String>,
+        asset_ids: Vec<String>,
+        source_content_id: String,
     ) -> SourceRecord {
         SourceRecord {
             id: classification.source_id.clone(),
             source_root_id: None,
             source_root_path: None,
             source_path: classification.normalized_path.clone(),
+            source_uri: file_source_uri(&classification.normalized_path),
             relative_path: None,
             source_type: classification.source_type.clone(),
+            media_type: source_media_type(
+                &classification.source_type,
+                &classification.normalized_path,
+            )
+            .to_string(),
             kind: classification.kind.clone(),
             status: "active".to_string(),
             status_reason: None,
@@ -1210,108 +1196,282 @@ impl AppState {
             duration_ms: classification.duration_ms,
             observed_size_bytes: None,
             observed_modified_at_ms: None,
-            visual_unit_ids,
+            source_content_id,
+            asset_ids,
         }
     }
 
-    pub(crate) fn new_visual_units_from_classification(
+    pub(crate) fn new_assets_and_units_from_classification(
         &mut self,
         classification: &PathClassification,
-    ) -> Vec<VisualUnitRecord> {
+        library_id: Option<&str>,
+    ) -> (
+        Vec<ContentRecord>,
+        Vec<SourceAssetLocationRecord>,
+        Vec<AssetRecord>,
+        Vec<UnitRecord>,
+    ) {
+        let source_content = self
+            .find_completed_source_content(library_id, &classification.normalized_path)
+            .unwrap_or_else(|| self.new_content_record(&classification.normalized_path));
+        let source_content_id = source_content.id.clone();
+        let contents = vec![source_content];
+        let mut source_asset_locations = Vec::new();
+        let mut assets = Vec::new();
+        let mut units = Vec::new();
+        if let Some((reused_locations, reused_assets)) = self
+            .reused_locations_for_completed_content(library_id, classification, &source_content_id)
+        {
+            return (contents, reused_locations, reused_assets, units);
+        }
         if classification.kind == "document_page" {
             let page_count = classification.page_count.unwrap_or(1);
-            return (1..=page_count)
-                .map(|page_number| {
-                    self.new_visual_unit_record(
-                        classification,
-                        json!({
-                            "page": page_number,
-                            "page_label": page_number.to_string(),
-                        }),
-                        json!({
-                            "previous_page": (page_number > 1).then_some(page_number - 1),
-                            "current_page": page_number,
-                            "next_page": (page_number < page_count).then_some(page_number + 1),
-                            "total_pages": page_count,
-                            "source_path": classification.normalized_path,
-                            "source_type": classification.source_type,
-                        }),
-                    )
-                })
-                .collect();
+            for page_number in 1..=page_count {
+                let (asset, location, unit) = self.new_asset_and_unit_record(
+                    classification,
+                    "document_page",
+                    "page_image",
+                    &source_content_id,
+                    json!({
+                        "page": page_number,
+                        "page_label": page_number.to_string(),
+                    }),
+                    json!({
+                        "previous_page": (page_number > 1).then_some(page_number - 1),
+                        "current_page": page_number,
+                        "next_page": (page_number < page_count).then_some(page_number + 1),
+                        "total_pages": page_count,
+                        "source_uri": file_source_uri(&classification.normalized_path),
+                        "source_type": classification.source_type,
+                    }),
+                );
+                source_asset_locations.push(location);
+                assets.push(asset);
+                units.push(unit);
+            }
+            return (contents, source_asset_locations, assets, units);
         }
 
         if classification.kind == "video_segment" {
             let duration_ms = classification.duration_ms.unwrap_or(1);
             let segments = build_video_segment_ranges(duration_ms);
-            return segments
-                .iter()
-                .enumerate()
-                .map(|(segment_index, (start_ms, end_ms))| {
-                    let previous = segment_index
-                        .checked_sub(1)
-                        .and_then(|index| segments.get(index))
-                        .map(
-                            |(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }),
-                        );
-                    let next = segments.get(segment_index + 1).map(
-                        |(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }),
-                    );
-                    self.new_visual_unit_record(
-                        classification,
-                        json!({
+            for (segment_index, (start_ms, end_ms)) in segments.iter().enumerate() {
+                let previous = segment_index
+                    .checked_sub(1)
+                    .and_then(|index| segments.get(index))
+                    .map(|(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }));
+                let next = segments
+                    .get(segment_index + 1)
+                    .map(|(start_ms, end_ms)| json!({ "start_ms": start_ms, "end_ms": end_ms }));
+                let (asset, location, unit) = self.new_asset_and_unit_record(
+                    classification,
+                    "video_segment",
+                    "keyframe_image",
+                    &source_content_id,
+                    json!({
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "duration_ms": duration_ms,
+                    }),
+                    json!({
+                        "previous_segment": previous,
+                        "current_segment": {
                             "start_ms": start_ms,
                             "end_ms": end_ms,
-                            "duration_ms": duration_ms,
-                        }),
-                        json!({
-                            "previous_segment": previous,
-                            "current_segment": {
-                                "start_ms": start_ms,
-                                "end_ms": end_ms,
-                            },
-                            "next_segment": next,
-                            "total_segments": segments.len(),
-                            "source_path": classification.normalized_path,
-                            "source_type": classification.source_type,
-                            "duration_ms": duration_ms,
-                        }),
-                    )
-                })
-                .collect();
+                        },
+                        "next_segment": next,
+                        "total_segments": segments.len(),
+                        "source_uri": file_source_uri(&classification.normalized_path),
+                        "source_type": classification.source_type,
+                        "duration_ms": duration_ms,
+                    }),
+                );
+                source_asset_locations.push(location);
+                assets.push(asset);
+                units.push(unit);
+            }
+            return (contents, source_asset_locations, assets, units);
         }
 
-        vec![self.new_visual_unit_record(
+        let (asset, location, unit) = self.new_asset_and_reused_unit_record(
             classification,
+            &source_content_id,
             json!({
-                "path": classification.normalized_path,
+                "source_uri": file_source_uri(&classification.normalized_path),
             }),
             json!({
                 "source_type": classification.source_type,
-                "source_path": classification.normalized_path,
+                "source_uri": file_source_uri(&classification.normalized_path),
             }),
-        )]
+        );
+        source_asset_locations.push(location);
+        assets.push(asset);
+        units.push(unit);
+        (contents, source_asset_locations, assets, units)
     }
 
-    pub(crate) fn new_visual_unit_record(
+    fn new_content_record(&mut self, source_path: &str) -> ContentRecord {
+        let metadata = fs::metadata(source_path).ok();
+        ContentRecord {
+            id: self.next_content_id(),
+            size_bytes: metadata.as_ref().map(|metadata| metadata.len()),
+            fast_fingerprint: fast_file_fingerprint(source_path).ok(),
+            sha256: None,
+            created_at_ms: current_unix_ms(),
+        }
+    }
+
+    fn find_completed_source_content(
+        &self,
+        library_id: Option<&str>,
+        source_path: &str,
+    ) -> Option<ContentRecord> {
+        let _ = library_id?;
+        let metadata = fs::metadata(source_path).ok()?;
+        let fast_fingerprint = fast_file_fingerprint(source_path).ok()?;
+        self.libraries.values().find_map(|library| {
+            library
+                .contents
+                .values()
+                .find(|content| {
+                    content.size_bytes == Some(metadata.len())
+                        && content.fast_fingerprint.as_deref() == Some(fast_fingerprint.as_str())
+                        && library
+                            .content_e2e_index_states
+                            .values()
+                            .any(|state| state.content_id == content.id)
+                })
+                .cloned()
+        })
+    }
+
+    fn reused_locations_for_completed_content(
+        &self,
+        library_id: Option<&str>,
+        classification: &PathClassification,
+        source_content_id: &str,
+    ) -> Option<(Vec<SourceAssetLocationRecord>, Vec<AssetRecord>)> {
+        let _ = library_id?;
+        let assets = self
+            .libraries
+            .values()
+            .flat_map(|library| library.assets.values())
+            .filter(|asset| asset.source_content_id == source_content_id)
+            .map(|asset| (asset.id.clone(), asset.clone()))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect::<Vec<_>>();
+        if assets.is_empty() {
+            return None;
+        }
+
+        let locations = assets
+            .iter()
+            .map(|asset| SourceAssetLocationRecord {
+                id: SourceAssetLocationRecord::key(&classification.source_id, &asset.id),
+                source_id: classification.source_id.clone(),
+                asset_id: asset.id.clone(),
+                locator: asset.locator.clone(),
+                visibility: ACTIVE_INDEX_VISIBILITY.to_string(),
+            })
+            .collect();
+        Some((locations, assets))
+    }
+
+    fn new_asset_and_reused_unit_record(
         &mut self,
         classification: &PathClassification,
+        content_id: &str,
         locator: Value,
         neighbor_context: Value,
-    ) -> VisualUnitRecord {
-        let point_id = self.next_visual_unit_seq + 1;
-        let visual_unit_id = self.next_visual_unit_id();
-
-        VisualUnitRecord {
-            id: visual_unit_id,
+    ) -> (AssetRecord, SourceAssetLocationRecord, UnitRecord) {
+        let asset_id = self.next_asset_id();
+        let unit_id = self.next_unit_id();
+        let point_id = self.next_unit_seq;
+        let asset = AssetRecord {
+            id: asset_id.clone(),
+            source_id: classification.source_id.clone(),
+            content_id: content_id.to_string(),
+            source_path: classification.normalized_path.clone(),
+            source_type: classification.source_type.clone(),
+            source_content_id: content_id.to_string(),
+            asset_type: classification.kind.clone(),
+            locator: locator.clone(),
+            derivation_signature: "source_asset:v1".to_string(),
+            neighbor_context: neighbor_context.clone(),
+            unit_ids: vec![unit_id.clone()],
+        };
+        let location = SourceAssetLocationRecord {
+            id: SourceAssetLocationRecord::key(&classification.source_id, &asset_id),
+            source_id: classification.source_id.clone(),
+            asset_id: asset_id.clone(),
+            locator: locator.clone(),
+            visibility: ACTIVE_INDEX_VISIBILITY.to_string(),
+        };
+        let unit = UnitRecord {
+            id: unit_id.clone(),
+            asset_id: asset_id.clone(),
+            content_id: content_id.to_string(),
             point_id,
             source_id: classification.source_id.clone(),
             source_path: classification.normalized_path.clone(),
             source_type: classification.source_type.clone(),
-            kind: classification.kind.clone(),
+            asset_type: classification.kind.clone(),
+            unit_type: classification.kind.clone(),
+            derivation_signature: "source_unit:v1".to_string(),
             locator,
             neighbor_context,
-        }
+        };
+        (asset, location, unit)
+    }
+
+    pub(crate) fn new_asset_and_unit_record(
+        &mut self,
+        classification: &PathClassification,
+        asset_type: &str,
+        unit_type: &str,
+        source_content_id: &str,
+        locator: Value,
+        neighbor_context: Value,
+    ) -> (AssetRecord, SourceAssetLocationRecord, UnitRecord) {
+        let asset_id = self.next_asset_id();
+        let unit_id = self.next_unit_id();
+        let point_id = self.next_unit_seq;
+        let asset = AssetRecord {
+            id: asset_id.clone(),
+            source_id: classification.source_id.clone(),
+            content_id: source_content_id.to_string(),
+            source_path: classification.normalized_path.clone(),
+            source_type: classification.source_type.clone(),
+            source_content_id: source_content_id.to_string(),
+            asset_type: asset_type.to_string(),
+            locator: locator.clone(),
+            derivation_signature: format!("{asset_type}:v1"),
+            neighbor_context: neighbor_context.clone(),
+            unit_ids: vec![unit_id.clone()],
+        };
+        let location = SourceAssetLocationRecord {
+            id: SourceAssetLocationRecord::key(&classification.source_id, &asset_id),
+            source_id: classification.source_id.clone(),
+            asset_id: asset_id.clone(),
+            locator: locator.clone(),
+            visibility: ACTIVE_INDEX_VISIBILITY.to_string(),
+        };
+        let unit = UnitRecord {
+            id: unit_id.clone(),
+            asset_id: asset_id.clone(),
+            content_id: source_content_id.to_string(),
+            point_id,
+            source_id: classification.source_id.clone(),
+            source_path: classification.normalized_path.clone(),
+            source_type: classification.source_type.clone(),
+            asset_type: asset_type.to_string(),
+            unit_type: unit_type.to_string(),
+            derivation_signature: format!("{unit_type}:v1"),
+            locator: locator.clone(),
+            neighbor_context: neighbor_context.clone(),
+        };
+        (asset, location, unit)
     }
 }
 
@@ -1320,8 +1480,42 @@ fn accepted_item_count(library: &LibraryRecord) -> usize {
         .sources
         .values()
         .filter(|source| source.status == "active")
-        .map(|source| source.visual_unit_ids.len())
+        .map(|source| source.asset_ids.len())
         .sum()
+}
+
+pub(crate) fn file_source_uri(path: &str) -> String {
+    if path.starts_with("file://") {
+        return path.to_string();
+    }
+    format!("file://{path}")
+}
+
+fn fast_file_fingerprint(path: &str) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+
+    const SAMPLE_BYTES: usize = 64 * 1024;
+
+    let metadata = fs::metadata(path)?;
+    let size = metadata.len();
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(size.to_le_bytes());
+
+    let mut head = vec![0_u8; SAMPLE_BYTES.min(size as usize)];
+    let head_len = file.read(&mut head)?;
+    hasher.update(&head[..head_len]);
+
+    if size > SAMPLE_BYTES as u64 {
+        let tail_len = SAMPLE_BYTES.min(size as usize);
+        file.seek(SeekFrom::End(-(tail_len as i64)))?;
+        let mut tail = vec![0_u8; tail_len];
+        let read_len = file.read(&mut tail)?;
+        hasher.update(&tail[..read_len]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn deleted_library_snapshot(library: &LibraryRecord) -> LibrarySnapshot {
@@ -1338,14 +1532,18 @@ fn deleted_library_snapshot(library: &LibraryRecord) -> LibrarySnapshot {
     }
 }
 
-fn import_content_type_matches_visual_unit(content_type: &str, visual_unit_kind: &str) -> bool {
+fn import_content_type_matches_asset(content_type: &str, asset_type: &str) -> bool {
     match content_type {
-        "image" => visual_unit_kind == "image",
-        "document" => visual_unit_kind == "document_page",
-        "video" => visual_unit_kind == "video_segment",
-        "text" => visual_unit_kind == "text",
+        "image" => asset_type == "image",
+        "document" => asset_type == "document_page",
+        "video" => asset_type == "video_segment",
+        "text" => asset_type == "text",
         _ => false,
     }
+}
+
+fn source_media_type(source_type: &str, source_path: &str) -> &'static str {
+    crate::query_assets::content_type_for_source_type_and_path(source_type, source_path)
 }
 
 fn normalize_library_id(value: &str) -> Result<String, ApiError> {

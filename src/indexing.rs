@@ -1,13 +1,13 @@
 use crate::{
     api::{ApiError, SearchResultItem, TextSearchData},
     model::{
-        PreparedImportVectorSpaceBatch, PreparedSourceActionVectorSpaceBatch,
-        ResolvedExecutionModelSelection, SearchPlan, SearchTimeRangeFilter,
+        ResolvedExecutionModelSelection, SearchPlan, SearchTimeRangeFilter, UnitIndexRecord,
+        UnitRecord,
     },
     provider::provider_context_payload,
     qdrant::*,
-    query_assets::visual_unit_preview_reference,
-    sidecar::{embed_documents, IndexingError, QueryEmbeddingResult},
+    query_assets::asset_preview_reference,
+    sidecar::{embed_documents, QueryEmbeddingResult},
     state::SharedState,
     DEFAULT_INDEX_EMBED_BATCH_ITEMS,
 };
@@ -15,384 +15,101 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
 
-pub(crate) async fn index_visual_units(
-    library_id: &str,
-    prepared: &PreparedImportVectorSpaceBatch,
+pub(crate) async fn index_units_into_active_namespace(
+    vector_space_id: &str,
+    units: &[UnitRecord],
     resolved_model: &ResolvedExecutionModelSelection,
     state: SharedState,
     job_id: &str,
-) -> Result<usize, IndexingError> {
-    if prepared.visual_units.is_empty() {
-        return Ok(0);
-    }
-    let batch_items = index_embed_batch_items();
-    let total_batches = batch_count(prepared.visual_units.len(), batch_items);
-    let progress_total = prepared.visual_units.len();
-    let mut completed_visual_units = 0_usize;
-    let stage_collection_name =
-        staging_vector_space_collection_name(library_id, &resolved_model.vector_space_id, job_id);
-    let write_plan = resolve_qdrant_namespace_write_plan(
-        &stable_vector_space_name(library_id, &resolved_model.vector_space_id),
-        &stage_collection_name,
-        !prepared.had_existing_index,
-    )
-    .await
-    .map_err(|message| IndexingError {
-        phase: "stage_write",
-        message,
-    })?;
-    let mut stage_initialized = false;
-
-    if matches!(
-        write_plan.stage_strategy,
-        StageCollectionStrategy::CloneFromActive { .. }
-    ) {
-        create_qdrant_stage_collection(&write_plan, None)
-            .await
-            .map_err(|message| IndexingError {
-                phase: "stage_write",
-                message,
-            })?;
-        stage_initialized = true;
-    }
-
-    if stage_initialized && !prepared.stale_point_ids.is_empty() {
-        {
-            let mut state = state.write().await;
-            state.update_job_progress_snapshot(
-                job_id,
-                "running",
-                "stage_write",
-                0,
-                progress_total,
-                "visual_unit",
-                format!(
-                    "Deleting {} stale point(s) from staged vector-space storage.",
-                    prepared.stale_point_ids.len()
-                ),
-            );
-        }
-
-        if let Err(message) =
-            delete_qdrant_points(&stage_collection_name, &prepared.stale_point_ids).await
-        {
-            best_effort_delete_qdrant_collection(&stage_collection_name).await;
-            return Err(IndexingError {
-                phase: "stage_write",
-                message,
-            });
-        }
-    }
-
-    for (batch_index, visual_unit_batch) in prepared.visual_units.chunks(batch_items).enumerate() {
-        {
-            let mut state = state.write().await;
-            state.update_job_progress_snapshot(
-                job_id,
-                "running",
-                "encode",
-                completed_visual_units,
-                progress_total,
-                "visual_unit",
-                format!(
-                    "Encoding batch {}/{} ({} visual unit(s)) for staged vector-space indexing.",
-                    batch_index + 1,
-                    total_batches,
-                    visual_unit_batch.len()
-                ),
-            );
-        }
-
-        let embeddings = match embed_documents(
-            visual_unit_batch,
-            Some(provider_context_payload(resolved_model)),
-        )
-        .await
-        {
-            Ok(embeddings) => embeddings,
-            Err(error) => {
-                if stage_initialized {
-                    best_effort_delete_qdrant_collection(&stage_collection_name).await;
-                }
-                return Err(error);
-            }
-        };
-
-        {
-            let mut state = state.write().await;
-            state.update_job_progress_snapshot(
-                job_id,
-                "running",
-                "stage_write",
-                completed_visual_units,
-                progress_total,
-                "visual_unit",
-                format!(
-                    "Writing batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
-                    batch_index + 1,
-                    total_batches,
-                    visual_unit_batch.len()
-                ),
-            );
-        }
-
-        if !stage_initialized {
-            let vector_size = embeddings
-                .first()
-                .and_then(|embedding| embedding.vectors.first())
-                .map(Vec::len)
-                .unwrap_or_default();
-            if let Err(message) =
-                create_qdrant_stage_collection(&write_plan, Some(vector_size)).await
-            {
-                return Err(IndexingError {
-                    phase: "stage_write",
-                    message,
-                });
-            }
-            stage_initialized = true;
-        }
-
-        if let Err(message) =
-            upsert_qdrant_points(&stage_collection_name, visual_unit_batch, &embeddings).await
-        {
-            best_effort_delete_qdrant_collection(&stage_collection_name).await;
-            return Err(IndexingError {
-                phase: "stage_write",
-                message,
-            });
-        }
-
-        completed_visual_units += visual_unit_batch.len();
-        {
-            let mut state = state.write().await;
-            state.update_job_progress_snapshot(
-                job_id,
-                "running",
-                "stage_write",
-                completed_visual_units,
-                progress_total,
-                "visual_unit",
-                format!(
-                    "Wrote batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
-                    batch_index + 1,
-                    total_batches,
-                    visual_unit_batch.len()
-                ),
-            );
-        }
-    }
-
-    if !stage_initialized {
-        return Err(IndexingError {
-            phase: "stage_write",
-            message: "No staged Qdrant collection was created for the import job.".to_string(),
-        });
-    }
-
-    if let Err(message) = validate_qdrant_collection(&stage_collection_name).await {
-        best_effort_delete_qdrant_collection(&stage_collection_name).await;
-        return Err(IndexingError {
-            phase: "stage_write",
-            message,
-        });
-    }
-
-    {
-        let mut state = state.write().await;
-        state.update_job_progress_snapshot(
-            job_id,
-            "running",
-            "activated",
-            completed_visual_units,
-            progress_total,
-            "visual_unit",
-            "Activating staged vector-space storage.",
-        );
-    }
-
-    if let Err(message) = switch_qdrant_active_alias(&write_plan).await {
-        best_effort_delete_qdrant_collection(&stage_collection_name).await;
-        return Err(IndexingError {
-            phase: "activated",
-            message,
-        });
-    }
-    best_effort_cleanup_retired_stage_collections(&write_plan).await;
-    Ok(completed_visual_units)
-}
-
-pub(crate) async fn index_source_action_visual_units(
-    library_id: &str,
-    action: &str,
-    prepared: &PreparedSourceActionVectorSpaceBatch,
-    resolved_model: &ResolvedExecutionModelSelection,
-    state: SharedState,
-    job_id: &str,
+    action_label: &str,
 ) -> Result<usize, String> {
+    if units.is_empty() {
+        return Ok(0);
+    }
+
     let batch_items = index_embed_batch_items();
-    let total_batches = batch_count(prepared.visual_units_to_index.len(), batch_items);
-    let progress_total = prepared.visual_units_to_index.len();
-    let mut completed_visual_units = 0_usize;
-    let stage_collection_name =
-        staging_vector_space_collection_name(library_id, &resolved_model.vector_space_id, job_id);
-    let write_plan = resolve_qdrant_namespace_write_plan(
-        &stable_vector_space_name(library_id, &resolved_model.vector_space_id),
-        &stage_collection_name,
-        !prepared.had_existing_index || prepared.can_rebuild_from_scratch,
-    )
-    .await?;
-    let mut stage_initialized = false;
+    let total_batches = batch_count(units.len(), batch_items);
+    let progress_total = units.len();
+    let mut completed_units = 0_usize;
+    let mut collection_name = stable_vector_space_name(vector_space_id);
+    let mut namespace_ready = false;
 
-    if matches!(
-        write_plan.stage_strategy,
-        StageCollectionStrategy::CloneFromActive { .. }
-    ) {
-        create_qdrant_stage_collection(&write_plan, None).await?;
-        stage_initialized = true;
-    }
-
-    if stage_initialized && !prepared.stale_point_ids.is_empty() {
-        {
-            let mut state = state.write().await;
-            state.update_job_progress_snapshot(
-                job_id,
-                "running",
-                "stage_write",
-                0,
-                progress_total,
-                "visual_unit",
-                format!(
-                    "Deleting {} stale point(s) from staged vector-space storage.",
-                    prepared.stale_point_ids.len()
-                ),
-            );
-        }
-        if let Err(message) =
-            delete_qdrant_points(&stage_collection_name, &prepared.stale_point_ids).await
-        {
-            best_effort_delete_qdrant_collection(&stage_collection_name).await;
-            return Err(message);
-        }
-    }
-
-    for (batch_index, visual_unit_batch) in prepared
-        .visual_units_to_index
-        .chunks(batch_items)
-        .enumerate()
-    {
+    for (batch_index, unit_batch) in units.chunks(batch_items).enumerate() {
         {
             let mut state = state.write().await;
             state.update_job_progress_snapshot(
                 job_id,
                 "running",
                 "encode",
-                completed_visual_units,
+                completed_units,
                 progress_total,
-                "visual_unit",
+                "unit",
                 format!(
-                    "Encoding batch {}/{} ({} visual unit(s)) for {}.",
+                    "Encoding source-level batch {}/{} ({} unit(s)) for {}.",
                     batch_index + 1,
                     total_batches,
-                    visual_unit_batch.len(),
-                    action,
+                    unit_batch.len(),
+                    action_label,
                 ),
             );
         }
 
-        let embeddings = match embed_documents(
-            visual_unit_batch,
-            Some(provider_context_payload(resolved_model)),
-        )
-        .await
-        {
-            Ok(embeddings) => embeddings,
-            Err(error) => {
-                if stage_initialized {
-                    best_effort_delete_qdrant_collection(&stage_collection_name).await;
-                }
-                return Err(error.message);
-            }
-        };
+        let embeddings =
+            embed_documents(unit_batch, Some(provider_context_payload(resolved_model)))
+                .await
+                .map_err(|error| error.message)?;
 
-        {
-            let mut state = state.write().await;
-            state.update_job_progress_snapshot(
-                job_id,
-                "running",
-                "stage_write",
-                completed_visual_units,
-                progress_total,
-                "visual_unit",
-                format!(
-                    "Writing batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
-                    batch_index + 1,
-                    total_batches,
-                    visual_unit_batch.len()
-                ),
-            );
-        }
-
-        if !stage_initialized {
+        if !namespace_ready {
             let vector_size = embeddings
                 .first()
                 .and_then(|embedding| embedding.vectors.first())
                 .map(Vec::len)
                 .unwrap_or_default();
-            create_qdrant_stage_collection(&write_plan, Some(vector_size)).await?;
-            stage_initialized = true;
+            collection_name = ensure_active_qdrant_namespace(vector_space_id, vector_size).await?;
+            namespace_ready = true;
         }
 
-        if let Err(message) =
-            upsert_qdrant_points(&stage_collection_name, visual_unit_batch, &embeddings).await
-        {
-            best_effort_delete_qdrant_collection(&stage_collection_name).await;
-            return Err(message);
-        }
-
-        completed_visual_units += visual_unit_batch.len();
         {
             let mut state = state.write().await;
             state.update_job_progress_snapshot(
                 job_id,
                 "running",
-                "stage_write",
-                completed_visual_units,
+                "vector_write",
+                completed_units,
                 progress_total,
-                "visual_unit",
+                "unit",
                 format!(
-                    "Wrote batch {}/{} ({} visual unit(s)) into staged vector-space storage.",
+                    "Writing source-level batch {}/{} ({} unit(s)) into active vector-space storage.",
                     batch_index + 1,
                     total_batches,
-                    visual_unit_batch.len()
+                    unit_batch.len()
+                ),
+            );
+        }
+
+        upsert_qdrant_points(&collection_name, unit_batch, &embeddings).await?;
+        completed_units += unit_batch.len();
+
+        {
+            let mut state = state.write().await;
+            state.update_job_progress_snapshot(
+                job_id,
+                "running",
+                "vector_write",
+                completed_units,
+                progress_total,
+                "unit",
+                format!(
+                    "Wrote source-level batch {}/{} ({} unit(s)) into active vector-space storage.",
+                    batch_index + 1,
+                    total_batches,
+                    unit_batch.len()
                 ),
             );
         }
     }
 
-    if !stage_initialized {
-        return Ok(0);
-    }
-
-    validate_qdrant_collection(&stage_collection_name).await?;
-    {
-        let mut state = state.write().await;
-        state.update_job_progress_snapshot(
-            job_id,
-            "running",
-            "activated",
-            completed_visual_units,
-            progress_total,
-            "visual_unit",
-            "Activating staged vector-space storage.",
-        );
-    }
-    if let Err(message) = switch_qdrant_active_alias(&write_plan).await {
-        best_effort_delete_qdrant_collection(&stage_collection_name).await;
-        return Err(message);
-    }
-    best_effort_cleanup_retired_stage_collections(&write_plan).await;
-    Ok(completed_visual_units)
+    Ok(completed_units)
 }
 
 pub(crate) fn index_embed_batch_items() -> usize {
@@ -429,16 +146,25 @@ pub(crate) fn build_search_response(
     let mut filtered_candidates = executed_groups
         .iter()
         .flat_map(|group| {
-            group.candidates.iter().filter_map(|point| {
-                point
-                    .payload
-                    .clone()
-                    .map(|payload| (point.score, group.library_id.clone(), payload))
-            })
+            group
+                .candidates
+                .iter()
+                .enumerate()
+                .filter_map(|(rank, point)| {
+                    point.payload.clone().map(|payload| {
+                        (
+                            point.score,
+                            group.vector_space_id.clone(),
+                            rank + 1,
+                            group.library_id.clone(),
+                            payload,
+                        )
+                    })
+                })
         })
         .into_iter()
-        .filter(|(_, library_id, payload)| {
-            search_payload_matches_filters(&plan, library_id, payload)
+        .filter(|(_, vector_space_id, _, library_id, payload)| {
+            search_payload_matches_filters(&plan, library_id, vector_space_id, payload)
         })
         .collect::<Vec<_>>();
     filtered_candidates.sort_by(|left, right| right.0.total_cmp(&left.0));
@@ -449,26 +175,47 @@ pub(crate) fn build_search_response(
         .skip(page_start)
         .take(plan.top_k)
         .enumerate()
-        .map(|(page_index, (score, library_id, payload))| {
-            let preview = visual_unit_preview_reference(
-                library_id,
-                &payload.visual_unit_id,
-                &payload.kind,
-                &payload.locator,
-            )?;
-            Ok(SearchResultItem {
-                library_id: library_id.clone(),
-                visual_unit_id: payload.visual_unit_id.clone(),
-                source_id: payload.source_id.clone(),
-                preview,
-                source_path: payload.source_path.clone(),
-                source_type: payload.source_type.clone(),
-                kind: payload.kind.clone(),
-                locator: payload.locator.clone(),
-                cursor: encode_search_cursor(page_start + page_index + 1),
-                score: Some(*score),
-            })
-        })
+        .map(
+            |(page_index, (score, vector_space_id, rank, library_id, payload))| {
+                let location = plan
+                    .asset_locations
+                    .get(&format!("{library_id}:{}", payload.asset_id))
+                    .ok_or_else(|| {
+                        ApiError::not_ready(
+                            "Search result references an asset without an active source location.",
+                            Some(json!({
+                                "library_id": library_id,
+                                "asset_id": payload.asset_id,
+                            })),
+                        )
+                    })?;
+                let preview = asset_preview_reference(
+                    library_id,
+                    &payload.asset_id,
+                    &payload.asset_type,
+                    &location.locator,
+                )?;
+                Ok(SearchResultItem {
+                    library_id: library_id.clone(),
+                    asset_id: payload.asset_id.clone(),
+                    asset_type: payload.asset_type.clone(),
+                    source_id: location.source_id.clone(),
+                    preview,
+                    source_uri: location.source_uri.clone(),
+                    source_type: location.source_type.clone(),
+                    locator: location.locator.clone(),
+                    matched_units: vec![crate::api::MatchedUnitEvidence {
+                        unit_id: payload.unit_id.clone(),
+                        unit_type: payload.unit_type.clone(),
+                        vector_space_id: vector_space_id.clone(),
+                        rank: *rank,
+                        raw_score: *score,
+                    }],
+                    cursor: encode_search_cursor(page_start + page_index + 1),
+                    score: Some(*score),
+                })
+            },
+        )
         .collect::<Result<Vec<_>, ApiError>>()?;
     let returned_result_count = results.len();
     let next_offset = page_start + returned_result_count;
@@ -484,12 +231,14 @@ pub(crate) fn build_search_response(
                 .flat_map(|group| {
                     group.candidates.iter().filter_map(|point| {
                         let payload = point.payload.as_ref()?;
-                        if !content_type_matches_visual_unit(&entry.content_type, &payload.kind) {
+                        if !content_type_matches_asset(&entry.content_type, &payload.asset_type) {
                             return None;
                         }
                         Some(json!({
                             "library_id": entry.library_id,
-                            "visual_unit_id": payload.visual_unit_id,
+                            "asset_id": payload.asset_id,
+                            "unit_id": payload.unit_id,
+                            "vector_space_id": group.vector_space_id,
                             "score": point.score,
                         }))
                     })
@@ -504,6 +253,20 @@ pub(crate) fn build_search_response(
         })
         .collect::<Vec<_>>();
     let mut vector_spaces = BTreeMap::new();
+    let prefilter = plan
+        .execution_groups
+        .iter()
+        .map(|group| {
+            json!({
+                "library_id": group.library_id,
+                "vector_space_id": group.vector_space_id,
+                "enabled": true,
+                "mode": "point_allow_list",
+                "candidate_point_count": group.eligible_point_ids.len(),
+                "pushed_fields": ["point_id"],
+            })
+        })
+        .collect::<Vec<_>>();
     for group in &plan.execution_groups {
         let selection = &group.resolved_model.summary;
         let entry = vector_spaces
@@ -535,6 +298,7 @@ pub(crate) fn build_search_response(
             "vector_type": "multi_vector_late_interaction",
             "content_types": content_types_debug,
             "vector_spaces": vector_spaces.into_values().collect::<Vec<_>>(),
+            "prefilter": prefilter,
             "query_vector_count": executed_groups
                 .iter()
                 .map(|group| group.query_embedding.vectors.len())
@@ -549,6 +313,7 @@ pub(crate) fn build_search_response(
 
 pub(crate) struct ExecutedSearchGroup {
     pub(crate) library_id: String,
+    pub(crate) vector_space_id: String,
     pub(crate) query_embedding: QueryEmbeddingResult,
     pub(crate) candidates: Vec<QdrantScoredPoint>,
 }
@@ -560,19 +325,25 @@ fn encode_search_cursor(offset: usize) -> String {
 fn search_payload_matches_filters(
     plan: &SearchPlan,
     library_id: &str,
+    vector_space_id: &str,
     payload: &QdrantPointPayload,
 ) -> bool {
-    plan.active_visual_unit_refs
-        .contains(&format!("{library_id}:{}", payload.visual_unit_id))
+    let scoped_asset_ref = format!("{library_id}:{}", payload.asset_id);
+    let Some(location) = plan.asset_locations.get(&scoped_asset_ref) else {
+        return false;
+    };
+    let unit_index_ref = UnitIndexRecord::key(&payload.unit_id, vector_space_id);
+    plan.active_asset_refs.contains(&scoped_asset_ref)
+        && plan.active_unit_index_refs.contains(&unit_index_ref)
         && plan
             .kind_filter
             .as_ref()
-            .map(|expected| expected.contains(&payload.kind))
+            .map(|expected| expected.contains(&payload.asset_type))
             .unwrap_or(true)
         && plan
             .source_type_filter
             .as_ref()
-            .map(|expected| expected.contains(&payload.source_type))
+            .map(|expected| expected.contains(&location.source_type))
             .unwrap_or(true)
         && plan
             .path_prefix_filter
@@ -580,12 +351,12 @@ fn search_payload_matches_filters(
             .map(|prefixes| {
                 prefixes
                     .iter()
-                    .any(|prefix| payload.source_path.starts_with(prefix))
+                    .any(|prefix| location.source_uri.starts_with(prefix))
             })
             .unwrap_or(true)
         && plan
             .time_range_filter
-            .map(|filter| payload_overlaps_time_range(&payload.locator, filter))
+            .map(|filter| payload_overlaps_time_range(&location.locator, filter))
             .unwrap_or(true)
 }
 
@@ -600,12 +371,12 @@ fn payload_overlaps_time_range(locator: &Value, filter: SearchTimeRangeFilter) -
     start_ms <= filter.end_ms && end_ms >= filter.start_ms
 }
 
-fn content_type_matches_visual_unit(content_type: &str, visual_unit_kind: &str) -> bool {
+fn content_type_matches_asset(content_type: &str, asset_type: &str) -> bool {
     match content_type {
-        "image" => visual_unit_kind == "image",
-        "document" => visual_unit_kind == "document_page",
-        "video" => visual_unit_kind == "video_segment",
-        "text" => visual_unit_kind == "text",
+        "image" => asset_type == "image",
+        "document" => asset_type == "document_page",
+        "video" => asset_type == "video_segment",
+        "text" => asset_type == "text",
         _ => false,
     }
 }

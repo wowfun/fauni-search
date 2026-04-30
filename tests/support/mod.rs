@@ -760,11 +760,18 @@ async fn qdrant_query_points(
         .collections
         .get(&resolved_name)
         .map(|collection| {
+            let allowed_ids = qdrant_allowed_point_ids(&payload);
             collection
                 .points
-                .values()
+                .iter()
+                .filter(|(point_id, _)| {
+                    allowed_ids
+                        .as_ref()
+                        .map(|ids| ids.contains(point_id))
+                        .unwrap_or(true)
+                })
                 .enumerate()
-                .map(|(index, point_payload)| {
+                .map(|(index, (_, point_payload))| {
                     json!({
                         "score": 1.0_f32 - (index as f32 * 0.1_f32),
                         "payload": point_payload,
@@ -787,6 +794,17 @@ async fn qdrant_query_points(
             }
         })),
     )
+}
+
+fn qdrant_allowed_point_ids(payload: &Value) -> Option<Vec<u64>> {
+    payload
+        .get("filter")
+        .and_then(|filter| filter.get("must"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|condition| condition.get("has_id").and_then(Value::as_array))
+        .map(|ids| ids.iter().filter_map(Value::as_u64).collect())
 }
 
 async fn qdrant_delete_points(

@@ -1,8 +1,8 @@
 use crate::api::{
-    ImportAcceptedItem, ImportPathsRequest, ImportRejectedItem, JobSnapshot,
-    ProviderConfigSnapshot, ResolvedContentModelSelectionPayload, ResolvedModelSelectionPayload,
-    SourceRootCoverageSummary, SourceRootLastAction, SourceRootRulesPayload,
-    UnsupportedContentTypeSnapshot, VisualUnitSnapshot, VisualUnitSummary,
+    AssetSnapshot, AssetSummary, ImportAcceptedItem, ImportPathsRequest, ImportRejectedItem,
+    JobSnapshot, ProviderConfigSnapshot, ResolvedContentModelSelectionPayload,
+    ResolvedModelSelectionPayload, SourceRootCoverageSummary, SourceRootLastAction,
+    SourceRootRulesPayload, UnitSummary, UnsupportedContentTypeSnapshot,
 };
 use crate::config::ContentTypeOverrideRecord;
 use serde::{Deserialize, Serialize};
@@ -56,7 +56,8 @@ pub(crate) struct ResolvedExecutionModelSelection {
 pub(crate) struct VectorSpaceExecutionGroup {
     pub(crate) library_id: String,
     pub(crate) vector_space_id: String,
-    pub(crate) active_visual_unit_count: usize,
+    pub(crate) active_unit_count: usize,
+    pub(crate) eligible_point_ids: BTreeSet<u64>,
     pub(crate) content_types: Vec<String>,
     pub(crate) resolved_model: ResolvedExecutionModelSelection,
 }
@@ -77,18 +78,69 @@ pub(crate) struct LibraryRecord {
     pub(crate) content_type_overrides: BTreeMap<String, ContentTypeOverrideRecord>,
     pub(crate) source_roots: BTreeMap<String, SourceRootRecord>,
     pub(crate) source_root_order: Vec<String>,
+    pub(crate) contents: BTreeMap<String, ContentRecord>,
     pub(crate) sources: BTreeMap<String, SourceRecord>,
     pub(crate) source_order: Vec<String>,
-    pub(crate) visual_units: BTreeMap<String, VisualUnitRecord>,
-    pub(crate) visual_unit_order: Vec<String>,
+    pub(crate) source_asset_locations: BTreeMap<String, SourceAssetLocationRecord>,
+    pub(crate) source_asset_location_order: Vec<String>,
+    pub(crate) assets: BTreeMap<String, AssetRecord>,
+    pub(crate) asset_order: Vec<String>,
+    pub(crate) units: BTreeMap<String, UnitRecord>,
+    pub(crate) unit_order: Vec<String>,
+    pub(crate) vector_spaces: BTreeMap<String, VectorSpaceRecord>,
+    pub(crate) unit_indexes: BTreeMap<String, UnitIndexRecord>,
+    pub(crate) content_e2e_index_states: BTreeMap<String, ContentE2eIndexStateRecord>,
     pub(crate) latest_job_id: Option<String>,
-    pub(crate) active_vector_spaces: BTreeSet<String>,
-    pub(crate) retired_vector_spaces: BTreeMap<String, RetiredVectorSpaceRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct RetiredVectorSpaceRecord {
-    pub(crate) retired_at_ms: u128,
+pub(crate) struct ContentRecord {
+    pub(crate) id: String,
+    pub(crate) size_bytes: Option<u64>,
+    pub(crate) fast_fingerprint: Option<String>,
+    pub(crate) sha256: Option<String>,
+    pub(crate) created_at_ms: u128,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct VectorSpaceRecord {
+    pub(crate) id: String,
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) model_version: String,
+    pub(crate) model_revision: Option<String>,
+    pub(crate) vector_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct UnitIndexRecord {
+    pub(crate) unit_id: String,
+    pub(crate) vector_space_id: String,
+    pub(crate) status: String,
+    pub(crate) visibility: String,
+    pub(crate) vector_ref: Option<Value>,
+    pub(crate) job_id: Option<String>,
+    pub(crate) error_summary: Option<String>,
+}
+
+impl UnitIndexRecord {
+    pub(crate) fn key(unit_id: &str, vector_space_id: &str) -> String {
+        format!("{unit_id}::{vector_space_id}")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ContentE2eIndexStateRecord {
+    pub(crate) content_id: String,
+    pub(crate) pipe_signature: String,
+    pub(crate) vector_space_id: String,
+    pub(crate) indexed_at_ms: u128,
+}
+
+impl ContentE2eIndexStateRecord {
+    pub(crate) fn key(content_id: &str, pipe_signature: &str, vector_space_id: &str) -> String {
+        format!("{content_id}::{pipe_signature}::{vector_space_id}")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -120,9 +172,12 @@ pub(crate) struct SourceRecord {
     pub(crate) id: String,
     pub(crate) source_root_id: Option<String>,
     pub(crate) source_root_path: Option<String>,
+    #[serde(default)]
     pub(crate) source_path: String,
+    pub(crate) source_uri: String,
     pub(crate) relative_path: Option<String>,
     pub(crate) source_type: String,
+    pub(crate) media_type: String,
     pub(crate) kind: String,
     pub(crate) status: String,
     pub(crate) status_reason: Option<String>,
@@ -130,40 +185,101 @@ pub(crate) struct SourceRecord {
     pub(crate) duration_ms: Option<u64>,
     pub(crate) observed_size_bytes: Option<u64>,
     pub(crate) observed_modified_at_ms: Option<u128>,
-    pub(crate) visual_unit_ids: Vec<String>,
+    pub(crate) source_content_id: String,
+    // Derived from SourceAssetLocation records for efficient in-memory traversal.
+    pub(crate) asset_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct VisualUnitRecord {
+pub(crate) struct SourceAssetLocationRecord {
     pub(crate) id: String,
-    pub(crate) point_id: u64,
     pub(crate) source_id: String,
-    pub(crate) source_path: String,
-    pub(crate) source_type: String,
-    pub(crate) kind: String,
+    pub(crate) asset_id: String,
     pub(crate) locator: Value,
-    pub(crate) neighbor_context: Value,
+    pub(crate) visibility: String,
 }
 
-impl VisualUnitRecord {
-    pub(crate) fn summary(&self) -> VisualUnitSummary {
-        VisualUnitSummary {
-            visual_unit_id: self.id.clone(),
-            source_id: self.source_id.clone(),
-            kind: self.kind.clone(),
-            source_type: self.source_type.clone(),
+impl SourceAssetLocationRecord {
+    pub(crate) fn key(source_id: &str, asset_id: &str) -> String {
+        format!("{source_id}::{asset_id}")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct AssetRecord {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) source_id: String,
+    #[serde(default)]
+    pub(crate) content_id: String,
+    #[serde(default)]
+    pub(crate) source_path: String,
+    #[serde(default)]
+    pub(crate) source_type: String,
+    pub(crate) source_content_id: String,
+    pub(crate) asset_type: String,
+    pub(crate) locator: Value,
+    pub(crate) derivation_signature: String,
+    pub(crate) neighbor_context: Value,
+    // Derived from Unit records for efficient in-memory traversal.
+    pub(crate) unit_ids: Vec<String>,
+}
+
+impl AssetRecord {
+    pub(crate) fn summary(&self, source_id: &str, source_type: &str) -> AssetSummary {
+        AssetSummary {
+            asset_id: self.id.clone(),
+            source_id: source_id.to_string(),
+            asset_type: self.asset_type.clone(),
+            source_type: source_type.to_string(),
             locator: self.locator.clone(),
         }
     }
 
-    pub(crate) fn snapshot(&self) -> VisualUnitSnapshot {
-        VisualUnitSnapshot {
-            visual_unit_id: self.id.clone(),
-            source_id: self.source_id.clone(),
-            kind: self.kind.clone(),
-            source_type: self.source_type.clone(),
-            source_path: self.source_path.clone(),
+    pub(crate) fn snapshot(
+        &self,
+        source_id: &str,
+        source_type: &str,
+        source_uri: &str,
+    ) -> AssetSnapshot {
+        AssetSnapshot {
+            asset_id: self.id.clone(),
+            source_id: source_id.to_string(),
+            asset_type: self.asset_type.clone(),
+            source_type: source_type.to_string(),
+            source_uri: source_uri.to_string(),
             locator: self.locator.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct UnitRecord {
+    pub(crate) id: String,
+    pub(crate) asset_id: String,
+    #[serde(default)]
+    pub(crate) content_id: String,
+    #[serde(default)]
+    pub(crate) point_id: u64,
+    #[serde(default)]
+    pub(crate) source_id: String,
+    #[serde(default)]
+    pub(crate) source_path: String,
+    #[serde(default)]
+    pub(crate) source_type: String,
+    #[serde(default)]
+    pub(crate) asset_type: String,
+    pub(crate) unit_type: String,
+    pub(crate) derivation_signature: String,
+    pub(crate) locator: Value,
+    pub(crate) neighbor_context: Value,
+}
+
+impl UnitRecord {
+    pub(crate) fn summary(&self) -> UnitSummary {
+        UnitSummary {
+            unit_id: self.id.clone(),
+            unit_type: self.unit_type.clone(),
         }
     }
 }
@@ -232,7 +348,7 @@ impl TempQueryAssetPruneSummary {
 #[derive(Clone, Debug)]
 pub(crate) enum ResolvedImageQueryInput {
     TempAsset(TempQueryAssetRecord),
-    LibraryVisualUnit(VisualUnitRecord),
+    LibraryAsset(AssetRecord),
 }
 
 #[derive(Clone, Debug)]
@@ -269,17 +385,18 @@ pub(crate) struct PreparedImport {
     pub(crate) request: ImportPathsRequest,
     pub(crate) accepted: Vec<ImportAcceptedItem>,
     pub(crate) rejected: Vec<ImportRejectedItem>,
+    pub(crate) contents: Vec<ContentRecord>,
     pub(crate) sources: Vec<SourceRecord>,
-    pub(crate) visual_units: Vec<VisualUnitRecord>,
+    pub(crate) source_asset_locations: Vec<SourceAssetLocationRecord>,
+    pub(crate) assets: Vec<AssetRecord>,
+    pub(crate) units: Vec<UnitRecord>,
     pub(crate) vector_space_batches: Vec<PreparedImportVectorSpaceBatch>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedImportVectorSpaceBatch {
     pub(crate) vector_space_id: String,
-    pub(crate) had_existing_index: bool,
-    pub(crate) stale_point_ids: Vec<u64>,
-    pub(crate) visual_units: Vec<VisualUnitRecord>,
+    pub(crate) units: Vec<UnitRecord>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -312,16 +429,8 @@ impl SourceActionKind {
         }
     }
 
-    pub(crate) fn is_rescan(self) -> bool {
-        matches!(self, Self::Rescan)
-    }
-
     pub(crate) fn requires_full_scan(self) -> bool {
         matches!(self, Self::Rescan | Self::Rebuild)
-    }
-
-    pub(crate) fn rebuilds_from_scratch(self) -> bool {
-        matches!(self, Self::Rebuild)
     }
 }
 
@@ -372,10 +481,7 @@ pub(crate) struct PreparedSourceAction {
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedSourceActionVectorSpaceBatch {
     pub(crate) vector_space_id: String,
-    pub(crate) can_rebuild_from_scratch: bool,
-    pub(crate) had_existing_index: bool,
-    pub(crate) stale_point_ids: Vec<u64>,
-    pub(crate) visual_units_to_index: Vec<VisualUnitRecord>,
+    pub(crate) units_to_index: Vec<UnitRecord>,
 }
 
 pub(crate) struct PreparedSourceRootUpdate {
@@ -387,16 +493,11 @@ pub(crate) struct PreparedSourceRootUpdate {
 }
 
 pub(crate) struct PreparedSourceMutation {
+    pub(crate) contents: Vec<ContentRecord>,
     pub(crate) source: SourceRecord,
-    pub(crate) visual_units: Vec<VisualUnitRecord>,
-}
-
-impl PreparedSourceAction {
-    pub(crate) fn requires_index_update(&self) -> bool {
-        self.vector_space_batches.iter().any(|batch| {
-            !batch.visual_units_to_index.is_empty() || !batch.stale_point_ids.is_empty()
-        })
-    }
+    pub(crate) source_asset_locations: Vec<SourceAssetLocationRecord>,
+    pub(crate) assets: Vec<AssetRecord>,
+    pub(crate) units: Vec<UnitRecord>,
 }
 
 #[derive(Default)]
@@ -407,7 +508,7 @@ pub(crate) struct SourceActionSummary {
     pub(crate) activated_sources: usize,
     pub(crate) invalidated_sources: usize,
     pub(crate) out_of_scope_sources: usize,
-    pub(crate) indexing_visual_units: usize,
+    pub(crate) indexing_units: usize,
     pub(crate) degraded_roots: usize,
 }
 
@@ -423,7 +524,7 @@ pub(crate) struct SourceActionJobOutcome {
 impl SourceActionJobOutcome {
     pub(crate) fn completed(prepared: &PreparedSourceAction) -> Self {
         let summary = format!(
-            "{} {} source root(s); observed {} file(s), matched {} file(s), activated {}, invalidated {}, out_of_scope {}, indexed {} visual unit(s).",
+            "{} {} source root(s); observed {} file(s), matched {} file(s), activated {}, invalidated {}, out_of_scope {}, indexed {} unit(s).",
             prepared.action.as_str(),
             prepared.summary.scanned_roots,
             prepared.summary.observed_files,
@@ -431,7 +532,7 @@ impl SourceActionJobOutcome {
             prepared.summary.activated_sources,
             prepared.summary.invalidated_sources,
             prepared.summary.out_of_scope_sources,
-            prepared.summary.indexing_visual_units,
+            prepared.summary.indexing_units,
         );
         Self {
             status: "completed",
@@ -440,9 +541,7 @@ impl SourceActionJobOutcome {
             activated_vector_spaces: prepared
                 .vector_space_batches
                 .iter()
-                .filter(|batch| {
-                    !batch.visual_units_to_index.is_empty() || !batch.stale_point_ids.is_empty()
-                })
+                .filter(|batch| !batch.units_to_index.is_empty())
                 .map(|batch| batch.vector_space_id.clone())
                 .collect(),
             apply_structured_changes: true,
@@ -641,10 +740,20 @@ pub(crate) struct SearchPlan {
     pub(crate) time_range_filter: Option<SearchTimeRangeFilter>,
     pub(crate) target_content_types: Vec<String>,
     pub(crate) unsupported_content_types: Vec<UnsupportedContentTypeSnapshot>,
-    pub(crate) active_visual_unit_refs: BTreeSet<String>,
+    pub(crate) active_asset_refs: BTreeSet<String>,
+    pub(crate) active_unit_index_refs: BTreeSet<String>,
+    pub(crate) asset_locations: BTreeMap<String, SearchPlanAssetLocation>,
     pub(crate) execution_groups: Vec<VectorSpaceExecutionGroup>,
     pub(crate) debug_content_types: Vec<SearchContentTypeDebugEntry>,
     pub(crate) debug: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SearchPlanAssetLocation {
+    pub(crate) source_id: String,
+    pub(crate) source_uri: String,
+    pub(crate) source_type: String,
+    pub(crate) locator: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

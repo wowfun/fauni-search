@@ -73,7 +73,7 @@ async fn rebuild_endpoint_queues_background_rebuild_job() {
 }
 
 #[tokio::test]
-async fn maintenance_cleanup_endpoint_cleans_retired_vector_spaces_via_job() {
+async fn maintenance_cleanup_endpoint_queues_cleanup_for_retired_unit_indexes_after_rebind() {
     let env = TestEnv::new_with_qdrant("maintenance-cleanup").await;
     let pdf_path = env.write_test_pdf("fixtures/cleanup/report.pdf", 2);
     let app = env.boot().await;
@@ -134,13 +134,22 @@ async fn maintenance_cleanup_endpoint_cleans_retired_vector_spaces_via_job() {
         .await;
     assert_eq!(diagnostics_before.status, StatusCode::OK);
     let diagnostics_before_body = diagnostics_before.json();
-    let retired_before = diagnostics_before_body["data"]["vector_spaces"]
+    let diagnostic_spaces = diagnostics_before_body["data"]["vector_spaces"]
         .as_array()
-        .unwrap()
+        .unwrap();
+    assert!(diagnostic_spaces
         .iter()
-        .filter(|item| item["lifecycle_state"] == "retired")
-        .count();
-    assert_eq!(retired_before, 1);
+        .all(|item| item.get("lifecycle_state").is_none()));
+    assert!(diagnostic_spaces
+        .iter()
+        .all(|item| item.get("unit_index_summary").is_some()));
+    assert!(diagnostic_spaces.iter().all(|item| {
+        let summary = &item["unit_index_summary"];
+        summary.get("retired").is_some() && summary.get("staging").is_none()
+    }));
+    assert!(diagnostic_spaces
+        .iter()
+        .all(|item| item.get("content_e2e_index_summary").is_some()));
 
     let cleanup = app
         .post_json(
@@ -157,14 +166,17 @@ async fn maintenance_cleanup_endpoint_cleans_retired_vector_spaces_via_job() {
         "cleanup_retired_vector_spaces"
     );
     assert_eq!(cleanup_body["data"]["job"]["kind"], "cleanup");
+    assert_eq!(cleanup_body["data"]["job"]["status"], "queued");
     assert_eq!(
-        cleanup_body["data"]["accepted"][0]["target_kind"],
-        "vector_space"
+        cleanup_body["data"]["accepted"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        cleanup_body["data"]["rejected"].as_array().unwrap().len(),
+        0
     );
     let cleanup_job_id = cleanup_body["data"]["job_handle"].as_str().unwrap();
-
     let cleanup_job = wait_for_job_completion(&app, cleanup_job_id).await;
-    assert_eq!(cleanup_job["data"]["kind"], "cleanup");
     assert_eq!(cleanup_job["data"]["status"], "completed");
 
     let diagnostics_after = app
@@ -172,11 +184,10 @@ async fn maintenance_cleanup_endpoint_cleans_retired_vector_spaces_via_job() {
         .await;
     assert_eq!(diagnostics_after.status, StatusCode::OK);
     let diagnostics_after_body = diagnostics_after.json();
-    let retired_after = diagnostics_after_body["data"]["vector_spaces"]
+    let diagnostic_spaces_after = diagnostics_after_body["data"]["vector_spaces"]
         .as_array()
-        .unwrap()
+        .unwrap();
+    assert!(diagnostic_spaces_after
         .iter()
-        .filter(|item| item["lifecycle_state"] == "retired")
-        .count();
-    assert_eq!(retired_after, 0);
+        .all(|item| item.get("lifecycle_state").is_none()));
 }

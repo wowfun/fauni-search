@@ -36,7 +36,7 @@ async fn openapi_api_json_exposes_public_app_contract() {
         "/libraries",
         "/libraries/{library_id}",
         "/libraries/{library_id}/query-assets/images",
-        "/libraries/{library_id}/visual-units/{visual_unit_id}/preview",
+        "/libraries/{library_id}/assets/{asset_id}/preview",
         "/jobs",
         "/jobs/{job_id}/retry",
         "/search/text",
@@ -70,8 +70,8 @@ async fn openapi_api_json_exposes_public_app_contract() {
         "sidecar /capabilities must not be in the public App OpenAPI contract"
     );
 
-    let preview_response = &paths["/libraries/{library_id}/visual-units/{visual_unit_id}/preview"]
-        ["get"]["responses"]["200"];
+    let preview_response =
+        &paths["/libraries/{library_id}/assets/{asset_id}/preview"]["get"]["responses"]["200"];
     let preview_response_json =
         serde_json::to_string(preview_response).expect("preview response should serialize");
     assert!(

@@ -9,6 +9,7 @@ use crate::config::{
     ProviderConfigFileRecord, ProviderModelConfigRecord,
 };
 use crate::*;
+use crate::{ACTIVE_INDEX_VISIBILITY, RETIRED_INDEX_VISIBILITY};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -739,62 +740,43 @@ impl AppState {
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
         let resolved = self.get_resolved_content_models(library_id).await?;
 
-        let mut active_vector_spaces = BTreeMap::<String, VectorSpaceDiagnosticSnapshot>::new();
+        let mut vector_spaces = BTreeMap::<String, VectorSpaceDiagnosticSnapshot>::new();
         for selection in resolved.content_types.into_values() {
             let Some(vector_space_id) = selection.vector_space_id.clone() else {
                 continue;
             };
-            if !library.active_vector_spaces.contains(&vector_space_id) {
-                continue;
-            }
 
-            let entry = active_vector_spaces
+            let unit_index_summary =
+                unit_index_summary_for_vector_space(&library, &vector_space_id);
+            let content_e2e_index_summary =
+                content_e2e_index_summary_for_vector_space(&library, &vector_space_id);
+            let entry = vector_spaces
                 .entry(vector_space_id.clone())
                 .or_insert_with(|| VectorSpaceDiagnosticSnapshot {
                     vector_space_id: vector_space_id.clone(),
-                    lifecycle_state: "active".to_string(),
                     content_types: Vec::new(),
+                    unit_index_summary,
+                    content_e2e_index_summary,
                     provider_id: Some(selection.provider_id.clone()),
                     provider_kind: Some(selection.provider_kind.clone()),
                     model_id: Some(selection.model_id.clone()),
                     model_version: Some(selection.model_version.clone()),
                     vector_type: Some(selection.vector_type.clone()),
-                    retired_at_ms: None,
+                    cleanup_summary: None,
                 });
             entry.content_types.push(selection.content_type);
         }
 
-        let mut vector_spaces = active_vector_spaces.into_values().collect::<Vec<_>>();
-        for snapshot in &mut vector_spaces {
+        let mut snapshots = vector_spaces.into_values().collect::<Vec<_>>();
+        for snapshot in &mut snapshots {
             snapshot.content_types.sort();
             snapshot.content_types.dedup();
         }
+        snapshots.sort_by(|left, right| left.vector_space_id.cmp(&right.vector_space_id));
 
-        let mut retired_vector_spaces = library
-            .retired_vector_spaces
-            .into_iter()
-            .filter(|(vector_space_id, _)| !library.active_vector_spaces.contains(vector_space_id))
-            .map(|(vector_space_id, retired)| VectorSpaceDiagnosticSnapshot {
-                vector_space_id,
-                lifecycle_state: "retired".to_string(),
-                content_types: Vec::new(),
-                provider_id: None,
-                provider_kind: None,
-                model_id: None,
-                model_version: None,
-                vector_type: None,
-                retired_at_ms: Some(retired.retired_at_ms),
-            })
-            .collect::<Vec<_>>();
-
-        vector_spaces.append(&mut retired_vector_spaces);
-        vector_spaces.sort_by(|left, right| {
-            left.lifecycle_state
-                .cmp(&right.lifecycle_state)
-                .then_with(|| left.vector_space_id.cmp(&right.vector_space_id))
-        });
-
-        Ok(VectorSpaceDiagnosticsData { vector_spaces })
+        Ok(VectorSpaceDiagnosticsData {
+            vector_spaces: snapshots,
+        })
     }
 
     async fn resolve_content_type_selection(
@@ -1109,15 +1091,45 @@ impl AppState {
         )
     }
 
+    pub(crate) fn configured_vector_space_records_for_library(
+        &self,
+        library_id: &str,
+    ) -> Result<Vec<VectorSpaceRecord>, ApiError> {
+        Ok(self
+            .configured_vector_space_bindings_for_library(library_id)?
+            .into_iter()
+            .map(|binding| {
+                let model_version = self.configured_model_version(
+                    &binding.selection.provider_id,
+                    &binding.selection.model_id,
+                );
+                let model_revision = self
+                    .provider_models
+                    .get(&binding.selection.provider_id)
+                    .and_then(|models| models.get(&binding.selection.model_id))
+                    .and_then(|model| model.backend.clone())
+                    .filter(|value| !value.trim().is_empty());
+                VectorSpaceRecord {
+                    id: binding.vector_space_id,
+                    provider_id: binding.selection.provider_id,
+                    model_id: binding.selection.model_id,
+                    model_version,
+                    model_revision,
+                    vector_type: binding.vector_type,
+                }
+            })
+            .collect())
+    }
+
     pub(crate) async fn resolve_execution_groups_for_library(
         &mut self,
         library_id: &str,
     ) -> Result<Vec<VectorSpaceExecutionGroup>, ApiError> {
         let bindings = self.configured_vector_space_bindings_for_library(library_id)?;
-        let active_visual_unit_count = self
+        let active_unit_count = self
             .libraries
             .get(library_id)
-            .map(|library| library.visual_units.len())
+            .map(|library| library.units.len())
             .unwrap_or(0);
         let mut groups = Vec::new();
         for binding in bindings {
@@ -1134,7 +1146,8 @@ impl AppState {
             groups.push(VectorSpaceExecutionGroup {
                 library_id: library_id.to_string(),
                 vector_space_id: binding.vector_space_id.clone(),
-                active_visual_unit_count,
+                active_unit_count,
+                eligible_point_ids: BTreeSet::new(),
                 content_types: binding.content_types.clone(),
                 resolved_model: ResolvedExecutionModelSelection {
                     summary,
@@ -1771,7 +1784,7 @@ fn effective_library_content_type_bindings(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConfiguredVectorSpaceBinding {
     pub(crate) vector_space_id: String,
-    selection: ModelSelectionPayload,
+    pub(crate) selection: ModelSelectionPayload,
     pub(crate) vector_type: String,
     pub(crate) content_types: Vec<String>,
 }
@@ -1788,6 +1801,46 @@ fn referenced_content_type_provider_ids(
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn unit_index_summary_for_vector_space(
+    library: &LibraryRecord,
+    vector_space_id: &str,
+) -> UnitIndexSummary {
+    let mut summary = UnitIndexSummary::default();
+    for index in library
+        .unit_indexes
+        .values()
+        .filter(|index| index.vector_space_id == vector_space_id)
+    {
+        if index.status == "ready" {
+            match index.visibility.as_str() {
+                ACTIVE_INDEX_VISIBILITY => summary.active += 1,
+                RETIRED_INDEX_VISIBILITY => summary.retired += 1,
+                _ => summary.not_ready += 1,
+            }
+        } else {
+            match index.status.as_str() {
+                "failed" => summary.failed += 1,
+                _ => summary.not_ready += 1,
+            }
+        }
+    }
+    summary
+}
+
+fn content_e2e_index_summary_for_vector_space(
+    library: &LibraryRecord,
+    vector_space_id: &str,
+) -> ContentE2eIndexSummary {
+    ContentE2eIndexSummary {
+        completed: library
+            .content_e2e_index_states
+            .values()
+            .filter(|state| state.vector_space_id == vector_space_id)
+            .count(),
+        missing: 0,
+    }
 }
 
 fn split_model_reference(model_ref: &str) -> Option<(&str, &str)> {

@@ -4,31 +4,58 @@ use serde_json::Value;
 use std::path::Path as FsPath;
 
 impl AppState {
-    pub(crate) fn get_visual_unit(
+    pub(crate) fn get_asset(
         &self,
         library_id: &str,
-        visual_unit_id: &str,
-    ) -> Result<VisualUnitDetailData, ApiError> {
+        asset_id: &str,
+    ) -> Result<AssetDetailData, ApiError> {
         let library = self
             .libraries
             .get(library_id)
             .cloned()
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
 
-        let visual_unit = library
-            .visual_units
-            .get(visual_unit_id)
-            .ok_or_else(|| ApiError::not_found("Visual unit was not found."))?;
+        let asset = library
+            .assets
+            .get(asset_id)
+            .ok_or_else(|| ApiError::not_found("Asset was not found."))?;
+        let (source_id, source_type, source_uri) = library
+            .source_asset_locations
+            .values()
+            .find(|location| location.asset_id == asset.id)
+            .and_then(|location| {
+                library.sources.get(&location.source_id).map(|source| {
+                    (
+                        source.id.clone(),
+                        source.source_type.clone(),
+                        source.source_uri.clone(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| {
+                (
+                    asset.source_id.clone(),
+                    asset.source_type.clone(),
+                    sources::file_source_uri(&asset.source_path),
+                )
+            });
+        let units = asset
+            .unit_ids
+            .iter()
+            .filter_map(|unit_id| find_unit_across_libraries(&self.libraries, unit_id))
+            .map(UnitRecord::summary)
+            .collect();
 
-        Ok(VisualUnitDetailData {
-            visual_unit: visual_unit.snapshot(),
-            preview: visual_unit_preview_reference(
+        Ok(AssetDetailData {
+            asset: asset.snapshot(&source_id, &source_type, &source_uri),
+            preview: asset_preview_reference(
                 library_id,
-                &visual_unit.id,
-                &visual_unit.kind,
-                &visual_unit.locator,
+                &asset.id,
+                &asset.asset_type,
+                &asset.locator,
             )?,
-            neighbor_context: visual_unit.neighbor_context.clone(),
+            neighbor_context: asset.neighbor_context.clone(),
+            units,
         })
     }
 
@@ -107,32 +134,24 @@ impl AppState {
                 Ok((plan, ResolvedImageQueryInput::TempAsset(asset)))
             }
             "library_object" => {
-                let visual_unit_id =
-                    request
-                        .image_input
-                        .visual_unit_id
-                        .as_deref()
-                        .ok_or_else(|| {
-                            ApiError::validation_failed(
-                                "image_input.kind=library_object requires visual_unit_id.",
-                                Some(json!({ "field": "image_input.visual_unit_id" })),
-                            )
-                        })?;
-                let visual_unit = self.get_library_visual_unit(&plan_library_id, visual_unit_id)?;
-                if !matches!(visual_unit.kind.as_str(), "image" | "document_page") {
+                let asset_id = request.image_input.asset_id.as_deref().ok_or_else(|| {
+                    ApiError::validation_failed(
+                        "image_input.kind=library_object requires asset_id.",
+                        Some(json!({ "field": "image_input.asset_id" })),
+                    )
+                })?;
+                let asset = self.get_library_asset(&plan_library_id, asset_id)?;
+                if !matches!(asset.asset_type.as_str(), "image" | "document_page") {
                     return Err(ApiError::not_supported(
                         "Current 110-image-search implementation only supports library image and document_page objects as query images.",
                         Some(json!({
-                            "field": "image_input.visual_unit_id",
-                            "received_kind": visual_unit.kind,
-                            "supported_kinds": ["image", "document_page"],
+                            "field": "image_input.asset_id",
+                            "received_asset_type": asset.asset_type,
+                            "supported_asset_types": ["image", "document_page"],
                         })),
                     ));
                 }
-                Ok((
-                    plan,
-                    ResolvedImageQueryInput::LibraryVisualUnit(visual_unit),
-                ))
+                Ok((plan, ResolvedImageQueryInput::LibraryAsset(asset)))
             }
             _ => Err(ApiError::validation_failed(
                 "image_input.kind must be one of the supported query image input kinds.",
@@ -205,28 +224,27 @@ impl AppState {
                 ))
             }
             "library_object" => {
-                if let Some(visual_unit_id) = request.video_input.visual_unit_id.as_deref() {
+                if let Some(asset_id) = request.video_input.asset_id.as_deref() {
                     if request.video_input.locator.is_some() {
                         return Err(ApiError::validation_failed(
-                            "video_input.visual_unit_id reuses the segment's own locator and must not carry video_input.locator.",
+                            "video_input.asset_id reuses the segment's own locator and must not carry video_input.locator.",
                             Some(json!({
                                 "field": "video_input.locator",
                                 "input_kind": "library_object",
-                                "library_object_kind": "video_segment",
+                                "library_object_asset_type": "video_segment",
                             })),
                         ));
                     }
 
-                    let visual_unit =
-                        self.get_library_visual_unit(&plan_library_id, visual_unit_id)?;
-                    if visual_unit.kind != "video_segment" || visual_unit.source_type != "video" {
+                    let asset = self.get_library_asset(&plan_library_id, asset_id)?;
+                    if asset.asset_type != "video_segment" || asset.source_type != "video" {
                         return Err(ApiError::not_supported(
                             "Current 120-video-search implementation only supports library video_segment objects as direct query video segments.",
                             Some(json!({
-                                "field": "video_input.visual_unit_id",
-                                "received_kind": visual_unit.kind,
-                                "received_source_type": visual_unit.source_type,
-                                "supported_kind": "video_segment",
+                                "field": "video_input.asset_id",
+                                "received_asset_type": asset.asset_type,
+                                "received_source_type": asset.source_type,
+                                "supported_asset_type": "video_segment",
                                 "supported_source_type": "video",
                             })),
                         ));
@@ -235,17 +253,17 @@ impl AppState {
                     return Ok((
                         plan,
                         ResolvedVideoQueryInput {
-                            path: visual_unit.source_path,
-                            locator: Some(visual_unit.locator),
+                            path: asset.source_path,
+                            locator: Some(asset.locator),
                         },
                     ));
                 }
 
                 let source_id = request.video_input.source_id.as_deref().ok_or_else(|| {
                     ApiError::validation_failed(
-                        "video_input.kind=library_object requires source_id or visual_unit_id.",
+                        "video_input.kind=library_object requires source_id or asset_id.",
                         Some(
-                            json!({ "field": "video_input", "supported_fields": ["source_id", "visual_unit_id"] }),
+                            json!({ "field": "video_input", "supported_fields": ["source_id", "asset_id"] }),
                         ),
                     )
                 })?;
@@ -582,7 +600,13 @@ impl AppState {
             .cloned()
             .ok_or_else(|| ApiError::not_found("Library was not found."))?;
         let resolved_library_id = library.id.clone();
-        let active_vector_spaces = library.active_vector_spaces.clone();
+        let active_vector_space_ids = self
+            .libraries
+            .values()
+            .flat_map(|library| library.unit_indexes.values())
+            .filter(|index| index.status == "ready" && index.visibility == ACTIVE_INDEX_VISIBILITY)
+            .map(|index| index.vector_space_id.clone())
+            .collect::<BTreeSet<_>>();
         let latest_job_id = library.latest_job_id.clone();
         let effective_content_types = self.get_library_content_types(&resolved_library_id)?;
         let enabled_content_types = effective_content_types
@@ -622,7 +646,7 @@ impl AppState {
             .filter_map(|content_type| {
                 let resolved = resolved_content_models.get(content_type)?;
                 let vector_space_id = resolved.vector_space_id.as_ref()?;
-                if active_vector_spaces.contains(vector_space_id) {
+                if active_vector_space_ids.contains(vector_space_id) {
                     return None;
                 }
 
@@ -711,16 +735,67 @@ impl AppState {
             ));
         }
 
-        let active_visual_unit_refs = library
-            .visual_units
-            .iter()
-            .filter(|(_, visual_unit)| {
-                supported_content_types.iter().any(|content_type| {
-                    content_type_matches_visual_unit(content_type, &visual_unit.kind)
-                })
-            })
-            .map(|(visual_unit_id, _)| scoped_visual_unit_ref(&resolved_library_id, visual_unit_id))
-            .collect::<BTreeSet<_>>();
+        let kind_filter = read_string_filter(filters, "asset_type");
+        let path_prefix_filter = read_string_filter(filters, "path_prefix");
+        let source_type_filter = read_string_filter(filters, "source_type");
+        let time_range_filter = resolve_time_range_filter(filters)?;
+        let mut active_asset_refs = BTreeSet::new();
+        let mut active_unit_index_refs = BTreeSet::new();
+        let mut asset_locations = BTreeMap::new();
+        let mut eligible_point_ids_by_vector_space = BTreeMap::<String, BTreeSet<u64>>::new();
+        for location in library
+            .source_asset_locations
+            .values()
+            .filter(|location| location.visibility == ACTIVE_INDEX_VISIBILITY)
+        {
+            let Some(asset) = find_asset_across_libraries(&self.libraries, &location.asset_id)
+            else {
+                continue;
+            };
+            if !supported_content_types
+                .iter()
+                .any(|content_type| content_type_matches_asset(content_type, &asset.asset_type))
+            {
+                continue;
+            }
+            let Some(source) = library.sources.get(&location.source_id) else {
+                continue;
+            };
+            if !location_matches_filters(
+                &asset,
+                source,
+                location,
+                kind_filter.as_ref(),
+                path_prefix_filter.as_ref(),
+                source_type_filter.as_ref(),
+                time_range_filter,
+            ) {
+                continue;
+            }
+            let scoped_ref = scoped_asset_ref(&resolved_library_id, &asset.id);
+            active_asset_refs.insert(scoped_ref.clone());
+            asset_locations
+                .entry(scoped_ref)
+                .or_insert_with(|| SearchPlanAssetLocation {
+                    source_id: source.id.clone(),
+                    source_uri: source.source_uri.clone(),
+                    source_type: source.source_type.clone(),
+                    locator: location.locator.clone(),
+                });
+            for unit_id in &asset.unit_ids {
+                for index in active_unit_indexes_for_unit(&self.libraries, unit_id) {
+                    let Some(point_id) = unit_index_point_id(index) else {
+                        continue;
+                    };
+                    active_unit_index_refs
+                        .insert(UnitIndexRecord::key(&index.unit_id, &index.vector_space_id));
+                    eligible_point_ids_by_vector_space
+                        .entry(index.vector_space_id.clone())
+                        .or_default()
+                        .insert(point_id);
+                }
+            }
+        }
         let resolved_content_models = resolved_content_models
             .into_iter()
             .filter(|(content_type, _)| supported_content_types.contains(content_type))
@@ -739,7 +814,14 @@ impl AppState {
                 .or_insert_with(|| VectorSpaceExecutionGroup {
                     library_id: resolved_library_id.clone(),
                     vector_space_id: vector_space_id.clone(),
-                    active_visual_unit_count: library.visual_units.len(),
+                    active_unit_count: eligible_point_ids_by_vector_space
+                        .get(&vector_space_id)
+                        .map(BTreeSet::len)
+                        .unwrap_or_default(),
+                    eligible_point_ids: eligible_point_ids_by_vector_space
+                        .get(&vector_space_id)
+                        .cloned()
+                        .unwrap_or_default(),
                     content_types: vec![content_type.clone()],
                     resolved_model: resolved_execution_selection_from_content_model(
                         resolved,
@@ -759,14 +841,15 @@ impl AppState {
             library_id: resolved_library_id.clone(),
             top_k: top_k.unwrap_or(10).max(1),
             cursor_offset,
-            kind_filter: read_string_filter(filters, "visual_unit.kind")
-                .or_else(|| read_string_filter(filters, "kind")),
-            path_prefix_filter: read_string_filter(filters, "path_prefix"),
-            source_type_filter: read_string_filter(filters, "source_type"),
+            kind_filter,
+            path_prefix_filter,
+            source_type_filter,
             time_range_filter,
             target_content_types: supported_content_types,
             unsupported_content_types,
-            active_visual_unit_refs,
+            active_asset_refs,
+            active_unit_index_refs,
+            asset_locations,
             execution_groups: execution_groups_by_id.into_values().collect(),
             debug_content_types: resolved_content_models
                 .into_iter()
@@ -994,21 +1077,18 @@ impl AppState {
         Ok(asset.clone())
     }
 
-    pub(crate) fn get_library_visual_unit(
+    pub(crate) fn get_library_asset(
         &self,
         library_id: &str,
-        visual_unit_id: &str,
-    ) -> Result<VisualUnitRecord, ApiError> {
-        let library = self
-            .libraries
-            .get(library_id)
-            .ok_or_else(|| ApiError::not_found("Library was not found."))?;
+        asset_id: &str,
+    ) -> Result<AssetRecord, ApiError> {
+        if !self.libraries.contains_key(library_id) {
+            return Err(ApiError::not_found("Library was not found."));
+        }
 
-        library
-            .visual_units
-            .get(visual_unit_id)
+        find_asset_across_libraries(&self.libraries, asset_id)
             .cloned()
-            .ok_or_else(|| ApiError::not_found("Visual unit was not found."))
+            .ok_or_else(|| ApiError::not_found("Asset was not found."))
     }
 
     pub(crate) fn get_library_source(
@@ -1111,14 +1191,52 @@ fn normalize_content_type_targets(content_types: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn content_type_matches_visual_unit(content_type: &str, visual_unit_kind: &str) -> bool {
+fn content_type_matches_asset(content_type: &str, asset_kind: &str) -> bool {
     match content_type {
-        "image" => visual_unit_kind == "image",
-        "document" => visual_unit_kind == "document_page",
-        "video" => visual_unit_kind == "video_segment",
-        "text" => visual_unit_kind == "text",
+        "image" => asset_kind == "image",
+        "document" => asset_kind == "document_page",
+        "video" => asset_kind == "video_segment",
+        "text" => asset_kind == "text",
         _ => false,
     }
+}
+
+fn location_matches_filters(
+    asset: &AssetRecord,
+    source: &SourceRecord,
+    location: &SourceAssetLocationRecord,
+    kind_filter: Option<&BTreeSet<String>>,
+    path_prefix_filter: Option<&BTreeSet<String>>,
+    source_type_filter: Option<&BTreeSet<String>>,
+    time_range_filter: Option<SearchTimeRangeFilter>,
+) -> bool {
+    kind_filter
+        .map(|expected| expected.contains(&asset.asset_type))
+        .unwrap_or(true)
+        && source_type_filter
+            .map(|expected| expected.contains(&source.source_type))
+            .unwrap_or(true)
+        && path_prefix_filter
+            .map(|prefixes| {
+                prefixes
+                    .iter()
+                    .any(|prefix| source.source_uri.starts_with(prefix))
+            })
+            .unwrap_or(true)
+        && time_range_filter
+            .map(|filter| locator_overlaps_time_range(&location.locator, filter))
+            .unwrap_or(true)
+}
+
+fn locator_overlaps_time_range(locator: &Value, filter: SearchTimeRangeFilter) -> bool {
+    let Some(start_ms) = locator.get("start_ms").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(end_ms) = locator.get("end_ms").and_then(Value::as_u64) else {
+        return false;
+    };
+
+    start_ms <= filter.end_ms && end_ms >= filter.start_ms
 }
 
 fn resolved_execution_selection_from_content_model(
@@ -1147,8 +1265,50 @@ fn resolved_execution_selection_from_content_model(
     }
 }
 
-fn scoped_visual_unit_ref(library_id: &str, visual_unit_id: &str) -> String {
-    format!("{library_id}:{visual_unit_id}")
+fn scoped_asset_ref(library_id: &str, asset_id: &str) -> String {
+    format!("{library_id}:{asset_id}")
+}
+
+fn find_asset_across_libraries<'a>(
+    libraries: &'a BTreeMap<String, LibraryRecord>,
+    asset_id: &str,
+) -> Option<&'a AssetRecord> {
+    libraries
+        .values()
+        .find_map(|library| library.assets.get(asset_id))
+}
+
+fn find_unit_across_libraries<'a>(
+    libraries: &'a BTreeMap<String, LibraryRecord>,
+    unit_id: &str,
+) -> Option<&'a UnitRecord> {
+    libraries
+        .values()
+        .find_map(|library| library.units.get(unit_id))
+}
+
+fn active_unit_indexes_for_unit<'a>(
+    libraries: &'a BTreeMap<String, LibraryRecord>,
+    unit_id: &str,
+) -> Vec<&'a UnitIndexRecord> {
+    libraries
+        .values()
+        .flat_map(|library| library.unit_indexes.values())
+        .filter(|index| {
+            index.unit_id == unit_id
+                && index.status == "ready"
+                && index.visibility == ACTIVE_INDEX_VISIBILITY
+                && index.vector_ref.is_some()
+        })
+        .collect()
+}
+
+fn unit_index_point_id(index: &UnitIndexRecord) -> Option<u64> {
+    index
+        .vector_ref
+        .as_ref()
+        .and_then(|value| value.get("point_id"))
+        .and_then(Value::as_u64)
 }
 
 fn effective_search_scope_request(
@@ -1177,9 +1337,11 @@ fn effective_search_scope_request(
 }
 
 fn merge_search_plan(target: &mut SearchPlan, incoming: SearchPlan) {
+    target.active_asset_refs.extend(incoming.active_asset_refs);
     target
-        .active_visual_unit_refs
-        .extend(incoming.active_visual_unit_refs);
+        .active_unit_index_refs
+        .extend(incoming.active_unit_index_refs);
+    target.asset_locations.extend(incoming.asset_locations);
     target.execution_groups.extend(incoming.execution_groups);
     target
         .debug_content_types

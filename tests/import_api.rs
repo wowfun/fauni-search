@@ -40,18 +40,18 @@ async fn import_paths_partially_accepts_and_queues_a_job() {
     assert_eq!(body["data"]["accepted"].as_array().unwrap().len(), 1);
     assert_eq!(body["data"]["accepted"][0]["kind"], "document_page");
     assert_eq!(
-        body["data"]["accepted"][0]["visual_units"]
+        body["data"]["accepted"][0]["assets"]
             .as_array()
             .unwrap()
             .len(),
         2
     );
     assert_eq!(
-        body["data"]["accepted"][0]["visual_units"][0]["locator"]["page"],
+        body["data"]["accepted"][0]["assets"][0]["locator"]["page"],
         1
     );
     assert_eq!(
-        body["data"]["accepted"][0]["visual_units"][1]["locator"]["page"],
+        body["data"]["accepted"][0]["assets"][1]["locator"]["page"],
         2
     );
     assert_eq!(body["data"]["rejected"].as_array().unwrap().len(), 1);

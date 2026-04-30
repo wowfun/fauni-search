@@ -167,26 +167,30 @@ pub(crate) fn mark_source_root_sources_state(
                 .map(|source| source.id.clone())
         })
         .collect::<Vec<_>>();
-    let mut removed_visual_unit_ids = BTreeSet::new();
+    let mut affected_source_set = BTreeSet::new();
 
     for source_id in affected_source_ids {
         if let Some(source) = library.sources.get_mut(&source_id) {
-            removed_visual_unit_ids.extend(source.visual_unit_ids.iter().cloned());
+            affected_source_set.insert(source.id.clone());
             source.status = status.to_string();
             source.status_reason = reason.clone();
-            source.visual_unit_ids.clear();
+            source.asset_ids.clear();
             source.observed_size_bytes = None;
             source.observed_modified_at_ms = None;
         }
     }
 
-    if !removed_visual_unit_ids.is_empty() {
+    if !affected_source_set.is_empty() {
+        library.source_asset_location_order.retain(|location_id| {
+            library
+                .source_asset_locations
+                .get(location_id)
+                .map(|location| !affected_source_set.contains(&location.source_id))
+                .unwrap_or(false)
+        });
         library
-            .visual_unit_order
-            .retain(|visual_unit_id| !removed_visual_unit_ids.contains(visual_unit_id));
-        for visual_unit_id in removed_visual_unit_ids {
-            library.visual_units.remove(&visual_unit_id);
-        }
+            .source_asset_locations
+            .retain(|_, location| !affected_source_set.contains(&location.source_id));
     }
 }
 
@@ -379,7 +383,7 @@ pub(crate) fn invalidated_source_record(
 ) -> SourceRecord {
     source.status = status.to_string();
     source.status_reason = reason;
-    source.visual_unit_ids.clear();
+    source.asset_ids.clear();
     source.observed_size_bytes = observed_size_bytes;
     source.observed_modified_at_ms = observed_modified_at_ms;
     source

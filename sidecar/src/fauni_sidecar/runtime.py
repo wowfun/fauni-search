@@ -1314,9 +1314,7 @@ def load_document_image(document: dict[str, Any]) -> tuple[Any, str, str, dict[s
                     image.convert("RGB"),
                     "image",
                     "image",
-                    {
-                        "path": str(normalized),
-                    },
+                    locator if isinstance(locator, dict) else {"path": str(normalized)},
                 )
         except Exception as exc:
             raise RuntimeError(f"Failed to load image {normalized}: {exc}") from exc

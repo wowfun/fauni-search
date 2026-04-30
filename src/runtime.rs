@@ -1,9 +1,9 @@
 use crate::{
-    indexing::{index_source_action_visual_units, index_visual_units},
+    indexing::index_units_into_active_namespace,
     model::{
         ImportJobOutcome, MaintenanceActionPlan, PreparedImport, PreparedSourceAction,
-        RetiredVectorSpaceCleanupCandidate, SourceActionJobOutcome, SourceActionPlan,
-        SourceActionSummary,
+        PreparedSourceMutation, RetiredVectorSpaceCleanupCandidate, SourceActionJobOutcome,
+        SourceActionPlan, SourceActionSummary, UnitRecord, VectorSpaceExecutionGroup,
     },
     qdrant::cleanup_retired_vector_space_namespace,
     state::SharedState,
@@ -21,6 +21,94 @@ async fn job_cancellation_requested(state: &SharedState, job_id: &str) -> bool {
 async fn job_is_terminal(state: &SharedState, job_id: &str) -> bool {
     let state = state.read().await;
     state.job_is_terminal(job_id)
+}
+
+fn import_source_mutation(prepared: &PreparedImport, source_id: &str) -> PreparedSourceMutation {
+    let source = prepared
+        .sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .expect("import source id should exist")
+        .clone();
+    let assets = prepared
+        .assets
+        .iter()
+        .filter(|asset| asset.source_id == source_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let units = prepared
+        .units
+        .iter()
+        .filter(|unit| unit.source_id == source_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let source_asset_locations = prepared
+        .source_asset_locations
+        .iter()
+        .filter(|location| location.source_id == source_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let content_ids = std::iter::once(source.source_content_id.clone())
+        .chain(units.iter().map(|unit| unit.content_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let contents = prepared
+        .contents
+        .iter()
+        .filter(|content| content_ids.contains(&content.id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    PreparedSourceMutation {
+        contents,
+        source,
+        source_asset_locations,
+        assets,
+        units,
+    }
+}
+
+fn indexed_units_by_vector_space(
+    vector_space_batches: impl Iterator<Item = (String, Vec<UnitRecord>)>,
+    source_id: &str,
+) -> Vec<(String, Vec<UnitRecord>)> {
+    vector_space_batches
+        .filter_map(|(vector_space_id, units)| {
+            let units = units
+                .into_iter()
+                .filter(|unit| unit.source_id == source_id)
+                .collect::<Vec<_>>();
+            (!units.is_empty()).then_some((vector_space_id, units))
+        })
+        .collect()
+}
+
+async fn index_source_level_units(
+    state: SharedState,
+    job_id: &str,
+    action_label: &str,
+    execution_groups: &BTreeMap<String, VectorSpaceExecutionGroup>,
+    indexed_units: &[(String, Vec<UnitRecord>)],
+) -> Result<usize, String> {
+    let mut indexed_count = 0usize;
+    for (vector_space_id, units) in indexed_units {
+        let Some(group) = execution_groups.get(vector_space_id) else {
+            return Err(format!(
+                "vector_space {vector_space_id}: missing resolved execution group"
+            ));
+        };
+        let completed = index_units_into_active_namespace(
+            vector_space_id,
+            units,
+            &group.resolved_model,
+            state.clone(),
+            job_id,
+            action_label,
+        )
+        .await
+        .map_err(|message| format!("vector_space {vector_space_id}: {message}"))?;
+        indexed_count += completed;
+    }
+    Ok(indexed_count)
 }
 
 pub fn spawn_runtime_maintenance(state: SharedState) {
@@ -74,12 +162,7 @@ pub fn spawn_runtime_maintenance(state: SharedState) {
 
             let mut cleaned = Vec::<RetiredVectorSpaceCleanupCandidate>::new();
             for candidate in candidates {
-                match cleanup_retired_vector_space_namespace(
-                    &candidate.library_id,
-                    &candidate.vector_space_id,
-                )
-                .await
-                {
+                match cleanup_retired_vector_space_namespace(&candidate.vector_space_id).await {
                     Ok(()) => cleaned.push(candidate),
                     Err(error) => {
                         tracing::warn!(
@@ -186,101 +269,116 @@ pub(crate) async fn run_import_job(state: SharedState, job_id: String, prepared:
         );
     }
 
-    let outcome = if prepared.vector_space_batches.is_empty() {
-        ImportJobOutcome::completed(
-            format!(
-                "Accepted {} path(s); stored structured sources and visual units without indexing because no enabled content types matched the imported assets.",
-                prepared.accepted.len()
-            ),
-            prepared.accepted.len(),
-            BTreeSet::new(),
+    let mut activated_vector_spaces = BTreeSet::new();
+    let mut indexed_units = 0_usize;
+    let mut committed_sources = 0_usize;
+    let mut failures = Vec::new();
+
+    for source in &prepared.sources {
+        if job_cancellation_requested(&state, &job_id).await {
+            break;
+        }
+        let mutation = import_source_mutation(&prepared, &source.id);
+        let indexed_units_for_source = indexed_units_by_vector_space(
+            prepared
+                .vector_space_batches
+                .iter()
+                .map(|batch| (batch.vector_space_id.clone(), batch.units.clone())),
+            &source.id,
+        );
+        match index_source_level_units(
+            state.clone(),
+            &job_id,
+            "import",
+            &execution_groups,
+            &indexed_units_for_source,
         )
-    } else {
-        let mut activated_vector_spaces = BTreeSet::new();
-        let mut indexed_visual_units = 0_usize;
-        let mut indexed_vector_spaces = 0_usize;
-        let mut failures = Vec::new();
-        for batch in &prepared.vector_space_batches {
-            if job_cancellation_requested(&state, &job_id).await {
-                break;
+        .await
+        {
+            Ok(count) => {
+                indexed_units += count;
+                activated_vector_spaces.extend(
+                    indexed_units_for_source
+                        .iter()
+                        .map(|(vector_space_id, _)| vector_space_id.clone()),
+                );
             }
-            let Some(group) = execution_groups.get(&batch.vector_space_id) else {
-                failures.push(format!(
-                    "vector_space {}: missing resolved execution group",
-                    batch.vector_space_id
-                ));
+            Err(message) => {
+                failures.push(format!("source {}: {message}", source.id));
                 continue;
-            };
-            match index_visual_units(
+            }
+        }
+
+        let old_point_ids = {
+            let mut state = state.write().await;
+            match state.commit_source_records(
                 &prepared.library_id,
-                batch,
-                &group.resolved_model,
-                state.clone(),
                 &job_id,
-            )
-            .await
-            {
-                Ok(_) => {}
-                Err(error) => {
-                    failures.push(format!(
-                        "vector_space {}: {} failed: {}",
-                        batch.vector_space_id, error.phase, error.message
-                    ));
+                &mutation.contents,
+                &mutation.source,
+                &mutation.source_asset_locations,
+                &mutation.assets,
+                &mutation.units,
+                &indexed_units_for_source,
+            ) {
+                Ok(old_point_ids) => old_point_ids,
+                Err(message) => {
+                    failures.push(format!("source {}: {message}", source.id));
                     continue;
                 }
             }
-            indexed_visual_units += batch.visual_units.len();
-            indexed_vector_spaces += 1;
-            activated_vector_spaces.insert(batch.vector_space_id.clone());
-        }
+        };
+        let _ = old_point_ids;
+        committed_sources += 1;
+    }
 
-        if job_cancellation_requested(&state, &job_id).await {
-            if activated_vector_spaces.is_empty() {
-                ImportJobOutcome::canceled(
-                    "Import canceled before any vector-space activation.".to_string(),
-                    prepared.accepted.len(),
-                )
-            } else {
-                ImportJobOutcome::canceled_with_activations(
-                    format!(
-                        "Import canceled after activating {} vector space(s); structured sources and visual units were kept for consistency.",
-                        activated_vector_spaces.len()
-                    ),
-                    prepared.accepted.len(),
-                    activated_vector_spaces,
-                )
-            }
-        } else if failures.is_empty() {
-            ImportJobOutcome::completed(
-                format!(
-                    "Accepted {} path(s); indexed {} visual unit(s) across {} vector space(s) and activated the resulting namespaces.",
-                    prepared.accepted.len(),
-                    indexed_visual_units,
-                    indexed_vector_spaces,
-                ),
-                prepared.accepted.len(),
-                activated_vector_spaces,
+    let outcome = if job_cancellation_requested(&state, &job_id).await {
+        if committed_sources == 0 {
+            ImportJobOutcome::canceled(
+                "Import canceled before any source-level activation.".to_string(),
+                committed_sources,
             )
         } else {
-            ImportJobOutcome::failed_with_activations(
-                "failed",
+            ImportJobOutcome::canceled_with_activations(
                 format!(
-                    "Accepted {} path(s); indexed {} visual unit(s) across {} vector space(s), activated {} vector space(s), and encountered {} failure(s): {}",
-                    prepared.accepted.len(),
-                    indexed_visual_units,
-                    prepared.vector_space_batches.len(),
-                    activated_vector_spaces.len(),
-                    failures.len(),
-                    failures.join("; "),
+                    "Import canceled after activating {} source(s) across {} vector space(s).",
+                    committed_sources,
+                    activated_vector_spaces.len()
                 ),
-                prepared.accepted.len(),
+                committed_sources,
                 activated_vector_spaces,
             )
         }
+    } else if failures.is_empty() {
+        ImportJobOutcome::completed(
+            format!(
+                "Accepted {} path(s); activated {} source(s) and indexed {} unit(s) across {} vector space(s).",
+                prepared.accepted.len(),
+                committed_sources,
+                indexed_units,
+                activated_vector_spaces.len(),
+            ),
+            prepared.accepted.len(),
+            activated_vector_spaces,
+        )
+    } else {
+        ImportJobOutcome::failed_with_activations(
+            "failed",
+            format!(
+                "Accepted {} path(s); activated {} source(s), indexed {} unit(s), and encountered {} failure(s): {}",
+                prepared.accepted.len(),
+                committed_sources,
+                indexed_units,
+                failures.len(),
+                failures.join("; "),
+            ),
+            committed_sources,
+            activated_vector_spaces,
+        )
     };
 
     let mut state = state.write().await;
-    if let Err(message) = state.finalize_import_job(&job_id, prepared, outcome) {
+    if let Err(message) = state.finish_import_job_status(&job_id, outcome) {
         tracing::warn!("Failed to finalize import job {job_id}: {message}");
     }
 }
@@ -351,111 +449,116 @@ pub(crate) async fn run_source_action_job(
                 return;
             }
 
-            if prepared.requires_index_update() {
+            {
+                let mut state = state.write().await;
+                state.update_job_snapshot(
+                    &job_id,
+                    "running",
+                    "encode",
+                    0,
+                    format!(
+                        "Encoding {} source mutation(s) for {}.",
+                        prepared.source_mutations.len(),
+                        plan.action.as_str(),
+                    ),
+                );
+            }
+
+            let mut activated_vector_spaces = BTreeSet::new();
+            let mut committed_sources = 0usize;
+            let mut indexed_units = 0usize;
+            let mut failures = Vec::new();
+            for mutation in &prepared.source_mutations {
+                if job_cancellation_requested(&state, &job_id).await {
+                    break;
+                }
+                let indexed_units_for_source = indexed_units_by_vector_space(
+                    prepared
+                        .vector_space_batches
+                        .iter()
+                        .map(|batch| (batch.vector_space_id.clone(), batch.units_to_index.clone())),
+                    &mutation.source.id,
+                );
+                match index_source_level_units(
+                    state.clone(),
+                    &job_id,
+                    plan.action.as_str(),
+                    &execution_groups,
+                    &indexed_units_for_source,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        indexed_units += count;
+                        activated_vector_spaces.extend(
+                            indexed_units_for_source
+                                .iter()
+                                .map(|(vector_space_id, _)| vector_space_id.clone()),
+                        );
+                    }
+                    Err(message) => {
+                        failures.push(format!("source {}: {message}", mutation.source.id));
+                        continue;
+                    }
+                }
+
                 {
                     let mut state = state.write().await;
-                    state.update_job_snapshot(
-                        &job_id,
-                        "running",
-                        "encode",
-                        0,
-                        format!(
-                            "Encoding {} visual unit(s) for {}.",
-                            prepared
-                                .vector_space_batches
-                                .iter()
-                                .map(|batch| batch.visual_units_to_index.len())
-                                .sum::<usize>(),
-                            plan.action.as_str(),
-                        ),
-                    );
-                }
-
-                let mut activated_vector_spaces = BTreeSet::new();
-                let mut failures = Vec::new();
-                for batch in prepared.vector_space_batches.clone() {
-                    if job_cancellation_requested(&state, &job_id).await {
-                        break;
-                    }
-                    let Some(group) = execution_groups.get(&batch.vector_space_id) else {
-                        failures.push(format!(
-                            "vector_space {}: missing resolved execution group",
-                            batch.vector_space_id
-                        ));
-                        continue;
-                    };
-                    match index_source_action_visual_units(
+                    if let Err(message) = state.commit_source_records(
                         &prepared.library_id,
-                        plan.action.as_str(),
-                        &batch,
-                        &group.resolved_model,
-                        state.clone(),
                         &job_id,
-                    )
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(message) => {
-                            failures.push(format!(
-                                "vector_space {}: {}",
-                                batch.vector_space_id, message
-                            ));
-                            continue;
-                        }
+                        &mutation.contents,
+                        &mutation.source,
+                        &mutation.source_asset_locations,
+                        &mutation.assets,
+                        &mutation.units,
+                        &indexed_units_for_source,
+                    ) {
+                        failures.push(format!("source {}: {message}", mutation.source.id));
+                        continue;
                     }
-                    activated_vector_spaces.insert(batch.vector_space_id.clone());
                 }
+                committed_sources += 1;
+            }
 
-                let outcome = if job_cancellation_requested(&state, &job_id).await {
-                    if activated_vector_spaces.is_empty() {
-                        SourceActionJobOutcome::canceled(
-                            plan.action,
-                            0,
-                            "Canceled before activating any vector-space updates.".to_string(),
-                        )
-                    } else {
-                        SourceActionJobOutcome::canceled_with_structured_changes(
-                            plan.action,
-                            prepared.accepted_root_count,
-                            activated_vector_spaces,
-                            "Canceled after partial activation; structured source updates were kept for consistency."
-                                .to_string(),
-                        )
-                    }
-                } else if failures.is_empty() {
-                    SourceActionJobOutcome::completed(&prepared)
+            let outcome = if job_cancellation_requested(&state, &job_id).await {
+                if committed_sources == 0 {
+                    SourceActionJobOutcome::canceled(
+                        plan.action,
+                        0,
+                        "Canceled before activating any source updates.".to_string(),
+                    )
                 } else {
-                    let activated_count = activated_vector_spaces.len();
-                    SourceActionJobOutcome::failed_with_structured_changes(
+                    SourceActionJobOutcome::canceled_with_structured_changes(
                         plan.action,
                         prepared.accepted_root_count,
                         activated_vector_spaces,
                         format!(
-                            "applied structured updates, activated {} vector space(s), and encountered {} failure(s): {}",
-                            activated_count,
-                            failures.len(),
-                            failures.join("; "),
+                            "Canceled after activating {} source(s) and indexing {} unit(s).",
+                            committed_sources, indexed_units
                         ),
                     )
-                };
-                let mut state = state.write().await;
-                if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
-                    tracing::warn!("Failed to finalize source action job {job_id}: {message}");
                 }
-                return;
-            }
-
-            let outcome = if job_cancellation_requested(&state, &job_id).await {
-                SourceActionJobOutcome::canceled(
-                    plan.action,
-                    0,
-                    "Canceled before applying structured source updates.".to_string(),
-                )
-            } else {
+            } else if failures.is_empty() {
                 SourceActionJobOutcome::completed(&prepared)
+            } else {
+                SourceActionJobOutcome::failed_with_structured_changes(
+                    plan.action,
+                    committed_sources,
+                    activated_vector_spaces,
+                    format!(
+                        "activated {} source(s), indexed {} unit(s), and encountered {} failure(s): {}",
+                        committed_sources,
+                        indexed_units,
+                        failures.len(),
+                        failures.join("; "),
+                    ),
+                )
             };
             let mut state = state.write().await;
-            if let Err(message) = state.finalize_source_action_job(&job_id, prepared, outcome) {
+            if let Err(message) =
+                state.finish_source_action_job_incremental(&job_id, prepared, outcome)
+            {
                 tracing::warn!("Failed to finalize source action job {job_id}: {message}");
             }
             return;
@@ -523,7 +626,7 @@ pub(crate) async fn run_maintenance_action_job(
             );
         }
 
-        match cleanup_retired_vector_space_namespace(&plan.library_id, vector_space_id).await {
+        match cleanup_retired_vector_space_namespace(vector_space_id).await {
             Ok(()) => cleaned.push(RetiredVectorSpaceCleanupCandidate {
                 library_id: plan.library_id.clone(),
                 vector_space_id: vector_space_id.clone(),

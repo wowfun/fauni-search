@@ -13,10 +13,12 @@ impl AppState {
 
         Ok(match action {
             MaintenanceActionKind::CleanupRetiredVectorSpaces => library
-                .retired_vector_spaces
-                .keys()
-                .filter(|vector_space_id| !library.active_vector_spaces.contains(*vector_space_id))
-                .cloned()
+                .unit_indexes
+                .values()
+                .filter(|index| index.visibility == "retired")
+                .map(|index| index.vector_space_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>(),
         })
     }
@@ -695,11 +697,174 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn finalize_import_job(
+    pub(crate) fn commit_source_records(
+        &mut self,
+        library_id: &str,
+        job_id: &str,
+        contents: &[ContentRecord],
+        source: &SourceRecord,
+        source_asset_locations: &[SourceAssetLocationRecord],
+        assets: &[AssetRecord],
+        units: &[UnitRecord],
+        indexed_units_by_vector_space: &[(String, Vec<UnitRecord>)],
+    ) -> Result<Vec<u64>, String> {
+        if !self.jobs.contains_key(job_id) {
+            return Err("Job was not found.".to_string());
+        }
+        if !self.libraries.contains_key(library_id) {
+            return Err("Library was not found.".to_string());
+        }
+
+        let inherited_units = self.reusable_units_for_assets(assets);
+        let inherited_unit_indexes = self.reusable_unit_indexes_for_units(&inherited_units);
+        let inherited_content_e2e_states = self.reusable_content_e2e_states_for_contents(contents);
+        let before = self.clone();
+        let old_point_ids = {
+            let library = self
+                .libraries
+                .get_mut(library_id)
+                .ok_or_else(|| "Library was not found.".to_string())?;
+            replace_source_records(
+                library,
+                contents,
+                source,
+                source_asset_locations,
+                assets,
+                units,
+                indexed_units_by_vector_space,
+                job_id,
+            )
+        };
+        if let Some(library) = self.libraries.get_mut(library_id) {
+            for unit in inherited_units {
+                if !library.units.contains_key(&unit.id) {
+                    library.unit_order.push(unit.id.clone());
+                }
+                library.units.insert(unit.id.clone(), unit);
+            }
+            for index in inherited_unit_indexes {
+                library.unit_indexes.insert(
+                    UnitIndexRecord::key(&index.unit_id, &index.vector_space_id),
+                    index,
+                );
+            }
+            for state in inherited_content_e2e_states {
+                library.content_e2e_index_states.insert(
+                    ContentE2eIndexStateRecord::key(
+                        &state.content_id,
+                        &state.pipe_signature,
+                        &state.vector_space_id,
+                    ),
+                    state,
+                );
+            }
+        }
+
+        if let Err(message) = self.persist_durable_state() {
+            *self = before;
+            if let Some(job) = self.jobs.get_mut(job_id) {
+                job.snapshot.cancelable = false;
+                job.snapshot.status = "failed".to_string();
+                job.snapshot.phase = "failed".to_string();
+                job.snapshot.current_attempt.status = "failed".to_string();
+                job.snapshot.current_attempt.summary =
+                    format!("Persisting durable app state failed: {message}");
+            }
+            return Err(format!("Failed to persist durable app state: {message}"));
+        }
+
+        Ok(old_point_ids)
+    }
+
+    fn reusable_units_for_assets(&self, assets: &[AssetRecord]) -> Vec<UnitRecord> {
+        let unit_ids = assets
+            .iter()
+            .flat_map(|asset| asset.unit_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        self.libraries
+            .values()
+            .flat_map(|library| library.units.values())
+            .filter(|unit| unit_ids.contains(&unit.id))
+            .map(|unit| (unit.id.clone(), unit.clone()))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect()
+    }
+
+    fn reusable_unit_indexes_for_units(&self, units: &[UnitRecord]) -> Vec<UnitIndexRecord> {
+        let unit_ids = units
+            .iter()
+            .map(|unit| unit.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.libraries
+            .values()
+            .flat_map(|library| library.unit_indexes.values())
+            .filter(|index| unit_ids.contains(&index.unit_id))
+            .map(|index| {
+                (
+                    UnitIndexRecord::key(&index.unit_id, &index.vector_space_id),
+                    index.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect()
+    }
+
+    fn reusable_content_e2e_states_for_contents(
+        &self,
+        contents: &[ContentRecord],
+    ) -> Vec<ContentE2eIndexStateRecord> {
+        let content_ids = contents
+            .iter()
+            .map(|content| content.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.libraries
+            .values()
+            .flat_map(|library| library.content_e2e_index_states.values())
+            .filter(|state| content_ids.contains(&state.content_id))
+            .map(|state| {
+                (
+                    ContentE2eIndexStateRecord::key(
+                        &state.content_id,
+                        &state.pipe_signature,
+                        &state.vector_space_id,
+                    ),
+                    state.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect()
+    }
+
+    pub(crate) fn finish_import_job_status(
         &mut self,
         job_id: &str,
-        prepared: PreparedImport,
         outcome: ImportJobOutcome,
+    ) -> Result<(), String> {
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or_else(|| "Job was not found.".to_string())?;
+        job.snapshot.cancelable = false;
+        job.snapshot.status = outcome.status.to_string();
+        job.snapshot.phase = outcome.phase.to_string();
+        job.snapshot.progress.completed = if outcome.status == "completed" {
+            job.snapshot.progress.total
+        } else {
+            outcome.completed.min(job.snapshot.progress.total)
+        };
+        job.snapshot.current_attempt.status = outcome.status.to_string();
+        job.snapshot.current_attempt.summary = outcome.summary;
+        Ok(())
+    }
+
+    pub(crate) fn finish_source_action_job_incremental(
+        &mut self,
+        job_id: &str,
+        prepared: PreparedSourceAction,
+        outcome: SourceActionJobOutcome,
     ) -> Result<(), String> {
         if !self.jobs.contains_key(job_id) {
             return Err("Job was not found.".to_string());
@@ -709,43 +874,39 @@ impl AppState {
         }
 
         let before = self.clone();
-        let library = self
-            .libraries
-            .get_mut(&prepared.library_id)
-            .ok_or_else(|| "Library was not found.".to_string())?;
+        {
+            let library = self
+                .libraries
+                .get_mut(&prepared.library_id)
+                .ok_or_else(|| "Library was not found.".to_string())?;
 
-        for source in &prepared.sources {
-            let old_visual_unit_ids = library
-                .sources
-                .get(&source.id)
-                .map(|existing_source| existing_source.visual_unit_ids.clone())
-                .unwrap_or_default();
-            if !old_visual_unit_ids.is_empty() {
-                let stale_ids = old_visual_unit_ids.iter().cloned().collect::<BTreeSet<_>>();
-                library
-                    .visual_unit_order
-                    .retain(|visual_unit_id| !stale_ids.contains(visual_unit_id));
-                for visual_unit_id in old_visual_unit_ids {
-                    library.visual_units.remove(&visual_unit_id);
+            for update in &prepared.root_updates {
+                if let Some(root) = library.source_roots.get_mut(&update.source_root_id) {
+                    if outcome.apply_structured_changes {
+                        root.status = update.status.clone();
+                        root.watch_state = update.watch_state.clone();
+                        root.coverage_summary = update.coverage_summary.clone();
+                        root.observed_entries = update.observed_entries.clone();
+                        root.pending_watch_error = None;
+                    } else {
+                        root.watch_state = source_root_watch_state(
+                            root.enabled,
+                            &SourceRootScanResult {
+                                status: root.status.clone(),
+                                observed_entries: root.observed_entries.clone(),
+                                error: root.pending_watch_error.clone(),
+                            },
+                            false,
+                        )
+                    }
+                    root.last_action = Some(SourceRootLastAction {
+                        action: prepared.action.as_str().to_string(),
+                        status: outcome.status.to_string(),
+                        summary: outcome.summary.clone(),
+                        job_id: Some(job_id.to_string()),
+                    });
                 }
             }
-
-            if !library.sources.contains_key(&source.id) {
-                library.source_order.push(source.id.clone());
-            }
-            library.sources.insert(source.id.clone(), source.clone());
-        }
-
-        for visual_unit in &prepared.visual_units {
-            library.visual_unit_order.push(visual_unit.id.clone());
-            library
-                .visual_units
-                .insert(visual_unit.id.clone(), visual_unit.clone());
-        }
-
-        for vector_space_id in &outcome.activated_vector_spaces {
-            library.active_vector_spaces.insert(vector_space_id.clone());
-            library.retired_vector_spaces.remove(vector_space_id);
         }
 
         if let Err(message) = self.persist_durable_state() {
@@ -770,7 +931,110 @@ impl AppState {
         job.snapshot.phase = outcome.phase.to_string();
         job.snapshot.progress.completed = if outcome.status == "completed" {
             job.snapshot.progress.total
-        } else if job.snapshot.progress.unit == "visual_unit" {
+        } else if job.snapshot.progress.unit == "unit" {
+            job.snapshot
+                .progress
+                .completed
+                .min(job.snapshot.progress.total)
+        } else {
+            outcome.completed.min(job.snapshot.progress.total)
+        };
+        job.snapshot.current_attempt.status = outcome.status.to_string();
+        job.snapshot.current_attempt.summary = outcome.summary;
+
+        Ok(())
+    }
+
+    pub(crate) fn finalize_import_job(
+        &mut self,
+        job_id: &str,
+        prepared: PreparedImport,
+        outcome: ImportJobOutcome,
+    ) -> Result<(), String> {
+        if !self.jobs.contains_key(job_id) {
+            return Err("Job was not found.".to_string());
+        }
+        if !self.libraries.contains_key(&prepared.library_id) {
+            return Err("Library was not found.".to_string());
+        }
+
+        let before = self.clone();
+        let library = self
+            .libraries
+            .get_mut(&prepared.library_id)
+            .ok_or_else(|| "Library was not found.".to_string())?;
+
+        for source in &prepared.sources {
+            if library.sources.contains_key(&source.id) {
+                library.source_asset_location_order.retain(|location_id| {
+                    library
+                        .source_asset_locations
+                        .get(location_id)
+                        .map(|location| location.source_id != source.id)
+                        .unwrap_or(false)
+                });
+                library
+                    .source_asset_locations
+                    .retain(|_, location| location.source_id != source.id);
+            }
+
+            if !library.sources.contains_key(&source.id) {
+                library.source_order.push(source.id.clone());
+            }
+            library.sources.insert(source.id.clone(), source.clone());
+        }
+
+        for content in &prepared.contents {
+            library.contents.insert(content.id.clone(), content.clone());
+        }
+        for asset in &prepared.assets {
+            if !library.assets.contains_key(&asset.id) {
+                library.asset_order.push(asset.id.clone());
+            }
+            library.assets.insert(asset.id.clone(), asset.clone());
+        }
+        for location in &prepared.source_asset_locations {
+            if !library.source_asset_locations.contains_key(&location.id) {
+                library
+                    .source_asset_location_order
+                    .push(location.id.clone());
+            }
+            library
+                .source_asset_locations
+                .insert(location.id.clone(), location.clone());
+        }
+        for unit in &prepared.units {
+            if !library.units.contains_key(&unit.id) {
+                library.unit_order.push(unit.id.clone());
+            }
+            library.units.insert(unit.id.clone(), unit.clone());
+        }
+
+        activate_unit_indexes_for_import(library, &prepared, job_id, &outcome);
+
+        if let Err(message) = self.persist_durable_state() {
+            *self = before;
+            if let Some(job) = self.jobs.get_mut(job_id) {
+                job.snapshot.cancelable = false;
+                job.snapshot.status = "failed".to_string();
+                job.snapshot.phase = "failed".to_string();
+                job.snapshot.current_attempt.status = "failed".to_string();
+                job.snapshot.current_attempt.summary =
+                    format!("Persisting durable app state failed: {message}");
+            }
+            return Err(format!("Failed to persist durable app state: {message}"));
+        }
+
+        let job = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or_else(|| "Job was not found.".to_string())?;
+        job.snapshot.cancelable = false;
+        job.snapshot.status = outcome.status.to_string();
+        job.snapshot.phase = outcome.phase.to_string();
+        job.snapshot.progress.completed = if outcome.status == "completed" {
+            job.snapshot.progress.total
+        } else if job.snapshot.progress.unit == "unit" {
             job.snapshot
                 .progress
                 .completed
@@ -810,32 +1074,17 @@ impl AppState {
         &mut self,
         plan: &SourceActionPlan,
     ) -> Result<PreparedSourceAction, String> {
-        let active_vector_spaces = self
-            .libraries
-            .get(&plan.library_id)
-            .map(|library| library.active_vector_spaces.clone())
-            .ok_or_else(|| "Library was not found.".to_string())?;
         let vector_space_bindings = self
             .configured_vector_space_bindings_for_library(&plan.library_id)
             .map_err(|error| error.payload.message)?;
-        let can_rebuild_from_scratch = self
-            .libraries
-            .get(&plan.library_id)
-            .map(|library| {
-                plan.action.rebuilds_from_scratch()
-                    || (plan.action.is_rescan()
-                        && plan.target_root_ids.len() == library.source_root_order.len())
-            })
-            .ok_or_else(|| "Library was not found.".to_string())?;
 
         let mut root_updates = Vec::new();
         let mut source_mutations = Vec::new();
-        let mut stale_point_ids = Vec::new();
-        let mut visual_units_to_index = Vec::new();
+        let mut units_to_index = Vec::new();
         let mut summary = SourceActionSummary::default();
 
         for source_root_id in &plan.target_root_ids {
-            let (root, existing_sources, existing_point_ids_by_source) = {
+            let (root, existing_sources) = {
                 let library = self
                     .libraries
                     .get(&plan.library_id)
@@ -853,23 +1102,7 @@ impl AppState {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let existing_point_ids_by_source = existing_sources
-                    .iter()
-                    .map(|source| {
-                        let point_ids = source
-                            .visual_unit_ids
-                            .iter()
-                            .filter_map(|visual_unit_id| {
-                                library
-                                    .visual_units
-                                    .get(visual_unit_id)
-                                    .map(|visual_unit| visual_unit.point_id)
-                            })
-                            .collect::<Vec<_>>();
-                        (source.id.clone(), point_ids)
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                (root, existing_sources, existing_point_ids_by_source)
+                (root, existing_sources)
             };
 
             let scan = scan_source_root_directory(&root.root_path);
@@ -913,19 +1146,19 @@ impl AppState {
                         Ok(mut classification) => {
                             if let Some(existing_source) = existing_source {
                                 classification.source_id = existing_source.id.clone();
-                                stale_point_ids.extend(
-                                    existing_point_ids_by_source
-                                        .get(&existing_source.id)
-                                        .into_iter()
-                                        .flatten()
-                                        .copied(),
-                                );
                             }
-                            let visual_units =
-                                self.new_visual_units_from_classification(&classification);
+                            let (contents, source_asset_locations, assets, units) = self
+                                .new_assets_and_units_from_classification(
+                                    &classification,
+                                    Some(&plan.library_id),
+                                );
                             let mut source = self.source_record_from_classification(
                                 &classification,
-                                visual_units.iter().map(|item| item.id.clone()).collect(),
+                                assets.iter().map(|item| item.id.clone()).collect(),
+                                contents
+                                    .first()
+                                    .map(|content| content.id.clone())
+                                    .expect("generated source content should exist"),
                             );
                             source.source_root_id = Some(root.id.clone());
                             source.source_root_path = Some(root.root_path.clone());
@@ -938,22 +1171,18 @@ impl AppState {
                             root_status_by_source_id
                                 .insert(source.id.clone(), source.status.clone());
                             summary.activated_sources += 1;
-                            summary.indexing_visual_units += visual_units.len();
-                            visual_units_to_index.extend(visual_units.iter().cloned());
+                            summary.indexing_units += units.len();
+                            units_to_index.extend(units.iter().cloned());
                             source_mutations.push(PreparedSourceMutation {
+                                contents,
                                 source,
-                                visual_units,
+                                source_asset_locations,
+                                assets,
+                                units,
                             });
                         }
                         Err(rejection) => {
                             if let Some(existing_source) = existing_source.cloned() {
-                                stale_point_ids.extend(
-                                    existing_point_ids_by_source
-                                        .get(&existing_source.id)
-                                        .into_iter()
-                                        .flatten()
-                                        .copied(),
-                                );
                                 let mutated = invalidated_source_record(
                                     existing_source,
                                     "invalidated",
@@ -965,8 +1194,11 @@ impl AppState {
                                     .insert(mutated.id.clone(), mutated.status.clone());
                                 summary.invalidated_sources += 1;
                                 source_mutations.push(PreparedSourceMutation {
+                                    contents: Vec::new(),
                                     source: mutated,
-                                    visual_units: Vec::new(),
+                                    source_asset_locations: Vec::new(),
+                                    assets: Vec::new(),
+                                    units: Vec::new(),
                                 });
                             }
                         }
@@ -991,19 +1223,15 @@ impl AppState {
                 } else {
                     summary.out_of_scope_sources += 1;
                 }
-                stale_point_ids.extend(
-                    existing_point_ids_by_source
-                        .get(&existing_source.id)
-                        .into_iter()
-                        .flatten()
-                        .copied(),
-                );
                 let mutated =
                     invalidated_source_record(existing_source, &status, reason, None, None);
                 root_status_by_source_id.insert(mutated.id.clone(), mutated.status.clone());
                 source_mutations.push(PreparedSourceMutation {
+                    contents: Vec::new(),
                     source: mutated,
-                    visual_units: Vec::new(),
+                    source_asset_locations: Vec::new(),
+                    assets: Vec::new(),
+                    units: Vec::new(),
                 });
             }
 
@@ -1035,32 +1263,24 @@ impl AppState {
             });
         }
 
-        stale_point_ids.sort_unstable();
-        stale_point_ids.dedup();
         let vector_space_batches = vector_space_bindings
             .into_iter()
             .filter_map(|binding| {
-                let visual_units = visual_units_to_index
+                let units = units_to_index
                     .iter()
-                    .filter(|visual_unit| {
+                    .filter(|unit| {
                         binding.content_types.iter().any(|content_type| {
-                            source_action_content_type_matches_visual_unit(
-                                content_type,
-                                &visual_unit.kind,
-                            )
+                            source_action_content_type_matches_asset(content_type, &unit.asset_type)
                         })
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if visual_units.is_empty() && stale_point_ids.is_empty() {
+                if units.is_empty() {
                     return None;
                 }
                 Some(PreparedSourceActionVectorSpaceBatch {
                     vector_space_id: binding.vector_space_id.clone(),
-                    can_rebuild_from_scratch,
-                    had_existing_index: active_vector_spaces.contains(&binding.vector_space_id),
-                    stale_point_ids: stale_point_ids.clone(),
-                    visual_units_to_index: visual_units,
+                    units_to_index: units,
                 })
             })
             .collect::<Vec<_>>();
@@ -1097,19 +1317,17 @@ impl AppState {
                 .ok_or_else(|| "Library was not found.".to_string())?;
 
             for mutation in &prepared.source_mutations {
-                let old_visual_unit_ids = library
-                    .sources
-                    .get(&mutation.source.id)
-                    .map(|source| source.visual_unit_ids.clone())
-                    .unwrap_or_default();
-                if !old_visual_unit_ids.is_empty() {
-                    let stale_ids = old_visual_unit_ids.iter().cloned().collect::<BTreeSet<_>>();
+                if library.sources.contains_key(&mutation.source.id) {
+                    library.source_asset_location_order.retain(|location_id| {
+                        library
+                            .source_asset_locations
+                            .get(location_id)
+                            .map(|location| location.source_id != mutation.source.id)
+                            .unwrap_or(false)
+                    });
                     library
-                        .visual_unit_order
-                        .retain(|visual_unit_id| !stale_ids.contains(visual_unit_id));
-                    for visual_unit_id in old_visual_unit_ids {
-                        library.visual_units.remove(&visual_unit_id);
-                    }
+                        .source_asset_locations
+                        .retain(|_, location| location.source_id != mutation.source.id);
                 }
 
                 if !library.sources.contains_key(&mutation.source.id) {
@@ -1119,11 +1337,30 @@ impl AppState {
                     .sources
                     .insert(mutation.source.id.clone(), mutation.source.clone());
 
-                for visual_unit in &mutation.visual_units {
-                    library.visual_unit_order.push(visual_unit.id.clone());
+                for content in &mutation.contents {
+                    library.contents.insert(content.id.clone(), content.clone());
+                }
+                for asset in &mutation.assets {
+                    if !library.assets.contains_key(&asset.id) {
+                        library.asset_order.push(asset.id.clone());
+                    }
+                    library.assets.insert(asset.id.clone(), asset.clone());
+                }
+                for location in &mutation.source_asset_locations {
+                    if !library.source_asset_locations.contains_key(&location.id) {
+                        library
+                            .source_asset_location_order
+                            .push(location.id.clone());
+                    }
                     library
-                        .visual_units
-                        .insert(visual_unit.id.clone(), visual_unit.clone());
+                        .source_asset_locations
+                        .insert(location.id.clone(), location.clone());
+                }
+                for unit in &mutation.units {
+                    if !library.units.contains_key(&unit.id) {
+                        library.unit_order.push(unit.id.clone());
+                    }
+                    library.units.insert(unit.id.clone(), unit.clone());
                 }
             }
 
@@ -1137,10 +1374,7 @@ impl AppState {
                 }
             }
 
-            for vector_space_id in &outcome.activated_vector_spaces {
-                library.active_vector_spaces.insert(vector_space_id.clone());
-                library.retired_vector_spaces.remove(vector_space_id);
-            }
+            activate_unit_indexes_for_source_action(library, &prepared, job_id, &outcome);
 
             if let Err(message) = self.persist_durable_state() {
                 *self = before;
@@ -1194,7 +1428,7 @@ impl AppState {
         job.snapshot.phase = outcome.phase.to_string();
         job.snapshot.progress.completed = if outcome.status == "completed" {
             job.snapshot.progress.total
-        } else if job.snapshot.progress.unit == "visual_unit" {
+        } else if job.snapshot.progress.unit == "unit" {
             job.snapshot
                 .progress
                 .completed
@@ -1294,15 +1528,161 @@ impl AppState {
     }
 }
 
-fn source_action_content_type_matches_visual_unit(
-    content_type: &str,
-    visual_unit_kind: &str,
-) -> bool {
+fn activate_unit_indexes_for_import(
+    library: &mut LibraryRecord,
+    prepared: &PreparedImport,
+    job_id: &str,
+    outcome: &ImportJobOutcome,
+) {
+    for batch in &prepared.vector_space_batches {
+        if !outcome
+            .activated_vector_spaces
+            .contains(&batch.vector_space_id)
+        {
+            continue;
+        }
+        for unit in &batch.units {
+            upsert_ready_unit_index(library, unit, &batch.vector_space_id, job_id);
+        }
+    }
+}
+
+fn replace_source_records(
+    library: &mut LibraryRecord,
+    contents: &[ContentRecord],
+    source: &SourceRecord,
+    source_asset_locations: &[SourceAssetLocationRecord],
+    assets: &[AssetRecord],
+    units: &[UnitRecord],
+    indexed_units_by_vector_space: &[(String, Vec<UnitRecord>)],
+    job_id: &str,
+) -> Vec<u64> {
+    let mut old_point_ids = Vec::new();
+    if library.sources.contains_key(&source.id) {
+        library.source_asset_location_order.retain(|location_id| {
+            library
+                .source_asset_locations
+                .get(location_id)
+                .map(|location| location.source_id != source.id)
+                .unwrap_or(false)
+        });
+        library
+            .source_asset_locations
+            .retain(|_, location| location.source_id != source.id);
+    }
+
+    if !library.sources.contains_key(&source.id) {
+        library.source_order.push(source.id.clone());
+    }
+    library.sources.insert(source.id.clone(), source.clone());
+
+    for content in contents {
+        library.contents.insert(content.id.clone(), content.clone());
+    }
+    for asset in assets {
+        if !library.assets.contains_key(&asset.id) {
+            library.asset_order.push(asset.id.clone());
+        }
+        library.assets.insert(asset.id.clone(), asset.clone());
+    }
+    for location in source_asset_locations {
+        if !library.source_asset_locations.contains_key(&location.id) {
+            library
+                .source_asset_location_order
+                .push(location.id.clone());
+        }
+        library
+            .source_asset_locations
+            .insert(location.id.clone(), location.clone());
+    }
+    for unit in units {
+        if !library.units.contains_key(&unit.id) {
+            library.unit_order.push(unit.id.clone());
+        }
+        library.units.insert(unit.id.clone(), unit.clone());
+    }
+
+    for (vector_space_id, indexed_units) in indexed_units_by_vector_space {
+        for unit in indexed_units {
+            upsert_ready_unit_index(library, unit, vector_space_id, job_id);
+        }
+    }
+
+    old_point_ids.sort_unstable();
+    old_point_ids.dedup();
+    old_point_ids
+}
+
+fn activate_unit_indexes_for_source_action(
+    library: &mut LibraryRecord,
+    prepared: &PreparedSourceAction,
+    job_id: &str,
+    outcome: &SourceActionJobOutcome,
+) {
+    for batch in &prepared.vector_space_batches {
+        if !outcome
+            .activated_vector_spaces
+            .contains(&batch.vector_space_id)
+        {
+            continue;
+        }
+        for unit in &batch.units_to_index {
+            upsert_ready_unit_index(library, unit, &batch.vector_space_id, job_id);
+        }
+    }
+}
+
+fn upsert_ready_unit_index(
+    library: &mut LibraryRecord,
+    unit: &UnitRecord,
+    vector_space_id: &str,
+    job_id: &str,
+) {
+    let key = UnitIndexRecord::key(&unit.id, vector_space_id);
+    library.unit_indexes.insert(
+        key,
+        UnitIndexRecord {
+            unit_id: unit.id.clone(),
+            vector_space_id: vector_space_id.to_string(),
+            status: "ready".to_string(),
+            visibility: ACTIVE_INDEX_VISIBILITY.to_string(),
+            vector_ref: Some(json!({
+                "backend": "qdrant",
+                "point_id": unit.point_id,
+            })),
+            job_id: Some(job_id.to_string()),
+            error_summary: None,
+        },
+    );
+    if let Some(asset) = library.assets.get(&unit.asset_id) {
+        let pipe_signature = source_content_pipe_signature(asset, unit);
+        let key = ContentE2eIndexStateRecord::key(
+            &asset.source_content_id,
+            &pipe_signature,
+            vector_space_id,
+        );
+        library.content_e2e_index_states.insert(
+            key,
+            ContentE2eIndexStateRecord {
+                content_id: asset.source_content_id.clone(),
+                pipe_signature,
+                vector_space_id: vector_space_id.to_string(),
+                indexed_at_ms: current_unix_ms(),
+            },
+        );
+    }
+}
+
+fn source_content_pipe_signature(asset: &AssetRecord, unit: &UnitRecord) -> String {
+    format!("{}:{}:v1", asset.asset_type, unit.unit_type)
+}
+
+fn source_action_content_type_matches_asset(content_type: &str, asset_kind: &str) -> bool {
     match content_type {
-        "image" => visual_unit_kind == "image",
-        "document" => visual_unit_kind == "document_page",
-        "video" => visual_unit_kind == "video_segment",
-        "text" => visual_unit_kind == "text",
+        "image" => asset_kind == "image",
+        "document" => asset_kind == "document_page",
+        "video" => asset_kind == "video_segment",
+        "text" => asset_kind == "text",
         _ => false,
     }
 }
