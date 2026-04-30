@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-04-28
+### Changed
+- Reworked the searchable core around Source `Content`, `SourceAssetLocation`, `Asset`, `Unit`, `VectorSpace`, `UnitIndex`, and `ContentE2eIndexState`, with a breaking `state.sqlite` schema v6 reset/cutover boundary.
+- Collapsed Qdrant to global VectorSpace namespaces with Unit point ids, scoped point allow-list prefiltering, minimal Unit/Asset payloads, and cross-library Source Content reuse without duplicate Unit embedding.
+- Aligned search, import, preview, diagnostics, UI, docs, and smoke scripts with Asset results, Unit evidence, `source_uri` locations, UnitIndex/content e2e summaries, and no public visibility switching.
+- Added and documented `faus find` for folder preparation, active-only partial waits, image queries, scope-only text search via `--all-libraries` or `--library-id`, and longer model-backed CLI request timeouts.
+- Added ADRs for the content-centered model, content reuse state, and row-level vector prefiltering, and refreshed related specs/tests around those contracts.
+
 ## 2026-04-27
 ### Changed
 - Reworked Settings around runtime-config overlays for provider/model and content-type CRUD, including inheritance restore states and cached provider runtime probes.
