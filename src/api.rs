@@ -719,14 +719,14 @@ pub(crate) struct DocumentSearchRequest {
     pub(crate) target_content_types: Option<Vec<String>>,
 }
 
-#[derive(ToSchema, Debug, Deserialize)]
+#[derive(ToSchema, Debug, Deserialize, Serialize)]
 pub(crate) struct QueryImageInputRequest {
     pub(crate) kind: String,
     pub(crate) temp_asset_id: Option<String>,
     pub(crate) asset_id: Option<String>,
 }
 
-#[derive(ToSchema, Debug, Deserialize)]
+#[derive(ToSchema, Debug, Deserialize, Serialize)]
 pub(crate) struct QueryVideoInputRequest {
     pub(crate) kind: String,
     pub(crate) temp_asset_id: Option<String>,
@@ -735,11 +735,12 @@ pub(crate) struct QueryVideoInputRequest {
     pub(crate) locator: Option<Value>,
 }
 
-#[derive(ToSchema, Debug, Deserialize)]
+#[derive(ToSchema, Debug, Deserialize, Serialize)]
 pub(crate) struct QueryDocumentInputRequest {
     pub(crate) kind: String,
     pub(crate) temp_asset_id: Option<String>,
     pub(crate) source_id: Option<String>,
+    pub(crate) asset_id: Option<String>,
     pub(crate) locator: Option<Value>,
 }
 
@@ -879,7 +880,7 @@ pub(crate) struct ErrorEnvelope {
     pub(crate) error: ErrorPayload,
 }
 
-#[derive(ToSchema, Debug, Serialize)]
+#[derive(ToSchema, Debug, Serialize, Clone)]
 pub(crate) struct ErrorPayload {
     pub(crate) code: String,
     pub(crate) message: String,
@@ -887,6 +888,53 @@ pub(crate) struct ErrorPayload {
     pub(crate) details: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) retryable: Option<bool>,
+}
+
+#[derive(ToSchema, Debug, Serialize)]
+pub(crate) struct QueryHistoryListData {
+    pub(crate) items: Vec<QueryHistorySummaryData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(ToSchema, Debug, Serialize)]
+pub(crate) struct QueryHistorySummaryData {
+    pub(crate) query_id: String,
+    pub(crate) created_at_ms: u128,
+    pub(crate) source: String,
+    pub(crate) query_kind: String,
+    pub(crate) input_kind: String,
+    pub(crate) input_summary: String,
+    pub(crate) scope_summary: String,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result_count: Option<usize>,
+    pub(crate) input_available: bool,
+}
+
+#[derive(ToSchema, Debug, Serialize)]
+pub(crate) struct QueryHistoryDetailData {
+    #[serde(flatten)]
+    pub(crate) summary: QueryHistorySummaryData,
+    pub(crate) input: Value,
+    pub(crate) search_scope: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) filters: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) target_content_types: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) top_k: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_message: Option<String>,
+    pub(crate) duration_ms: u128,
+}
+
+#[derive(ToSchema, Debug, Serialize)]
+pub(crate) struct QueryHistoryDeleteData {
+    pub(crate) deleted: usize,
+    pub(crate) query_assets_deleted: usize,
 }
 
 #[derive(Debug)]

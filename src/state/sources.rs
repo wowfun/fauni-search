@@ -267,7 +267,9 @@ impl AppState {
                 .temp_query_assets
                 .iter()
                 .filter_map(|(temp_asset_id, asset)| {
-                    (asset.library_id == library_id).then_some(temp_asset_id.clone())
+                    asset
+                        .is_library_scoped_to(library_id)
+                        .then_some(temp_asset_id.clone())
                 })
                 .collect::<BTreeSet<_>>();
             let mut temp_asset_paths = Vec::with_capacity(temp_asset_ids.len());

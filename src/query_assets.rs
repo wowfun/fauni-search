@@ -293,6 +293,7 @@ pub(crate) fn persist_query_image_asset(
 
     let filename = format!("query-image-{}.{}", runtime_token(), upload.extension);
     let path = target_dir.join(filename);
+    let size_bytes = upload.bytes.len();
     fs::write(&path, upload.bytes).map_err(|error| {
         ApiError::runtime_unavailable(
             format!("Query image asset could not be written: {error}"),
@@ -307,6 +308,7 @@ pub(crate) fn persist_query_image_asset(
         original_filename: upload.original_filename,
         page_count: None,
         duration_ms: None,
+        size_bytes,
     })
 }
 
@@ -336,6 +338,7 @@ pub(crate) fn persist_query_video_asset(
 
     let filename = format!("query-video-{}.{}", runtime_token(), upload.extension);
     let path = target_dir.join(filename);
+    let size_bytes = upload.bytes.len();
     fs::write(&path, upload.bytes).map_err(|error| {
         ApiError::runtime_unavailable(
             format!("Query video asset could not be written: {error}"),
@@ -355,6 +358,7 @@ pub(crate) fn persist_query_video_asset(
         original_filename: upload.original_filename,
         page_count: None,
         duration_ms: Some(duration_ms),
+        size_bytes,
     })
 }
 
@@ -374,6 +378,7 @@ pub(crate) fn persist_query_document_asset(
 
     let filename = format!("query-document-{}.{}", runtime_token(), upload.extension);
     let path = target_dir.join(filename);
+    let size_bytes = upload.bytes.len();
     fs::write(&path, upload.bytes).map_err(|error| {
         ApiError::runtime_unavailable(
             format!("Query document asset could not be written: {error}"),
@@ -393,6 +398,7 @@ pub(crate) fn persist_query_document_asset(
         original_filename: upload.original_filename,
         page_count: Some(page_count),
         duration_ms: None,
+        size_bytes,
     })
 }
 
@@ -635,6 +641,19 @@ pub(crate) fn query_video_preview_reference(
     })
 }
 
+pub(crate) fn global_query_video_preview_reference(
+    temp_asset_id: &str,
+) -> Result<PreviewReference, ApiError> {
+    Ok(PreviewReference {
+        url: format!(
+            "{}/query-assets/videos/{}/preview",
+            app_base_url()?.trim_end_matches('/'),
+            temp_asset_id
+        ),
+        handle: Some(format!("query-video-preview:{temp_asset_id}")),
+    })
+}
+
 pub(crate) fn query_document_preview_reference(
     library_id: &str,
     temp_asset_id: &str,
@@ -644,6 +663,19 @@ pub(crate) fn query_document_preview_reference(
             "{}/libraries/{}/query-assets/documents/{}/preview#page=1&view=FitH",
             app_base_url()?.trim_end_matches('/'),
             library_id,
+            temp_asset_id
+        ),
+        handle: Some(format!("query-document-preview:{temp_asset_id}")),
+    })
+}
+
+pub(crate) fn global_query_document_preview_reference(
+    temp_asset_id: &str,
+) -> Result<PreviewReference, ApiError> {
+    Ok(PreviewReference {
+        url: format!(
+            "{}/query-assets/documents/{}/preview#page=1&view=FitH",
+            app_base_url()?.trim_end_matches('/'),
             temp_asset_id
         ),
         handle: Some(format!("query-document-preview:{temp_asset_id}")),
@@ -674,6 +706,19 @@ pub(crate) fn query_image_preview_reference(
             "{}/libraries/{}/query-assets/images/{}/preview",
             app_base_url()?.trim_end_matches('/'),
             library_id,
+            temp_asset_id
+        ),
+        handle: Some(format!("query-image-preview:{temp_asset_id}")),
+    })
+}
+
+pub(crate) fn global_query_image_preview_reference(
+    temp_asset_id: &str,
+) -> Result<PreviewReference, ApiError> {
+    Ok(PreviewReference {
+        url: format!(
+            "{}/query-assets/images/{}/preview",
+            app_base_url()?.trim_end_matches('/'),
             temp_asset_id
         ),
         handle: Some(format!("query-image-preview:{temp_asset_id}")),

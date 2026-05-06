@@ -76,6 +76,13 @@ async fn search_text_rejects_empty_text() {
     let body = search.json();
     assert_eq!(body["error"]["code"], "validation_failed");
     assert_eq!(body["error"]["details"]["field"], "text");
+
+    let history = app.get_json("/queries/history").await;
+    assert_eq!(history.status, StatusCode::OK);
+    assert!(history.json()["data"]["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -293,6 +300,28 @@ async fn search_text_returns_results_with_debug_vector_type_after_import() {
     );
     assert_eq!(data["debug"]["prefilter"][0]["mode"], "point_allow_list");
     assert_eq!(data["debug"]["prefilter"][0]["candidate_point_count"], 2);
+
+    let history = app.get_json("/queries/history").await;
+    assert_eq!(history.status, StatusCode::OK);
+    let history_body = history.json();
+    let items = history_body["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["query_kind"], "text");
+    assert_eq!(items[0]["input_kind"], "inline_text");
+    assert_eq!(items[0]["input_summary"], "chart");
+    assert_eq!(items[0]["status"], "completed");
+    assert_eq!(items[0]["result_count"], 2);
+    assert_eq!(items[0]["input_available"], true);
+    let query_id = items[0]["query_id"].as_str().unwrap();
+
+    let detail = app.get_json(&format!("/queries/history/{query_id}")).await;
+    assert_eq!(detail.status, StatusCode::OK);
+    let detail_body = detail.json();
+    assert_eq!(detail_body["data"]["input"]["text"], "chart");
+    assert_eq!(
+        detail_body["data"]["search_scope"]["library_id"],
+        library_id
+    );
 }
 
 #[tokio::test]
@@ -358,6 +387,90 @@ async fn search_prefilter_applies_path_prefix_before_qdrant_allow_list() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn search_image_all_libraries_uses_global_query_asset_and_records_history() {
+    let env = TestEnv::new_with_qdrant("search-api-global-image-query").await;
+    let pdf_path = env.write_test_pdf("fixtures/search/source.pdf", 1);
+    let app = env.boot().await;
+    let library = app
+        .post_json(
+            "/libraries",
+            json!({
+                "display_name": "search-global-image"
+            }),
+        )
+        .await
+        .json();
+    let library_id = library["data"]["id"].as_str().unwrap();
+
+    let import = app
+        .post_json(
+            &format!("/libraries/{library_id}/imports"),
+            json!({
+                "paths": [pdf_path.to_string_lossy().to_string()]
+            }),
+        )
+        .await
+        .json();
+    let job_id = import["data"]["job_handle"].as_str().unwrap();
+    let job_body = wait_for_job_completion(&app, job_id).await;
+    assert_eq!(job_body["data"]["status"], "completed");
+
+    let upload = app
+        .post_multipart(
+            "/query-assets/images",
+            vec![],
+            Some(MultipartFile {
+                field_name: "file".to_string(),
+                filename: "query.png".to_string(),
+                content_type: "image/png".to_string(),
+                bytes: b"query image bytes".to_vec(),
+            }),
+        )
+        .await;
+    assert_eq!(upload.status, StatusCode::CREATED);
+    let upload_body = upload.json();
+    let temp_asset_id = upload_body["data"]["temp_asset_id"].as_str().unwrap();
+    assert!(upload_body["data"]["preview"]["url"]
+        .as_str()
+        .unwrap()
+        .contains("/query-assets/images/"));
+
+    let search = app
+        .post_json(
+            "/search/image",
+            json!({
+                "search_scope": { "kind": "all_libraries" },
+                "image_input": {
+                    "kind": "temp_asset",
+                    "temp_asset_id": temp_asset_id
+                },
+                "target_content_types": ["document"],
+                "debug": true
+            }),
+        )
+        .await;
+    assert_eq!(search.status, StatusCode::OK);
+    let body = search.json();
+    let data = &body["data"];
+    let results = data["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["asset_type"], "document_page");
+    assert_eq!(results[0]["library_id"], library_id);
+    assert_eq!(data["debug"]["prefilter"][0]["mode"], "point_allow_list");
+
+    let history = app.get_json("/queries/history?query_kind=image").await;
+    assert_eq!(history.status, StatusCode::OK);
+    let history_body = history.json();
+    let items = history_body["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["query_kind"], "image");
+    assert_eq!(items[0]["input_kind"], "query_asset");
+    assert_eq!(items[0]["input_summary"], temp_asset_id);
+    assert_eq!(items[0]["scope_summary"], "all_libraries");
+    assert_eq!(items[0]["input_available"], true);
 }
 
 #[tokio::test]

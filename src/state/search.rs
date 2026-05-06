@@ -104,18 +104,7 @@ impl AppState {
                 "image",
             )
             .await?;
-        let plan_library_id = (!plan.library_id.trim().is_empty())
-            .then(|| plan.library_id.clone())
-            .ok_or_else(|| {
-            ApiError::not_supported(
-                "Current 110-image-search implementation only supports single-library search_scope.",
-                Some(json!({
-                    "field": "search_scope.kind",
-                    "supported": ["library"],
-                    "received": search_scope.kind,
-                })),
-            )
-        })?;
+        let plan_library_id = (!plan.library_id.trim().is_empty()).then(|| plan.library_id.clone());
 
         match request.image_input.kind.as_str() {
             "temp_asset" => {
@@ -130,7 +119,12 @@ impl AppState {
                                 Some(json!({ "field": "image_input.temp_asset_id" })),
                             )
                         })?;
-                let asset = self.get_temp_query_asset(&plan_library_id, temp_asset_id)?;
+                let asset = self.get_temp_query_asset_for_search(
+                    plan_library_id.as_deref(),
+                    temp_asset_id,
+                    "image",
+                    "Query image",
+                )?;
                 Ok((plan, ResolvedImageQueryInput::TempAsset(asset)))
             }
             "library_object" => {
@@ -140,7 +134,12 @@ impl AppState {
                         Some(json!({ "field": "image_input.asset_id" })),
                     )
                 })?;
-                let asset = self.get_library_asset(&plan_library_id, asset_id)?;
+                let asset = match plan_library_id.as_deref() {
+                    Some(library_id) => self.get_library_asset(library_id, asset_id)?,
+                    None => find_asset_across_libraries(&self.libraries, asset_id)
+                        .cloned()
+                        .ok_or_else(|| ApiError::not_found("Asset was not found."))?,
+                };
                 if !matches!(asset.asset_type.as_str(), "image" | "document_page") {
                     return Err(ApiError::not_supported(
                         "Current 110-image-search implementation only supports library image and document_page objects as query images.",
@@ -183,18 +182,7 @@ impl AppState {
                 "video",
             )
             .await?;
-        let plan_library_id = (!plan.library_id.trim().is_empty())
-            .then(|| plan.library_id.clone())
-            .ok_or_else(|| {
-            ApiError::not_supported(
-                "Current 120-video-search implementation only supports single-library search_scope.",
-                Some(json!({
-                    "field": "search_scope.kind",
-                    "supported": ["library"],
-                    "received": search_scope.kind,
-                })),
-            )
-        })?;
+        let plan_library_id = (!plan.library_id.trim().is_empty()).then(|| plan.library_id.clone());
 
         match request.video_input.kind.as_str() {
             "temp_asset" => {
@@ -209,7 +197,12 @@ impl AppState {
                                 Some(json!({ "field": "video_input.temp_asset_id" })),
                             )
                         })?;
-                let asset = self.get_temp_query_video_asset(&plan_library_id, temp_asset_id)?;
+                let asset = self.get_temp_query_asset_for_search(
+                    plan_library_id.as_deref(),
+                    temp_asset_id,
+                    "video",
+                    "Query video",
+                )?;
                 let locator = resolve_video_query_locator(
                     request.video_input.locator.as_ref(),
                     asset.duration_ms,
@@ -236,7 +229,12 @@ impl AppState {
                         ));
                     }
 
-                    let asset = self.get_library_asset(&plan_library_id, asset_id)?;
+                    let asset = match plan_library_id.as_deref() {
+                        Some(library_id) => self.get_library_asset(library_id, asset_id)?,
+                        None => find_asset_across_libraries(&self.libraries, asset_id)
+                            .cloned()
+                            .ok_or_else(|| ApiError::not_found("Asset was not found."))?,
+                    };
                     if asset.asset_type != "video_segment" || asset.source_type != "video" {
                         return Err(ApiError::not_supported(
                             "Current 120-video-search implementation only supports library video_segment objects as direct query video segments.",
@@ -259,6 +257,15 @@ impl AppState {
                     ));
                 }
 
+                let Some(plan_library_id) = plan_library_id.as_deref() else {
+                    return Err(ApiError::not_supported(
+                        "video_input.source_id requires single-library search_scope.",
+                        Some(json!({
+                            "field": "video_input.source_id",
+                            "search_scope": search_scope.kind,
+                        })),
+                    ));
+                };
                 let source_id = request.video_input.source_id.as_deref().ok_or_else(|| {
                     ApiError::validation_failed(
                         "video_input.kind=library_object requires source_id or asset_id.",
@@ -321,18 +328,7 @@ impl AppState {
                 "document",
             )
             .await?;
-        let plan_library_id = (!plan.library_id.trim().is_empty())
-            .then(|| plan.library_id.clone())
-            .ok_or_else(|| {
-            ApiError::not_supported(
-                "Current 130-document-search implementation only supports single-library search_scope.",
-                Some(json!({
-                    "field": "search_scope.kind",
-                    "supported": ["library"],
-                    "received": search_scope.kind,
-                })),
-            )
-        })?;
+        let plan_library_id = (!plan.library_id.trim().is_empty()).then(|| plan.library_id.clone());
 
         match request.document_input.kind.as_str() {
             "temp_asset" => {
@@ -347,7 +343,12 @@ impl AppState {
                                 Some(json!({ "field": "document_input.temp_asset_id" })),
                             )
                         })?;
-                let asset = self.get_temp_query_document_asset(&plan_library_id, temp_asset_id)?;
+                let asset = self.get_temp_query_asset_for_search(
+                    plan_library_id.as_deref(),
+                    temp_asset_id,
+                    "pdf",
+                    "Query document",
+                )?;
                 let locator = resolve_document_query_locator(
                     request.document_input.locator.as_ref(),
                     asset.page_count,
@@ -362,10 +363,56 @@ impl AppState {
                 ))
             }
             "library_object" => {
+                if let Some(asset_id) = request.document_input.asset_id.as_deref() {
+                    if request.document_input.locator.is_some() {
+                        return Err(ApiError::validation_failed(
+                            "document_input.asset_id reuses the page object's own locator and must not carry document_input.locator.",
+                            Some(json!({
+                                "field": "document_input.locator",
+                                "input_kind": "library_object",
+                                "library_object_asset_type": "document_page",
+                            })),
+                        ));
+                    }
+                    let asset = match plan_library_id.as_deref() {
+                        Some(library_id) => self.get_library_asset(library_id, asset_id)?,
+                        None => find_asset_across_libraries(&self.libraries, asset_id)
+                            .cloned()
+                            .ok_or_else(|| ApiError::not_found("Asset was not found."))?,
+                    };
+                    if asset.asset_type != "document_page" || asset.source_type != "pdf" {
+                        return Err(ApiError::not_supported(
+                            "Current 130-document-search implementation only supports library document_page objects as query documents.",
+                            Some(json!({
+                                "field": "document_input.asset_id",
+                                "received_asset_type": asset.asset_type,
+                                "received_source_type": asset.source_type,
+                                "supported_asset_type": "document_page",
+                                "supported_source_type": "pdf",
+                            })),
+                        ));
+                    }
+                    return Ok((
+                        plan,
+                        ResolvedDocumentQueryInput {
+                            path: asset.source_path,
+                            locator: Some(asset.locator),
+                        },
+                    ));
+                }
+                let Some(plan_library_id) = plan_library_id.as_deref() else {
+                    return Err(ApiError::not_supported(
+                        "document_input.source_id requires single-library search_scope.",
+                        Some(json!({
+                            "field": "document_input.source_id",
+                            "search_scope": search_scope.kind,
+                        })),
+                    ));
+                };
                 let source_id = request.document_input.source_id.as_deref().ok_or_else(|| {
                     ApiError::validation_failed(
-                        "document_input.kind=library_object requires source_id.",
-                        Some(json!({ "field": "document_input.source_id" })),
+                        "document_input.kind=library_object requires source_id or asset_id.",
+                        Some(json!({ "field": "document_input", "supported_fields": ["source_id", "asset_id"] })),
                     )
                 })?;
                 let source = self.get_library_source(&plan_library_id, source_id)?;
@@ -438,27 +485,7 @@ impl AppState {
                 .await
             }
             "all_libraries" => {
-                if query_input_type != "text" {
-                    return Err(ApiError::not_supported(
-                        format!(
-                            "Current {} search implementation only supports single-library search_scope.",
-                            match query_input_type {
-                                "image" => "110-image-search",
-                                "video" => "120-video-search",
-                                "document" => "130-document-search",
-                                _ => "search",
-                            }
-                        ),
-                        Some(json!({
-                            "field": "search_scope.kind",
-                            "supported": ["library"],
-                            "received": "all_libraries",
-                            "query_input_type": query_input_type,
-                        })),
-                    ));
-                }
-
-                self.prepare_all_libraries_text_search_scope(
+                self.prepare_all_libraries_search_scope(
                     filters,
                     top_k,
                     cursor,
@@ -491,7 +518,7 @@ impl AppState {
         }
     }
 
-    async fn prepare_all_libraries_text_search_scope(
+    async fn prepare_all_libraries_search_scope(
         &mut self,
         filters: Option<&Value>,
         top_k: Option<usize>,
@@ -579,8 +606,13 @@ impl AppState {
         }
 
         Err(ApiError::not_ready(
-            "No library in the current search scope is ready for text search.",
-            Some(json!({ "search_scope": "all_libraries" })),
+            format!(
+                "No library in the current search scope is ready for {query_input_type} search."
+            ),
+            Some(json!({
+                "search_scope": "all_libraries",
+                "query_input_type": query_input_type,
+            })),
         ))
     }
 
@@ -870,7 +902,7 @@ impl AppState {
         library_id: &str,
         staged: StagedQueryAsset,
     ) -> Result<QueryImageAssetData, ApiError> {
-        let record = self.register_temp_query_asset_record(library_id, staged)?;
+        let record = self.register_temp_query_asset_record(Some(library_id), staged)?;
         Ok(QueryImageAssetData {
             temp_asset_id: record.id.clone(),
             preview: query_image_preview_reference(library_id, &record.id)?,
@@ -885,7 +917,7 @@ impl AppState {
         library_id: &str,
         staged: StagedQueryAsset,
     ) -> Result<QueryVideoAssetData, ApiError> {
-        let record = self.register_temp_query_asset_record(library_id, staged)?;
+        let record = self.register_temp_query_asset_record(Some(library_id), staged)?;
         Ok(QueryVideoAssetData {
             temp_asset_id: record.id.clone(),
             preview: query_video_preview_reference(library_id, &record.id)?,
@@ -901,7 +933,7 @@ impl AppState {
         library_id: &str,
         staged: StagedQueryAsset,
     ) -> Result<QueryDocumentAssetData, ApiError> {
-        let record = self.register_temp_query_asset_record(library_id, staged)?;
+        let record = self.register_temp_query_asset_record(Some(library_id), staged)?;
         Ok(QueryDocumentAssetData {
             temp_asset_id: record.id.clone(),
             preview: query_document_preview_reference(library_id, &record.id)?,
@@ -912,31 +944,95 @@ impl AppState {
         })
     }
 
+    pub(crate) fn register_global_temp_query_asset(
+        &mut self,
+        staged: StagedQueryAsset,
+    ) -> Result<QueryImageAssetData, ApiError> {
+        let record = self.register_temp_query_asset_record(None, staged)?;
+        Ok(QueryImageAssetData {
+            temp_asset_id: record.id.clone(),
+            preview: global_query_image_preview_reference(&record.id)?,
+            source_type: record.source_type.clone(),
+            content_type: record.content_type.clone(),
+            original_filename: record.original_filename.clone(),
+        })
+    }
+
+    pub(crate) fn register_global_temp_query_video_asset(
+        &mut self,
+        staged: StagedQueryAsset,
+    ) -> Result<QueryVideoAssetData, ApiError> {
+        let record = self.register_temp_query_asset_record(None, staged)?;
+        Ok(QueryVideoAssetData {
+            temp_asset_id: record.id.clone(),
+            preview: global_query_video_preview_reference(&record.id)?,
+            source_type: record.source_type.clone(),
+            content_type: record.content_type.clone(),
+            original_filename: record.original_filename.clone(),
+            duration_ms: record.duration_ms,
+        })
+    }
+
+    pub(crate) fn register_global_temp_query_document_asset(
+        &mut self,
+        staged: StagedQueryAsset,
+    ) -> Result<QueryDocumentAssetData, ApiError> {
+        let record = self.register_temp_query_asset_record(None, staged)?;
+        Ok(QueryDocumentAssetData {
+            temp_asset_id: record.id.clone(),
+            preview: global_query_document_preview_reference(&record.id)?,
+            source_type: record.source_type.clone(),
+            content_type: record.content_type.clone(),
+            original_filename: record.original_filename.clone(),
+            page_count: record.page_count,
+        })
+    }
+
     pub(crate) fn register_temp_query_asset_record(
         &mut self,
-        library_id: &str,
+        library_id: Option<&str>,
         staged: StagedQueryAsset,
     ) -> Result<TempQueryAssetRecord, ApiError> {
-        if !self.libraries.contains_key(library_id) {
-            return Err(ApiError::not_found("Library was not found."));
+        if let Some(library_id) = library_id {
+            if !self.libraries.contains_key(library_id) {
+                return Err(ApiError::not_found("Library was not found."));
+            }
         }
 
         self.prune_temp_query_assets();
 
+        let before = self.temp_query_assets.clone();
         let temp_asset_id = self.next_temp_asset_id();
+        let now_ms = current_unix_ms();
         let record = TempQueryAssetRecord {
             id: temp_asset_id.clone(),
-            library_id: library_id.to_string(),
+            owner_scope: library_id
+                .map(|_| "library".to_string())
+                .unwrap_or_else(|| "global".to_string()),
+            library_id: library_id.map(str::to_string),
             path: staged.path,
             content_type: staged.content_type,
             source_type: staged.source_type,
             original_filename: staged.original_filename,
             page_count: staged.page_count,
             duration_ms: staged.duration_ms,
-            expires_at_ms: current_unix_ms() + TEMP_QUERY_ASSET_TTL_MS,
+            size_bytes: staged.size_bytes,
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms + TEMP_QUERY_ASSET_TTL_MS,
         };
 
         self.temp_query_assets.insert(record.id.clone(), record);
+        if let Err(message) = self.persist_durable_state() {
+            let record = self.temp_query_assets.remove(&temp_asset_id);
+            self.temp_query_assets = before;
+            if let Some(record) = record {
+                remove_temp_query_asset_file(&record.path);
+            }
+            return Err(ApiError::runtime_unavailable(
+                format!("Query asset could not be persisted: {message}"),
+                None,
+            ));
+        }
         Ok(self.temp_query_assets[&temp_asset_id].clone())
     }
 
@@ -967,10 +1063,14 @@ impl AppState {
             .filter_map(|temp_asset_id| self.temp_query_assets.remove(&temp_asset_id))
             .count();
 
-        TempQueryAssetPruneSummary {
+        let summary = TempQueryAssetPruneSummary {
             expired_removed,
             missing_removed,
+        };
+        if summary.removed_count() > 0 {
+            let _ = self.persist_durable_state();
         }
+        summary
     }
 
     pub(crate) fn get_temp_query_asset(
@@ -983,7 +1083,7 @@ impl AppState {
             .get(temp_asset_id)
             .ok_or_else(|| ApiError::not_found("Query image was not found or has expired."))?;
 
-        if asset.library_id != library_id {
+        if !asset.is_library_scoped_to(library_id) {
             return Err(ApiError::not_found(
                 "Query image was not found for the selected library.",
             ));
@@ -1001,6 +1101,56 @@ impl AppState {
         Ok(asset.clone())
     }
 
+    pub(crate) fn get_global_temp_query_asset(
+        &self,
+        temp_asset_id: &str,
+    ) -> Result<TempQueryAssetRecord, ApiError> {
+        let asset = self
+            .temp_query_assets
+            .get(temp_asset_id)
+            .ok_or_else(|| ApiError::not_found("Query asset was not found or has expired."))?;
+        if !asset.is_global() {
+            return Err(ApiError::not_found(
+                "Query asset was not found in the global query asset store.",
+            ));
+        }
+        ensure_temp_query_asset_available(asset, "Query asset")?;
+        Ok(asset.clone())
+    }
+
+    pub(crate) fn get_temp_query_asset_for_search(
+        &self,
+        library_id: Option<&str>,
+        temp_asset_id: &str,
+        expected_source_type: &str,
+        label: &str,
+    ) -> Result<TempQueryAssetRecord, ApiError> {
+        let asset = self
+            .temp_query_assets
+            .get(temp_asset_id)
+            .ok_or_else(|| ApiError::not_found(format!("{label} was not found or has expired.")))?;
+        let scope_allowed = match library_id {
+            Some(library_id) => asset.is_global() || asset.is_library_scoped_to(library_id),
+            None => asset.is_global(),
+        };
+        if !scope_allowed {
+            return Err(ApiError::not_found(format!(
+                "{label} is not available for the selected search scope."
+            )));
+        }
+        if asset.source_type != expected_source_type {
+            return Err(ApiError::not_supported(
+                format!("{label} has an unsupported source type."),
+                Some(json!({
+                    "received_source_type": asset.source_type,
+                    "supported_source_type": expected_source_type,
+                })),
+            ));
+        }
+        ensure_temp_query_asset_available(asset, label)?;
+        Ok(asset.clone())
+    }
+
     pub(crate) fn get_temp_query_video_asset(
         &self,
         library_id: &str,
@@ -1011,7 +1161,7 @@ impl AppState {
             .get(temp_asset_id)
             .ok_or_else(|| ApiError::not_found("Query video was not found or has expired."))?;
 
-        if asset.library_id != library_id {
+        if !asset.is_library_scoped_to(library_id) {
             return Err(ApiError::not_found(
                 "Query video was not found for the selected library.",
             ));
@@ -1049,7 +1199,7 @@ impl AppState {
             .get(temp_asset_id)
             .ok_or_else(|| ApiError::not_found("Query document was not found or has expired."))?;
 
-        if asset.library_id != library_id {
+        if !asset.is_library_scoped_to(library_id) {
             return Err(ApiError::not_found(
                 "Query document was not found for the selected library.",
             ));
@@ -1309,6 +1459,23 @@ fn unit_index_point_id(index: &UnitIndexRecord) -> Option<u64> {
         .as_ref()
         .and_then(|value| value.get("point_id"))
         .and_then(Value::as_u64)
+}
+
+fn ensure_temp_query_asset_available(
+    asset: &TempQueryAssetRecord,
+    label: &str,
+) -> Result<(), ApiError> {
+    if asset.expires_at_ms <= current_unix_ms() {
+        return Err(ApiError::not_found(format!(
+            "{label} was not found or has expired."
+        )));
+    }
+    if !FsPath::new(&asset.path).exists() {
+        return Err(ApiError::not_found(format!(
+            "{label} file is no longer available."
+        )));
+    }
+    Ok(())
 }
 
 fn effective_search_scope_request(

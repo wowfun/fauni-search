@@ -2,9 +2,9 @@ use crate::{
     api::*,
     indexing::{build_search_response, ExecutedSearchGroup},
     model::{
-        IncomingQueryImageUpload, MaintenanceActionKind, ResolvedImageQueryInput,
-        ResumeJobDispatch, RetryJobDispatch, SourceActionKind, SourceActionScope,
-        SourceActionTrigger, StagedSettingsModelTestFile,
+        IncomingQueryImageUpload, MaintenanceActionKind, QueryHistoryDraft,
+        ResolvedImageQueryInput, ResumeJobDispatch, RetryJobDispatch, SourceActionKind,
+        SourceActionScope, SourceActionTrigger, StagedSettingsModelTestFile, TempQueryAssetRecord,
     },
     provider::{provider_context_payload, QUERY_KIND_IMAGE, QUERY_KIND_TEXT},
     qdrant::query_qdrant,
@@ -20,8 +20,9 @@ use axum::{
     response::IntoResponse,
     Extension, Json, Router,
 };
-use serde_json::json;
-use std::{collections::BTreeMap, fs, sync::Arc};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::{collections::BTreeMap, fs, sync::Arc, time::Instant};
 use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -96,9 +97,15 @@ pub fn build_app(state: SharedState) -> Router {
         .routes(routes!(rescan_source_root))
         .routes(routes!(run_library_maintenance_action))
         .routes(routes!(list_video_sources))
+        .routes(routes!(upload_global_query_image))
+        .routes(routes!(upload_global_query_video))
+        .routes(routes!(upload_global_query_document))
         .routes(routes!(upload_query_image))
         .routes(routes!(upload_query_video))
         .routes(routes!(upload_query_document))
+        .routes(routes!(get_global_query_image_preview))
+        .routes(routes!(get_global_query_video_preview))
+        .routes(routes!(get_global_query_document_preview))
         .routes(routes!(get_query_image_preview))
         .routes(routes!(get_query_video_preview))
         .routes(routes!(get_query_document_preview))
@@ -110,6 +117,10 @@ pub fn build_app(state: SharedState) -> Router {
         .routes(routes!(cancel_job))
         .routes(routes!(resume_job))
         .routes(routes!(retry_job))
+        .routes(routes!(list_query_history))
+        .routes(routes!(get_query_history))
+        .routes(routes!(delete_query_history))
+        .routes(routes!(clear_query_history))
         .routes(routes!(search_text))
         .routes(routes!(search_image))
         .routes(routes!(search_video))
@@ -182,11 +193,17 @@ async fn route_discovery() -> Json<RootPayload> {
             "POST /libraries/{library_id}/source-roots/{source_root_id}/rescan",
             "POST /libraries/{library_id}/maintenance",
             "GET /libraries/{library_id}/video-sources",
+            "POST /query-assets/images",
+            "POST /query-assets/videos",
+            "POST /query-assets/documents",
             "POST /libraries/{library_id}/query-assets/images",
             "POST /libraries/{library_id}/query-assets/videos",
             "POST /libraries/{library_id}/query-assets/documents",
             "GET /libraries/{library_id}/video-sources/{source_id}/preview",
             "GET /libraries/{library_id}/assets/{asset_id}",
+            "GET /query-assets/images/{temp_asset_id}/preview",
+            "GET /query-assets/videos/{temp_asset_id}/preview",
+            "GET /query-assets/documents/{temp_asset_id}/preview",
             "GET /libraries/{library_id}/query-assets/images/{temp_asset_id}/preview",
             "GET /libraries/{library_id}/query-assets/videos/{temp_asset_id}/preview",
             "GET /libraries/{library_id}/query-assets/documents/{temp_asset_id}/preview",
@@ -195,6 +212,10 @@ async fn route_discovery() -> Json<RootPayload> {
             "POST /jobs/{job_id}/cancel",
             "POST /jobs/{job_id}/resume",
             "POST /jobs/{job_id}/retry",
+            "GET /queries/history",
+            "GET /queries/history/{query_id}",
+            "DELETE /queries/history/{query_id}",
+            "DELETE /queries/history",
             "POST /search/text",
             "POST /search/image",
             "POST /search/video",
@@ -1482,6 +1503,78 @@ async fn list_video_sources(
 
 #[utoipa::path(
     post,
+    path = "/query-assets/images",
+    request_body(content = QueryAssetUploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "Uploaded global query image asset", body = SuccessEnvelope<QueryImageAssetData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
+async fn upload_global_query_image(
+    State(state): State<SharedState>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<SuccessEnvelope<QueryImageAssetData>>), ApiError> {
+    let file = read_single_query_image_part(&mut multipart).await?;
+    let staged = persist_query_image_asset(file)?;
+    let data = {
+        let mut state = state.write().await;
+        state.register_global_temp_query_asset(staged)?
+    };
+
+    Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
+}
+
+#[utoipa::path(
+    post,
+    path = "/query-assets/videos",
+    request_body(content = QueryAssetUploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "Uploaded global query video asset", body = SuccessEnvelope<QueryVideoAssetData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
+async fn upload_global_query_video(
+    State(state): State<SharedState>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<SuccessEnvelope<QueryVideoAssetData>>), ApiError> {
+    let file = read_single_query_video_part(&mut multipart).await?;
+    let staged = persist_query_video_asset(file)?;
+    let data = {
+        let mut state = state.write().await;
+        state.register_global_temp_query_video_asset(staged)?
+    };
+
+    Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
+}
+
+#[utoipa::path(
+    post,
+    path = "/query-assets/documents",
+    request_body(content = QueryAssetUploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "Uploaded global query document asset", body = SuccessEnvelope<QueryDocumentAssetData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
+async fn upload_global_query_document(
+    State(state): State<SharedState>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<SuccessEnvelope<QueryDocumentAssetData>>), ApiError> {
+    let file = read_single_query_document_part(&mut multipart).await?;
+    let staged = persist_query_document_asset(file)?;
+    let data = {
+        let mut state = state.write().await;
+        state.register_global_temp_query_document_asset(staged)?
+    };
+
+    Ok((StatusCode::CREATED, Json(SuccessEnvelope { data })))
+}
+
+#[utoipa::path(
+    post,
     path = "/libraries/{library_id}/query-assets/images",
     params(("library_id" = String, Path, description = "Library id")),
     request_body(content = QueryAssetUploadForm, content_type = "multipart/form-data"),
@@ -1614,6 +1707,113 @@ async fn get_asset_preview(
         HeaderValue::from_static("no-store, max-age=0"),
     );
 
+    Ok((headers, bytes))
+}
+
+#[utoipa::path(
+    get,
+    path = "/query-assets/images/{temp_asset_id}/preview",
+    params(("temp_asset_id" = String, Path, description = "Temporary asset id")),
+    responses(
+        (status = 200, description = "Global query image preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
+async fn get_global_query_image_preview(
+    State(state): State<SharedState>,
+    Path(temp_asset_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let asset = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.get_global_temp_query_asset(&temp_asset_id)?
+    };
+    if asset.source_type != "image" {
+        return Err(ApiError::not_supported(
+            "Global query asset is not an image.",
+            Some(json!({ "temp_asset_id": temp_asset_id })),
+        ));
+    }
+    query_asset_preview_response(asset, "Query image")
+}
+
+#[utoipa::path(
+    get,
+    path = "/query-assets/videos/{temp_asset_id}/preview",
+    params(("temp_asset_id" = String, Path, description = "Temporary asset id")),
+    responses(
+        (status = 200, description = "Global query video preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
+async fn get_global_query_video_preview(
+    State(state): State<SharedState>,
+    Path(temp_asset_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let asset = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.get_global_temp_query_asset(&temp_asset_id)?
+    };
+    if asset.source_type != "video" {
+        return Err(ApiError::not_supported(
+            "Global query asset is not a video.",
+            Some(json!({ "temp_asset_id": temp_asset_id })),
+        ));
+    }
+    query_asset_preview_response(asset, "Query video")
+}
+
+#[utoipa::path(
+    get,
+    path = "/query-assets/documents/{temp_asset_id}/preview",
+    params(("temp_asset_id" = String, Path, description = "Temporary asset id")),
+    responses(
+        (status = 200, description = "Global query document preview media", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "query-assets",
+)]
+async fn get_global_query_document_preview(
+    State(state): State<SharedState>,
+    Path(temp_asset_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let asset = {
+        let mut state = state.write().await;
+        state.prune_temp_query_assets();
+        state.get_global_temp_query_asset(&temp_asset_id)?
+    };
+    if asset.source_type != "pdf" {
+        return Err(ApiError::not_supported(
+            "Global query asset is not a document.",
+            Some(json!({ "temp_asset_id": temp_asset_id })),
+        ));
+    }
+    query_asset_preview_response(asset, "Query document")
+}
+
+fn query_asset_preview_response(
+    asset: TempQueryAssetRecord,
+    label: &str,
+) -> Result<(HeaderMap, Vec<u8>), ApiError> {
+    let bytes = fs::read(&asset.path)
+        .map_err(|_| ApiError::not_found(format!("{label} file is no longer available.")))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&asset.content_type).map_err(|_| {
+            ApiError::runtime_unavailable(
+                format!("{label} preview content type is invalid."),
+                Some(json!({ "temp_asset_id": asset.id })),
+            )
+        })?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
     Ok((headers, bytes))
 }
 
@@ -1803,6 +2003,94 @@ async fn list_jobs(
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct QueryHistoryQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+    query_kind: Option<String>,
+    source: Option<String>,
+    status: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/queries/history",
+    responses(
+        (status = 200, description = "Query history list", body = SuccessEnvelope<QueryHistoryListData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "queries",
+)]
+async fn list_query_history(
+    State(state): State<SharedState>,
+    Query(query): Query<QueryHistoryQuery>,
+) -> Result<Json<SuccessEnvelope<QueryHistoryListData>>, ApiError> {
+    let state = state.read().await;
+    let data = state.list_query_history(
+        query.limit,
+        query.cursor.as_deref(),
+        query.query_kind.as_deref(),
+        query.source.as_deref(),
+        query.status.as_deref(),
+    )?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/queries/history/{query_id}",
+    params(("query_id" = String, Path, description = "Query history id")),
+    responses(
+        (status = 200, description = "Query history detail", body = SuccessEnvelope<QueryHistoryDetailData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "queries",
+)]
+async fn get_query_history(
+    State(state): State<SharedState>,
+    Path(query_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<QueryHistoryDetailData>>, ApiError> {
+    let state = state.read().await;
+    let data = state.get_query_history(&query_id)?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/queries/history/{query_id}",
+    params(("query_id" = String, Path, description = "Query history id")),
+    responses(
+        (status = 200, description = "Deleted query history entry", body = SuccessEnvelope<QueryHistoryDeleteData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "queries",
+)]
+async fn delete_query_history(
+    State(state): State<SharedState>,
+    Path(query_id): Path<String>,
+) -> Result<Json<SuccessEnvelope<QueryHistoryDeleteData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.delete_query_history(&query_id)?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/queries/history",
+    responses(
+        (status = 200, description = "Cleared query history", body = SuccessEnvelope<QueryHistoryDeleteData>),
+        (status = "default", description = "Error response", body = ErrorEnvelope),
+    ),
+    tag = "queries",
+)]
+async fn clear_query_history(
+    State(state): State<SharedState>,
+) -> Result<Json<SuccessEnvelope<QueryHistoryDeleteData>>, ApiError> {
+    let mut state = state.write().await;
+    let data = state.clear_query_history()?;
+    Ok(Json(SuccessEnvelope { data }))
+}
+
 #[utoipa::path(
     get,
     path = "/jobs/{job_id}",
@@ -1937,6 +2225,116 @@ async fn resume_job(
     Ok(Json(SuccessEnvelope { data: snapshot }))
 }
 
+fn client_source(headers: &HeaderMap) -> String {
+    headers
+        .get("x-fauni-client-source")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "api" | "cli" | "ui" | "unknown"))
+        .unwrap_or("api")
+        .to_string()
+}
+
+fn request_scope_json(
+    scope: Option<&SearchScopeRequest>,
+    legacy_library_id: Option<&str>,
+) -> Value {
+    if let Some(scope) = scope {
+        return serde_json::to_value(scope).unwrap_or_else(|_| json!({ "kind": "unknown" }));
+    }
+    json!({ "kind": "library", "library_id": legacy_library_id.unwrap_or_default() })
+}
+
+fn search_history_text_draft(
+    headers: &HeaderMap,
+    request: &TextSearchRequest,
+    status: &str,
+    result_count: Option<usize>,
+    error: Option<&ApiError>,
+    duration_ms: u128,
+) -> QueryHistoryDraft {
+    QueryHistoryDraft {
+        source: client_source(headers),
+        query_kind: "text".to_string(),
+        input_kind: "inline_text".to_string(),
+        input_summary: request.text.clone(),
+        input_json: json!({ "kind": "inline_text", "text": request.text }),
+        search_scope_json: request_scope_json(
+            request.search_scope.as_ref(),
+            request.library_id.as_deref(),
+        ),
+        filters_json: request.filters.clone(),
+        target_content_types_json: request
+            .target_content_types
+            .as_ref()
+            .map(|value| json!(value)),
+        top_k: request.top_k,
+        status: status.to_string(),
+        result_count,
+        error_code: error.map(|error| error.payload.code.clone()),
+        error_message: error.map(|error| error.payload.message.clone()),
+        duration_ms,
+    }
+}
+
+fn search_history_file_draft(
+    headers: &HeaderMap,
+    query_kind: &str,
+    input: &Value,
+    scope: Option<&SearchScopeRequest>,
+    legacy_library_id: Option<&str>,
+    filters: Option<&Value>,
+    target_content_types: Option<&Vec<String>>,
+    top_k: Option<usize>,
+    status: &str,
+    result_count: Option<usize>,
+    error: Option<&ApiError>,
+    duration_ms: u128,
+) -> QueryHistoryDraft {
+    let input_kind = match input.get("kind").and_then(Value::as_str) {
+        Some("temp_asset") => "query_asset",
+        Some("library_object") => "library_object",
+        _ => "unknown",
+    };
+    let input_summary = input
+        .get("temp_asset_id")
+        .or_else(|| input.get("asset_id"))
+        .or_else(|| input.get("source_id"))
+        .and_then(Value::as_str)
+        .unwrap_or(input_kind)
+        .to_string();
+    let mut input_json = input.clone();
+    if input_kind == "query_asset" {
+        if let Some(temp_asset_id) = input.get("temp_asset_id").and_then(Value::as_str) {
+            input_json["query_asset_id"] = json!(temp_asset_id);
+        }
+    }
+    QueryHistoryDraft {
+        source: client_source(headers),
+        query_kind: query_kind.to_string(),
+        input_kind: input_kind.to_string(),
+        input_summary,
+        input_json,
+        search_scope_json: request_scope_json(scope, legacy_library_id),
+        filters_json: filters.cloned(),
+        target_content_types_json: target_content_types.map(|value| json!(value)),
+        top_k,
+        status: status.to_string(),
+        result_count,
+        error_code: error.map(|error| error.payload.code.clone()),
+        error_message: error.map(|error| error.payload.message.clone()),
+        duration_ms,
+    }
+}
+
+async fn record_search_history(
+    state: &SharedState,
+    draft: QueryHistoryDraft,
+) -> Result<(), ApiError> {
+    let mut state = state.write().await;
+    state.record_query_history(draft)
+}
+
 #[utoipa::path(
     post,
     path = "/search/text",
@@ -1949,36 +2347,74 @@ async fn resume_job(
 )]
 async fn search_text(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(request): Json<TextSearchRequest>,
 ) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
+    let started = Instant::now();
     let plan = {
         let mut state = state.write().await;
         state.prepare_text_search(&request).await?
     };
-    let mut executed_groups = Vec::new();
-    for group in &plan.execution_groups {
-        let query_embedding = embed_query_text(
-            request.text.trim(),
-            Some(provider_context_payload(&group.resolved_model)),
-        )
-        .await?;
-        let candidates = query_qdrant(
-            &group.vector_space_id,
-            group.active_unit_count,
-            plan.cursor_offset.saturating_add(plan.top_k),
-            &group.eligible_point_ids,
-            &query_embedding,
-        )
-        .await?;
-        executed_groups.push(ExecutedSearchGroup {
-            library_id: group.library_id.clone(),
-            vector_space_id: group.vector_space_id.clone(),
-            query_embedding,
-            candidates,
-        });
+    let execution = async {
+        let mut executed_groups = Vec::new();
+        for group in &plan.execution_groups {
+            let query_embedding = embed_query_text(
+                request.text.trim(),
+                Some(provider_context_payload(&group.resolved_model)),
+            )
+            .await?;
+            let candidates = query_qdrant(
+                &group.vector_space_id,
+                group.active_unit_count,
+                plan.cursor_offset.saturating_add(plan.top_k),
+                &group.eligible_point_ids,
+                &query_embedding,
+            )
+            .await?;
+            executed_groups.push(ExecutedSearchGroup {
+                library_id: group.library_id.clone(),
+                vector_space_id: group.vector_space_id.clone(),
+                query_embedding,
+                candidates,
+            });
+        }
+        build_search_response(plan, executed_groups)
     }
-    let response = build_search_response(plan, executed_groups)?;
-    Ok(Json(SuccessEnvelope { data: response }))
+    .await;
+    let duration_ms = started.elapsed().as_millis();
+    match execution {
+        Ok(response) => {
+            let result_count = response.results.len();
+            record_search_history(
+                &state,
+                search_history_text_draft(
+                    &headers,
+                    &request,
+                    "completed",
+                    Some(result_count),
+                    None,
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Ok(Json(SuccessEnvelope { data: response }))
+        }
+        Err(error) => {
+            record_search_history(
+                &state,
+                search_history_text_draft(
+                    &headers,
+                    &request,
+                    "failed",
+                    None,
+                    Some(&error),
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Err(error)
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1993,62 +2429,95 @@ async fn search_text(
 )]
 async fn search_image(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(request): Json<ImageSearchRequest>,
 ) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
+    let started = Instant::now();
     let (plan, query_input) = {
         let mut state = state.write().await;
         state.prune_temp_query_assets();
         state.prepare_image_search(&request).await?
     };
-    let received_scope_kind = request
-        .search_scope
-        .as_ref()
-        .map(|scope| scope.kind.clone())
-        .unwrap_or_else(|| "library".to_string());
-    let _plan_library_id = (!plan.library_id.trim().is_empty())
-        .then_some(plan.library_id.as_str())
-        .ok_or_else(|| {
-            ApiError::not_supported(
-            "Current 110-image-search implementation only supports single-library search_scope.",
-            Some(json!({
-                "field": "search_scope.kind",
-                "supported": ["library"],
-                "received": received_scope_kind,
-            })),
-        )
-        })?;
-
     let (query_path, query_locator) = match &query_input {
         ResolvedImageQueryInput::TempAsset(asset) => (asset.path.as_str(), None),
         ResolvedImageQueryInput::LibraryAsset(asset) => {
             (asset.source_path.as_str(), Some(asset.locator.clone()))
         }
     };
-    let mut executed_groups = Vec::new();
-    for group in &plan.execution_groups {
-        let query_embedding = embed_query_image(
-            query_path,
-            query_locator.clone(),
-            Some(provider_context_payload(&group.resolved_model)),
-        )
-        .await?;
-        let candidates = query_qdrant(
-            &group.vector_space_id,
-            group.active_unit_count,
-            plan.cursor_offset.saturating_add(plan.top_k),
-            &group.eligible_point_ids,
-            &query_embedding,
-        )
-        .await?;
-        executed_groups.push(ExecutedSearchGroup {
-            library_id: group.library_id.clone(),
-            vector_space_id: group.vector_space_id.clone(),
-            query_embedding,
-            candidates,
-        });
+    let input_json = serde_json::to_value(&request.image_input).unwrap_or_else(|_| json!({}));
+    let execution = async {
+        let mut executed_groups = Vec::new();
+        for group in &plan.execution_groups {
+            let query_embedding = embed_query_image(
+                query_path,
+                query_locator.clone(),
+                Some(provider_context_payload(&group.resolved_model)),
+            )
+            .await?;
+            let candidates = query_qdrant(
+                &group.vector_space_id,
+                group.active_unit_count,
+                plan.cursor_offset.saturating_add(plan.top_k),
+                &group.eligible_point_ids,
+                &query_embedding,
+            )
+            .await?;
+            executed_groups.push(ExecutedSearchGroup {
+                library_id: group.library_id.clone(),
+                vector_space_id: group.vector_space_id.clone(),
+                query_embedding,
+                candidates,
+            });
+        }
+        build_search_response(plan, executed_groups)
     }
-    let response = build_search_response(plan, executed_groups)?;
-    Ok(Json(SuccessEnvelope { data: response }))
+    .await;
+    let duration_ms = started.elapsed().as_millis();
+    match execution {
+        Ok(response) => {
+            let result_count = response.results.len();
+            record_search_history(
+                &state,
+                search_history_file_draft(
+                    &headers,
+                    "image",
+                    &input_json,
+                    request.search_scope.as_ref(),
+                    request.library_id.as_deref(),
+                    request.filters.as_ref(),
+                    request.target_content_types.as_ref(),
+                    request.top_k,
+                    "completed",
+                    Some(result_count),
+                    None,
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Ok(Json(SuccessEnvelope { data: response }))
+        }
+        Err(error) => {
+            record_search_history(
+                &state,
+                search_history_file_draft(
+                    &headers,
+                    "image",
+                    &input_json,
+                    request.search_scope.as_ref(),
+                    request.library_id.as_deref(),
+                    request.filters.as_ref(),
+                    request.target_content_types.as_ref(),
+                    request.top_k,
+                    "failed",
+                    None,
+                    Some(&error),
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Err(error)
+        }
+    }
 }
 
 #[utoipa::path(
@@ -2063,56 +2532,89 @@ async fn search_image(
 )]
 async fn search_video(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(request): Json<VideoSearchRequest>,
 ) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
+    let started = Instant::now();
     let (plan, query_input) = {
         let mut state = state.write().await;
         state.prune_temp_query_assets();
         state.prepare_video_search(&request).await?
     };
-    let received_scope_kind = request
-        .search_scope
-        .as_ref()
-        .map(|scope| scope.kind.clone())
-        .unwrap_or_else(|| "library".to_string());
-    let _plan_library_id = (!plan.library_id.trim().is_empty())
-        .then_some(plan.library_id.as_str())
-        .ok_or_else(|| {
-            ApiError::not_supported(
-            "Current 120-video-search implementation only supports single-library search_scope.",
-            Some(json!({
-                "field": "search_scope.kind",
-                "supported": ["library"],
-                "received": received_scope_kind,
-            })),
-        )
-        })?;
-
-    let mut executed_groups = Vec::new();
-    for group in &plan.execution_groups {
-        let query_embedding = embed_query_video(
-            query_input.path.as_str(),
-            query_input.locator.clone(),
-            Some(provider_context_payload(&group.resolved_model)),
-        )
-        .await?;
-        let candidates = query_qdrant(
-            &group.vector_space_id,
-            group.active_unit_count,
-            plan.cursor_offset.saturating_add(plan.top_k),
-            &group.eligible_point_ids,
-            &query_embedding,
-        )
-        .await?;
-        executed_groups.push(ExecutedSearchGroup {
-            library_id: group.library_id.clone(),
-            vector_space_id: group.vector_space_id.clone(),
-            query_embedding,
-            candidates,
-        });
+    let input_json = serde_json::to_value(&request.video_input).unwrap_or_else(|_| json!({}));
+    let execution = async {
+        let mut executed_groups = Vec::new();
+        for group in &plan.execution_groups {
+            let query_embedding = embed_query_video(
+                query_input.path.as_str(),
+                query_input.locator.clone(),
+                Some(provider_context_payload(&group.resolved_model)),
+            )
+            .await?;
+            let candidates = query_qdrant(
+                &group.vector_space_id,
+                group.active_unit_count,
+                plan.cursor_offset.saturating_add(plan.top_k),
+                &group.eligible_point_ids,
+                &query_embedding,
+            )
+            .await?;
+            executed_groups.push(ExecutedSearchGroup {
+                library_id: group.library_id.clone(),
+                vector_space_id: group.vector_space_id.clone(),
+                query_embedding,
+                candidates,
+            });
+        }
+        build_search_response(plan, executed_groups)
     }
-    let response = build_search_response(plan, executed_groups)?;
-    Ok(Json(SuccessEnvelope { data: response }))
+    .await;
+    let duration_ms = started.elapsed().as_millis();
+    match execution {
+        Ok(response) => {
+            let result_count = response.results.len();
+            record_search_history(
+                &state,
+                search_history_file_draft(
+                    &headers,
+                    "video",
+                    &input_json,
+                    request.search_scope.as_ref(),
+                    request.library_id.as_deref(),
+                    request.filters.as_ref(),
+                    request.target_content_types.as_ref(),
+                    request.top_k,
+                    "completed",
+                    Some(result_count),
+                    None,
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Ok(Json(SuccessEnvelope { data: response }))
+        }
+        Err(error) => {
+            record_search_history(
+                &state,
+                search_history_file_draft(
+                    &headers,
+                    "video",
+                    &input_json,
+                    request.search_scope.as_ref(),
+                    request.library_id.as_deref(),
+                    request.filters.as_ref(),
+                    request.target_content_types.as_ref(),
+                    request.top_k,
+                    "failed",
+                    None,
+                    Some(&error),
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Err(error)
+        }
+    }
 }
 
 #[utoipa::path(
@@ -2127,54 +2629,87 @@ async fn search_video(
 )]
 async fn search_document(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(request): Json<DocumentSearchRequest>,
 ) -> Result<Json<SuccessEnvelope<TextSearchData>>, ApiError> {
+    let started = Instant::now();
     let (plan, query_input) = {
         let mut state = state.write().await;
         state.prune_temp_query_assets();
         state.prepare_document_search(&request).await?
     };
-    let received_scope_kind = request
-        .search_scope
-        .as_ref()
-        .map(|scope| scope.kind.clone())
-        .unwrap_or_else(|| "library".to_string());
-    let _plan_library_id = (!plan.library_id.trim().is_empty())
-        .then_some(plan.library_id.as_str())
-        .ok_or_else(|| {
-            ApiError::not_supported(
-            "Current 130-document-search implementation only supports single-library search_scope.",
-            Some(json!({
-                "field": "search_scope.kind",
-                "supported": ["library"],
-                "received": received_scope_kind,
-            })),
-        )
-        })?;
-
-    let mut executed_groups = Vec::new();
-    for group in &plan.execution_groups {
-        let query_embedding = embed_query_document(
-            query_input.path.as_str(),
-            query_input.locator.clone(),
-            Some(provider_context_payload(&group.resolved_model)),
-        )
-        .await?;
-        let candidates = query_qdrant(
-            &group.vector_space_id,
-            group.active_unit_count,
-            plan.cursor_offset.saturating_add(plan.top_k),
-            &group.eligible_point_ids,
-            &query_embedding,
-        )
-        .await?;
-        executed_groups.push(ExecutedSearchGroup {
-            library_id: group.library_id.clone(),
-            vector_space_id: group.vector_space_id.clone(),
-            query_embedding,
-            candidates,
-        });
+    let input_json = serde_json::to_value(&request.document_input).unwrap_or_else(|_| json!({}));
+    let execution = async {
+        let mut executed_groups = Vec::new();
+        for group in &plan.execution_groups {
+            let query_embedding = embed_query_document(
+                query_input.path.as_str(),
+                query_input.locator.clone(),
+                Some(provider_context_payload(&group.resolved_model)),
+            )
+            .await?;
+            let candidates = query_qdrant(
+                &group.vector_space_id,
+                group.active_unit_count,
+                plan.cursor_offset.saturating_add(plan.top_k),
+                &group.eligible_point_ids,
+                &query_embedding,
+            )
+            .await?;
+            executed_groups.push(ExecutedSearchGroup {
+                library_id: group.library_id.clone(),
+                vector_space_id: group.vector_space_id.clone(),
+                query_embedding,
+                candidates,
+            });
+        }
+        build_search_response(plan, executed_groups)
     }
-    let response = build_search_response(plan, executed_groups)?;
-    Ok(Json(SuccessEnvelope { data: response }))
+    .await;
+    let duration_ms = started.elapsed().as_millis();
+    match execution {
+        Ok(response) => {
+            let result_count = response.results.len();
+            record_search_history(
+                &state,
+                search_history_file_draft(
+                    &headers,
+                    "document",
+                    &input_json,
+                    request.search_scope.as_ref(),
+                    request.library_id.as_deref(),
+                    request.filters.as_ref(),
+                    request.target_content_types.as_ref(),
+                    request.top_k,
+                    "completed",
+                    Some(result_count),
+                    None,
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Ok(Json(SuccessEnvelope { data: response }))
+        }
+        Err(error) => {
+            record_search_history(
+                &state,
+                search_history_file_draft(
+                    &headers,
+                    "document",
+                    &input_json,
+                    request.search_scope.as_ref(),
+                    request.library_id.as_deref(),
+                    request.filters.as_ref(),
+                    request.target_content_types.as_ref(),
+                    request.top_k,
+                    "failed",
+                    None,
+                    Some(&error),
+                    duration_ms,
+                ),
+            )
+            .await?;
+            Err(error)
+        }
+    }
 }

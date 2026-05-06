@@ -1,8 +1,9 @@
 use crate::{
     api::SourceRootRulesPayload,
     model::{
-        AssetRecord, ContentE2eIndexStateRecord, ContentRecord, SourceAssetLocationRecord,
-        SourceRecord, UnitIndexRecord, UnitRecord, VectorSpaceRecord,
+        AssetRecord, ContentE2eIndexStateRecord, ContentRecord, QueryHistoryRecord,
+        SourceAssetLocationRecord, SourceRecord, TempQueryAssetRecord, UnitIndexRecord, UnitRecord,
+        VectorSpaceRecord,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -15,7 +16,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const STRUCTURED_STATE_SCHEMA_VERSION: i64 = 6;
+const STRUCTURED_STATE_SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug)]
 pub(crate) struct LoadedDurableStateSnapshot {
@@ -27,6 +28,9 @@ pub(crate) struct DurableAppStateSnapshot {
     pub(crate) version: u32,
     pub(crate) library_order: Vec<String>,
     pub(crate) libraries: BTreeMap<String, DurableLibraryRecord>,
+    pub(crate) query_assets: BTreeMap<String, TempQueryAssetRecord>,
+    pub(crate) query_history: BTreeMap<String, QueryHistoryRecord>,
+    pub(crate) query_history_order: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -255,6 +259,39 @@ pub(crate) fn initialize_durable_state_store(
             indexed_at_ms INTEGER NOT NULL,
             PRIMARY KEY (content_id, pipe_signature, vector_space_id)
         );
+        CREATE TABLE IF NOT EXISTS query_assets (
+            query_asset_id TEXT PRIMARY KEY,
+            owner_scope TEXT NOT NULL,
+            library_id TEXT NULL,
+            source_type TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            path TEXT NOT NULL,
+            original_filename TEXT NULL,
+            page_count INTEGER NULL,
+            duration_ms INTEGER NULL,
+            size_bytes INTEGER NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS query_history (
+            query_id TEXT PRIMARY KEY,
+            position INTEGER NOT NULL UNIQUE,
+            created_at_ms INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            query_kind TEXT NOT NULL,
+            input_kind TEXT NOT NULL,
+            input_summary TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            search_scope_json TEXT NOT NULL,
+            filters_json TEXT NULL,
+            target_content_types_json TEXT NULL,
+            top_k INTEGER NULL,
+            status TEXT NOT NULL,
+            result_count INTEGER NULL,
+            error_code TEXT NULL,
+            error_message TEXT NULL,
+            duration_ms INTEGER NOT NULL
+        );
         ",
     )?;
     Ok(())
@@ -330,6 +367,9 @@ fn load_structured_state_snapshot(
         version: STRUCTURED_STATE_SCHEMA_VERSION as u32,
         library_order: Vec::new(),
         libraries: BTreeMap::new(),
+        query_assets: BTreeMap::new(),
+        query_history: BTreeMap::new(),
+        query_history_order: Vec::new(),
     };
 
     load_libraries(path, connection, &mut snapshot)?;
@@ -342,6 +382,8 @@ fn load_structured_state_snapshot(
     load_vector_spaces(path, connection, &mut snapshot)?;
     load_unit_indexes(path, connection, &mut snapshot)?;
     load_content_e2e_index_states(path, connection, &mut snapshot)?;
+    load_query_assets(path, connection, &mut snapshot)?;
+    load_query_history(path, connection, &mut snapshot)?;
     hydrate_location_compat_fields(&mut snapshot);
 
     Ok(LoadedDurableStateSnapshot { snapshot })
@@ -1057,6 +1099,192 @@ fn load_content_e2e_index_states(
     Ok(())
 }
 
+fn load_query_assets(
+    path: &FsPath,
+    connection: &Connection,
+    snapshot: &mut DurableAppStateSnapshot,
+) -> Result<(), io::Error> {
+    let mut statement = connection
+        .prepare(
+            "SELECT query_asset_id, owner_scope, library_id, source_type, content_type,
+                    path, original_filename, page_count, duration_ms, size_bytes,
+                    created_at_ms, expires_at_ms
+             FROM query_assets
+             ORDER BY query_asset_id ASC",
+        )
+        .map_err(|error| sqlite_io(path, "prepare query_assets query", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| sqlite_io(path, "query query_assets", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_io(path, "read query_asset row", error))?
+    {
+        let id: String = row
+            .get(0)
+            .map_err(|error| sqlite_io(path, "read query_asset_id", error))?;
+        let size_bytes = usize::try_from(
+            row.get::<_, i64>(9)
+                .map_err(|error| sqlite_io(path, "read query_asset size_bytes", error))?,
+        )
+        .map_err(|_| invalid_data(path, "query_assets.size_bytes must be non-negative"))?;
+        let record = TempQueryAssetRecord {
+            id: id.clone(),
+            owner_scope: row
+                .get(1)
+                .map_err(|error| sqlite_io(path, "read query_asset owner_scope", error))?,
+            library_id: row
+                .get(2)
+                .map_err(|error| sqlite_io(path, "read query_asset library_id", error))?,
+            source_type: row
+                .get(3)
+                .map_err(|error| sqlite_io(path, "read query_asset source_type", error))?,
+            content_type: row
+                .get(4)
+                .map_err(|error| sqlite_io(path, "read query_asset content_type", error))?,
+            path: row
+                .get(5)
+                .map_err(|error| sqlite_io(path, "read query_asset path", error))?,
+            original_filename: row
+                .get(6)
+                .map_err(|error| sqlite_io(path, "read query_asset original_filename", error))?,
+            page_count: optional_i64_to_usize(
+                path,
+                row.get(7)
+                    .map_err(|error| sqlite_io(path, "read query_asset page_count", error))?,
+                "query_assets.page_count",
+            )?,
+            duration_ms: optional_i64_to_u64(
+                path,
+                row.get(8)
+                    .map_err(|error| sqlite_io(path, "read query_asset duration_ms", error))?,
+                "query_assets.duration_ms",
+            )?,
+            size_bytes,
+            created_at_ms: i64_to_u128(
+                path,
+                row.get(10)
+                    .map_err(|error| sqlite_io(path, "read query_asset created_at_ms", error))?,
+                "query_assets.created_at_ms",
+            )?,
+            expires_at_ms: i64_to_u128(
+                path,
+                row.get(11)
+                    .map_err(|error| sqlite_io(path, "read query_asset expires_at_ms", error))?,
+                "query_assets.expires_at_ms",
+            )?,
+        };
+        snapshot.query_assets.insert(id, record);
+    }
+    Ok(())
+}
+
+fn load_query_history(
+    path: &FsPath,
+    connection: &Connection,
+    snapshot: &mut DurableAppStateSnapshot,
+) -> Result<(), io::Error> {
+    let mut statement = connection
+        .prepare(
+            "SELECT query_id, created_at_ms, source, query_kind, input_kind,
+                    input_summary, input_json, search_scope_json, filters_json,
+                    target_content_types_json, top_k, status, result_count,
+                    error_code, error_message, duration_ms
+             FROM query_history
+             ORDER BY position ASC",
+        )
+        .map_err(|error| sqlite_io(path, "prepare query_history query", error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| sqlite_io(path, "query query_history", error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| sqlite_io(path, "read query_history row", error))?
+    {
+        let id: String = row
+            .get(0)
+            .map_err(|error| sqlite_io(path, "read query_id", error))?;
+        let filters_json = row
+            .get::<_, Option<String>>(8)
+            .map_err(|error| sqlite_io(path, "read query_history filters_json", error))?
+            .map(|raw| parse_json::<Value>(path, &raw, "query_history.filters_json"))
+            .transpose()?;
+        let target_content_types_json = row
+            .get::<_, Option<String>>(9)
+            .map_err(|error| {
+                sqlite_io(path, "read query_history target_content_types_json", error)
+            })?
+            .map(|raw| parse_json::<Value>(path, &raw, "query_history.target_content_types_json"))
+            .transpose()?;
+        let record = QueryHistoryRecord {
+            id: id.clone(),
+            created_at_ms: i64_to_u128(
+                path,
+                row.get(1)
+                    .map_err(|error| sqlite_io(path, "read query_history created_at_ms", error))?,
+                "query_history.created_at_ms",
+            )?,
+            source: row
+                .get(2)
+                .map_err(|error| sqlite_io(path, "read query_history source", error))?,
+            query_kind: row
+                .get(3)
+                .map_err(|error| sqlite_io(path, "read query_history query_kind", error))?,
+            input_kind: row
+                .get(4)
+                .map_err(|error| sqlite_io(path, "read query_history input_kind", error))?,
+            input_summary: row
+                .get(5)
+                .map_err(|error| sqlite_io(path, "read query_history input_summary", error))?,
+            input_json: parse_json(
+                path,
+                &row.get::<_, String>(6)
+                    .map_err(|error| sqlite_io(path, "read query_history input_json", error))?,
+                "query_history.input_json",
+            )?,
+            search_scope_json: parse_json(
+                path,
+                &row.get::<_, String>(7).map_err(|error| {
+                    sqlite_io(path, "read query_history search_scope_json", error)
+                })?,
+                "query_history.search_scope_json",
+            )?,
+            filters_json,
+            target_content_types_json,
+            top_k: optional_i64_to_usize(
+                path,
+                row.get(10)
+                    .map_err(|error| sqlite_io(path, "read query_history top_k", error))?,
+                "query_history.top_k",
+            )?,
+            status: row
+                .get(11)
+                .map_err(|error| sqlite_io(path, "read query_history status", error))?,
+            result_count: optional_i64_to_usize(
+                path,
+                row.get(12)
+                    .map_err(|error| sqlite_io(path, "read query_history result_count", error))?,
+                "query_history.result_count",
+            )?,
+            error_code: row
+                .get(13)
+                .map_err(|error| sqlite_io(path, "read query_history error_code", error))?,
+            error_message: row
+                .get(14)
+                .map_err(|error| sqlite_io(path, "read query_history error_message", error))?,
+            duration_ms: i64_to_u128(
+                path,
+                row.get(15)
+                    .map_err(|error| sqlite_io(path, "read query_history duration_ms", error))?,
+                "query_history.duration_ms",
+            )?,
+        };
+        snapshot.query_history_order.push(id.clone());
+        snapshot.query_history.insert(id, record);
+    }
+    Ok(())
+}
+
 fn write_structured_state_snapshot(
     transaction: &Transaction<'_>,
     snapshot: &DurableAppStateSnapshot,
@@ -1103,12 +1331,16 @@ fn write_structured_state_snapshot(
     write_vector_spaces(transaction, snapshot)?;
     write_unit_indexes(transaction, snapshot)?;
     write_content_e2e_index_states(transaction, snapshot)?;
+    write_query_assets(transaction, snapshot)?;
+    write_query_history(transaction, snapshot)?;
 
     Ok(())
 }
 
 fn clear_structured_tables(transaction: &Transaction<'_>) -> Result<(), String> {
     for table in [
+        "query_history",
+        "query_assets",
         "content_e2e_index_states",
         "unit_indexes",
         "vector_spaces",
@@ -1509,6 +1741,100 @@ fn write_content_e2e_index_states(
     Ok(())
 }
 
+fn write_query_assets(
+    transaction: &Transaction<'_>,
+    snapshot: &DurableAppStateSnapshot,
+) -> Result<(), String> {
+    for asset in snapshot.query_assets.values() {
+        transaction
+            .execute(
+                "INSERT INTO query_assets (
+                    query_asset_id, owner_scope, library_id, source_type, content_type,
+                    path, original_filename, page_count, duration_ms, size_bytes,
+                    created_at_ms, expires_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    asset.id,
+                    asset.owner_scope,
+                    asset.library_id,
+                    asset.source_type,
+                    asset.content_type,
+                    asset.path,
+                    asset.original_filename,
+                    optional_usize_to_i64(asset.page_count, "query_assets.page_count")?,
+                    optional_u64_to_i64(asset.duration_ms, "query_assets.duration_ms")?,
+                    usize_to_i64(asset.size_bytes, "query_assets.size_bytes")?,
+                    u128_to_i64(asset.created_at_ms, "query_assets.created_at_ms")?,
+                    u128_to_i64(asset.expires_at_ms, "query_assets.expires_at_ms")?,
+                ],
+            )
+            .map_err(|error| format!("Failed to write query asset {}: {error}", asset.id))?;
+    }
+    Ok(())
+}
+
+fn write_query_history(
+    transaction: &Transaction<'_>,
+    snapshot: &DurableAppStateSnapshot,
+) -> Result<(), String> {
+    for (position, query_id) in snapshot.query_history_order.iter().enumerate() {
+        let record = snapshot
+            .query_history
+            .get(query_id)
+            .ok_or_else(|| format!("query_history_order references missing query `{query_id}`"))?;
+        let input_json = serde_json::to_string(&record.input_json)
+            .map_err(|error| format!("Failed to encode query_history input_json: {error}"))?;
+        let search_scope_json =
+            serde_json::to_string(&record.search_scope_json).map_err(|error| {
+                format!("Failed to encode query_history search_scope_json: {error}")
+            })?;
+        let filters_json = record
+            .filters_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| format!("Failed to encode query_history filters_json: {error}"))?;
+        let target_content_types_json = record
+            .target_content_types_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                format!("Failed to encode query_history target_content_types_json: {error}")
+            })?;
+        transaction
+            .execute(
+                "INSERT INTO query_history (
+                    query_id, position, created_at_ms, source, query_kind, input_kind,
+                    input_summary, input_json, search_scope_json, filters_json,
+                    target_content_types_json, top_k, status, result_count,
+                    error_code, error_message, duration_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    record.id,
+                    usize_to_i64(position, "query_history.position")?,
+                    u128_to_i64(record.created_at_ms, "query_history.created_at_ms")?,
+                    record.source,
+                    record.query_kind,
+                    record.input_kind,
+                    record.input_summary,
+                    input_json,
+                    search_scope_json,
+                    filters_json,
+                    target_content_types_json,
+                    optional_usize_to_i64(record.top_k, "query_history.top_k")?,
+                    record.status,
+                    optional_usize_to_i64(record.result_count, "query_history.result_count")?,
+                    record.error_code,
+                    record.error_message,
+                    u128_to_i64(record.duration_ms, "query_history.duration_ms")?,
+                ],
+            )
+            .map_err(|error| format!("Failed to write query history {}: {error}", record.id))?;
+    }
+    Ok(())
+}
+
 fn sqlite_io(path: &FsPath, action: &str, error: rusqlite::Error) -> io::Error {
     io::Error::new(
         io::ErrorKind::Other,
@@ -1640,6 +1966,9 @@ mod tests {
             version: STRUCTURED_STATE_SCHEMA_VERSION as u32,
             library_order: vec!["alpha".to_string()],
             libraries: BTreeMap::new(),
+            query_assets: BTreeMap::new(),
+            query_history: BTreeMap::new(),
+            query_history_order: Vec::new(),
         };
         snapshot.libraries.insert(
             "alpha".to_string(),

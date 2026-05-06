@@ -320,17 +320,68 @@ pub(crate) enum JobReplayAction {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct TempQueryAssetRecord {
     pub(crate) id: String,
-    pub(crate) library_id: String,
+    pub(crate) owner_scope: String,
+    pub(crate) library_id: Option<String>,
     pub(crate) path: String,
     pub(crate) source_type: String,
     pub(crate) content_type: String,
     pub(crate) original_filename: Option<String>,
     pub(crate) page_count: Option<usize>,
     pub(crate) duration_ms: Option<u64>,
+    pub(crate) size_bytes: usize,
+    pub(crate) created_at_ms: u128,
     pub(crate) expires_at_ms: u128,
+}
+
+impl TempQueryAssetRecord {
+    pub(crate) fn is_global(&self) -> bool {
+        self.owner_scope == "global"
+    }
+
+    pub(crate) fn is_library_scoped_to(&self, library_id: &str) -> bool {
+        self.owner_scope == "library" && self.library_id.as_deref() == Some(library_id)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct QueryHistoryRecord {
+    pub(crate) id: String,
+    pub(crate) created_at_ms: u128,
+    pub(crate) source: String,
+    pub(crate) query_kind: String,
+    pub(crate) input_kind: String,
+    pub(crate) input_summary: String,
+    pub(crate) input_json: Value,
+    pub(crate) search_scope_json: Value,
+    pub(crate) filters_json: Option<Value>,
+    pub(crate) target_content_types_json: Option<Value>,
+    pub(crate) top_k: Option<usize>,
+    pub(crate) status: String,
+    pub(crate) result_count: Option<usize>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) error_message: Option<String>,
+    pub(crate) duration_ms: u128,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct QueryHistoryDraft {
+    pub(crate) source: String,
+    pub(crate) query_kind: String,
+    pub(crate) input_kind: String,
+    pub(crate) input_summary: String,
+    pub(crate) input_json: Value,
+    pub(crate) search_scope_json: Value,
+    pub(crate) filters_json: Option<Value>,
+    pub(crate) target_content_types_json: Option<Value>,
+    pub(crate) top_k: Option<usize>,
+    pub(crate) status: String,
+    pub(crate) result_count: Option<usize>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) error_message: Option<String>,
+    pub(crate) duration_ms: u128,
 }
 
 #[derive(Default)]
@@ -769,6 +820,7 @@ pub(crate) struct StagedQueryAsset {
     pub(crate) original_filename: Option<String>,
     pub(crate) page_count: Option<usize>,
     pub(crate) duration_ms: Option<u64>,
+    pub(crate) size_bytes: usize,
 }
 
 pub(crate) struct StagedSettingsModelTestFile {

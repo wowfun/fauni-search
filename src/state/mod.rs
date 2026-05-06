@@ -1,5 +1,6 @@
 mod jobs;
 mod providers;
+mod queries;
 mod search;
 pub(crate) mod sources;
 #[cfg(test)]
@@ -47,6 +48,7 @@ pub struct AppState {
     next_source_seq: u64,
     next_source_root_seq: u64,
     next_temp_asset_seq: u64,
+    next_query_seq: u64,
     provider_configs: BTreeMap<String, ProviderConfigRecord>,
     provider_models: BTreeMap<String, BTreeMap<String, ProviderModelConfigRecord>>,
     provider_active_models: BTreeMap<String, String>,
@@ -63,6 +65,8 @@ pub struct AppState {
     jobs: BTreeMap<String, JobRecord>,
     job_order: Vec<String>,
     temp_query_assets: BTreeMap<String, TempQueryAssetRecord>,
+    query_history: BTreeMap<String, QueryHistoryRecord>,
+    query_history_order: Vec<String>,
 }
 
 impl Default for AppState {
@@ -76,6 +80,7 @@ impl Default for AppState {
             next_source_seq: 0,
             next_source_root_seq: 0,
             next_temp_asset_seq: 0,
+            next_query_seq: 0,
             provider_configs: default_provider_configs(),
             provider_models: BTreeMap::new(),
             provider_active_models: BTreeMap::new(),
@@ -92,6 +97,8 @@ impl Default for AppState {
             jobs: BTreeMap::new(),
             job_order: Vec::new(),
             temp_query_assets: BTreeMap::new(),
+            query_history: BTreeMap::new(),
+            query_history_order: Vec::new(),
         }
     }
 }
@@ -155,7 +162,7 @@ impl AppState {
 
     fn durable_snapshot(&self) -> DurableAppStateSnapshot {
         DurableAppStateSnapshot {
-            version: 6,
+            version: 7,
             library_order: self.library_order.clone(),
             libraries: self
                 .libraries
@@ -202,6 +209,9 @@ impl AppState {
                     )
                 })
                 .collect(),
+            query_assets: self.temp_query_assets.clone(),
+            query_history: self.query_history.clone(),
+            query_history_order: self.query_history_order.clone(),
         }
     }
 
@@ -209,10 +219,16 @@ impl AppState {
         let DurableAppStateSnapshot {
             library_order,
             libraries,
+            query_assets,
+            query_history,
+            query_history_order,
             ..
         } = snapshot.snapshot;
 
         self.library_order = library_order;
+        self.temp_query_assets = query_assets;
+        self.query_history = query_history;
+        self.query_history_order = query_history_order;
         self.libraries = libraries
             .into_iter()
             .map(|(library_id, library)| {
@@ -494,14 +510,24 @@ impl AppState {
             .map(|id| parse_id_seq(id, "unit_"))
             .max()
             .unwrap_or(0);
+        self.next_temp_asset_seq = self
+            .temp_query_assets
+            .keys()
+            .map(|id| parse_id_seq(id, "temp_asset_"))
+            .max()
+            .unwrap_or(0);
+        self.next_query_seq = self
+            .query_history
+            .keys()
+            .map(|id| parse_id_seq(id, "query_"))
+            .max()
+            .unwrap_or(0);
     }
 
     fn clear_ephemeral_restart_state(&mut self) {
         self.next_job_seq = 0;
-        self.next_temp_asset_seq = 0;
         self.jobs.clear();
         self.job_order.clear();
-        self.temp_query_assets.clear();
         self.provider_probe_cache.clear();
         self.provider_probe_checked_at_ms.clear();
         self.provider_runtime_models.clear();
@@ -549,7 +575,7 @@ impl AppState {
         }
     }
 
-    fn persist_durable_state(&self) -> Result<(), String> {
+    pub(crate) fn persist_durable_state(&self) -> Result<(), String> {
         let Some(path) = self.durable_store_path.as_ref() else {
             return Ok(());
         };
@@ -754,6 +780,11 @@ impl AppState {
         self.next_temp_asset_seq += 1;
         format!("temp_asset_{:06}", self.next_temp_asset_seq)
     }
+
+    pub(crate) fn next_query_id(&mut self) -> String {
+        self.next_query_seq += 1;
+        format!("query_{:06}", self.next_query_seq)
+    }
 }
 
 fn parse_id_seq(id: &str, prefix: &str) -> u64 {
@@ -800,7 +831,7 @@ fn configured_model_revision_from_maps(
         .filter(|value| !value.trim().is_empty())
 }
 
-fn current_unix_ms() -> u128 {
+pub(crate) fn current_unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
