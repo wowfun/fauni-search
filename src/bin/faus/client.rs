@@ -173,6 +173,7 @@ async fn send_json_request(
     context: &AppRequest,
 ) -> Result<FetchedJson, CliError> {
     let response = request
+        .header("x-fauni-client-source", "cli")
         .timeout(APP_REQUEST_TIMEOUT)
         .send()
         .await

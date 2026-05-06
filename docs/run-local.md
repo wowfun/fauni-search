@@ -208,13 +208,19 @@ target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find data/exa
 target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find --all-libraries --text "financial statement analysis"
 ```
 
+全库图片查找使用全局 QueryAsset 临时上传入口，也不会创建库或 source root：
+
+```bash
+target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find --all-libraries --image data/example/queries/AgentInteligenceLevel.png
+```
+
 也可以限定到某个已有库：
 
 ```bash
 target/debug/faus --base-url http://127.0.0.1:54210 --json --debug find --library-id demo --text "financial statement analysis"
 ```
 
-无 folder 时必须显式传 `--all-libraries` 或 `--library-id <id>`。全库图片 find 当前不支持，因为 query image 上传仍是库级 API；需要图片查询时使用 `--library-id <id> --image <path>`。
+无 folder 时必须显式传 `--all-libraries` 或 `--library-id <id>`。`--all-libraries --image` 使用全局 QueryAsset；`--library-id <id> --image <path>` 使用库级 QueryAsset。
 
 默认情况下，`faus find` 会按规范化 folder path 派生 `faus-find-<16 hex>` 托管库，创建或复用该库的 source root，触发 source-root `refresh`，等待本次 job 完成后再搜索。第二次查同一个 folder 应复用同一个库和 source root，JSON 中对应 `data.library.reused_library=true` 与 `data.library.reused_source_root=true`。
 
@@ -228,6 +234,20 @@ Agent 读取结果时，先看 `data.scope` 确认本次范围，再优先看 `d
 - `not_supported`：请求了当前服务端尚未支持的输入或搜索范围。
 
 需要更快拿到已有结果时，可以显式使用 `--wait-mode partial`。该模式会在准备 job 运行期间轮询 active 搜索，一旦当前 folder 已有 Source 级 active 结果就返回。
+
+已进入执行阶段的查询会写入 query history。查看最近查询：
+
+```bash
+target/debug/faus --base-url http://127.0.0.1:54210 --json queries list
+target/debug/faus --base-url http://127.0.0.1:54210 --json queries show <query_id>
+```
+
+`queries list` 只返回摘要和截断后的输入；`queries show` 返回完整输入、scope 和 filters。清理历史会同步删除仍关联的临时 QueryAsset 文件：
+
+```bash
+target/debug/faus --base-url http://127.0.0.1:54210 queries delete <query_id>
+target/debug/faus --base-url http://127.0.0.1:54210 queries clear
+```
 
 当前实现与 `specs/230-faus-find-cli` 的目标态还有两个明确差距：
 

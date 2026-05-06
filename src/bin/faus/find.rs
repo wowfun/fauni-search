@@ -705,15 +705,11 @@ async fn execute_find_search(
             })
         }
         FindInput::Image(path) => {
-            let Some(library_id) = scope.library_id() else {
-                return Err(CliError::new(
-                    "not_supported",
-                    "`faus find --all-libraries --image` is not supported because query image upload is library-scoped.",
-                )
-                .with_hint("Use `--library-id <library_id>` for image find, or use `--text` with `--all-libraries`."));
+            let upload_request = if let Some(library_id) = scope.library_id() {
+                base.request(format!("/libraries/{library_id}/query-assets/images"))
+            } else {
+                base.request("/query-assets/images")
             };
-            let upload_request =
-                base.request(format!("/libraries/{library_id}/query-assets/images"));
             let uploaded = post_multipart_file(client, &upload_request, "file", path).await?;
             requests.push(RequestTrace::new(
                 "query_asset_upload",
@@ -1328,16 +1324,7 @@ impl FindCommand {
                             "`--all-libraries` cannot be combined with `--library-id` in scope-only mode.",
                         ));
                     }
-                    (true, None) => {
-                        if matches!(input, FindInput::Image(_)) {
-                            return Err(CliError::new(
-                                "not_supported",
-                                "`faus find --all-libraries --image` is not supported because query image upload is library-scoped.",
-                            )
-                            .with_hint("Use `--library-id <library_id>` for image find, or use `--text` with `--all-libraries`."));
-                        }
-                        FindScope::AllLibraries
-                    }
+                    (true, None) => FindScope::AllLibraries,
                     (false, Some(library_id)) => FindScope::Library { library_id },
                     (false, None) => {
                         return Err(validation_error(

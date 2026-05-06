@@ -124,7 +124,7 @@ async fn execute_search_command(
                 base,
                 FileSearchKind::Image,
                 path,
-                library_id_for_file_search(&scope)?,
+                &scope,
                 &common,
                 debug,
             )
@@ -136,7 +136,7 @@ async fn execute_search_command(
                 base,
                 FileSearchKind::Video,
                 path,
-                library_id_for_file_search(&scope)?,
+                &scope,
                 &common,
                 debug,
             )
@@ -148,7 +148,7 @@ async fn execute_search_command(
                 base,
                 FileSearchKind::Document,
                 path,
-                library_id_for_file_search(&scope)?,
+                &scope,
                 &common,
                 debug,
             )
@@ -162,14 +162,19 @@ async fn execute_file_search(
     base: &ResolvedBaseUrl,
     kind: FileSearchKind,
     path: PathBuf,
-    library_id: &str,
+    scope: &SearchScope,
     common: &SearchCommon,
     debug: bool,
 ) -> Result<SearchResponse, CliError> {
-    let upload_request = base.request(format!(
-        "/libraries/{library_id}/query-assets/{}",
-        kind.query_asset_path_segment()
-    ));
+    let upload_request = match scope {
+        SearchScope::Library(library_id) => base.request(format!(
+            "/libraries/{library_id}/query-assets/{}",
+            kind.query_asset_path_segment()
+        )),
+        SearchScope::AllLibraries => {
+            base.request(format!("/query-assets/{}", kind.query_asset_path_segment()))
+        }
+    };
     let uploaded = post_multipart_file(client, &upload_request, "file", &path).await?;
     let query_asset = query_asset_from_envelope(&uploaded.value, &upload_request)?;
     let temp_asset_id = query_asset
@@ -179,7 +184,7 @@ async fn execute_file_search(
         .to_string();
 
     let search_request = base.request(format!("/search/{}", kind.search_path_segment()));
-    let body = file_search_body(kind, library_id, temp_asset_id, common, debug);
+    let body = file_search_body(kind, scope, temp_asset_id, common, debug);
     let searched = post_json(client, &search_request, &body).await?;
     let search = search_from_envelope(&searched.value, &search_request)?;
 
@@ -208,20 +213,19 @@ fn text_search_body(
 
 fn file_search_body(
     kind: FileSearchKind,
-    library_id: &str,
+    scope: &SearchScope,
     temp_asset_id: String,
     common: &SearchCommon,
     debug: bool,
 ) -> Value {
     let mut body = Map::new();
-    body.insert(
-        "library_id".to_string(),
-        Value::String(library_id.to_string()),
-    );
-    body.insert(
-        "search_scope".to_string(),
-        json!({ "kind": "library", "library_id": library_id }),
-    );
+    if let SearchScope::Library(library_id) = scope {
+        body.insert(
+            "library_id".to_string(),
+            Value::String(library_id.to_string()),
+        );
+    }
+    body.insert("search_scope".to_string(), scope.to_json());
 
     let mut input = Map::new();
     input.insert("kind".to_string(), Value::String("temp_asset".to_string()));
@@ -469,14 +473,6 @@ impl SearchCommand {
             unreachable!("input_count already verified")
         };
 
-        if !matches!(input, SearchInput::Text(_)) && matches!(scope, SearchScope::AllLibraries) {
-            return Err(CliError::new(
-                "not_supported",
-                "File-based search with `--all-libraries` is not supported yet.",
-            )
-            .with_hint("Use `--library-id <id>` for image, video, or document search."));
-        }
-
         let video_locator = paired_locator(
             args.video_start_ms,
             args.video_end_ms,
@@ -513,17 +509,6 @@ impl SearchCommand {
                 document_locator,
             },
         })
-    }
-}
-
-fn library_id_for_file_search(scope: &SearchScope) -> Result<&str, CliError> {
-    match scope {
-        SearchScope::Library(library_id) => Ok(library_id.as_str()),
-        SearchScope::AllLibraries => Err(CliError::new(
-            "not_supported",
-            "File-based search with `--all-libraries` is not supported yet.",
-        )
-        .with_hint("Use `--library-id <id>` for image, video, or document search.")),
     }
 }
 

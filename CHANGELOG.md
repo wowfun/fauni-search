@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 2026-05-01
+### Changed
+- Added durable query history for executed searches, including text queries, summary/detail/delete/clear APIs, `faus queries list/show/delete/clear`, and the breaking `state.sqlite` schema v7 reset/cutover boundary.
+- Added global QueryAsset upload/preview paths so `faus find/search --all-libraries --image` and other non-text all-library searches can use temporary binary query inputs without creating a query library.
+
 ## 2026-04-28
 ### Changed
 - Reworked the searchable core around Source `Content`, `SourceAssetLocation`, `Asset`, `Unit`, `VectorSpace`, `UnitIndex`, and `ContentE2eIndexState`, with a breaking `state.sqlite` schema v6 reset/cutover boundary.

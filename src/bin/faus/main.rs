@@ -4,6 +4,7 @@ mod find;
 mod import;
 mod jobs;
 mod library;
+mod queries;
 mod search;
 mod serve;
 mod sources;
@@ -16,6 +17,7 @@ use find::{run_find, FindArgs};
 use import::{run_import, ImportArgs};
 use jobs::{run_jobs, JobsArgs};
 use library::{run_library, LibraryArgs};
+use queries::{run_queries, QueriesArgs};
 use search::{run_search, SearchArgs};
 use serve::{run_serve, ServeArgs};
 use sources::{run_sources, SourcesArgs};
@@ -27,7 +29,7 @@ use web::run_web;
     name = "faus",
     about = "FauniSearch product CLI",
     long_about = "FauniSearch product CLI for starting the local runtime and using the App API.",
-    after_help = "Examples:\n  faus serve\n  faus status\n  faus library list\n  faus sources roots list --library-id demo\n  faus import --library-id demo report.pdf\n  faus search --library-id demo --text \"terminal screen\"\n  faus find ./notes --text \"quarterly revenue\"\n  faus jobs list\n  faus web"
+    after_help = "Examples:\n  faus serve\n  faus status\n  faus library list\n  faus sources roots list --library-id demo\n  faus import --library-id demo report.pdf\n  faus search --library-id demo --text \"terminal screen\"\n  faus find ./notes --text \"quarterly revenue\"\n  faus jobs list\n  faus queries list\n  faus web"
 )]
 struct Cli {
     #[arg(
@@ -67,6 +69,8 @@ enum Commands {
     Sources(SourcesArgs),
     #[command(about = "Manage runtime jobs through the App API")]
     Jobs(JobsArgs),
+    #[command(about = "Inspect and clear query history through the App API")]
+    Queries(QueriesArgs),
     #[command(
         about = "Open the Web experience for a local or existing runtime",
         long_about = "Open the FauniSearch Web experience. With an explicit base URL it connects to that App API; without one it may start the default local runtime. It uses built Web assets and does not start Vite.",
@@ -108,6 +112,7 @@ async fn run(cli: Cli) -> Result<(), CliFailure> {
         Commands::Find(args) => run_find(args, cli.base_url, cli.json, cli.debug).await,
         Commands::Sources(args) => run_sources(args, cli.base_url, cli.json, cli.debug).await,
         Commands::Jobs(args) => run_jobs(args, cli.base_url, cli.json, cli.debug).await,
+        Commands::Queries(args) => run_queries(args, cli.base_url, cli.json, cli.debug).await,
         Commands::Web => run_web(cli.base_url, cli.json, cli.debug).await,
     }
 }

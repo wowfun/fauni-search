@@ -195,6 +195,21 @@ fn jobs_list_help_describes_library_filter() {
 }
 
 #[test]
+fn queries_help_exposes_history_commands() {
+    let output = faus()
+        .args(["queries", "--help"])
+        .output()
+        .expect("faus queries help should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
+    for command in ["list", "show", "delete", "clear"] {
+        assert!(stdout.contains(command), "missing {command} in help");
+    }
+    assert!(stdout.contains("Inspect and clear query history"));
+}
+
+#[test]
 fn import_help_describes_inputs() {
     let output = faus()
         .args(["import", "--help"])
@@ -291,6 +306,85 @@ async fn jobs_list_uses_faus_base_url_and_outputs_json() {
     assert_eq!(payload["data"]["base_url"], server.base_url);
     assert_eq!(payload["data"]["jobs"][0]["job_id"], "job_1");
     assert_eq!(server.requests(), vec!["/jobs"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queries_list_uses_filters_and_outputs_json() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let output = faus()
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args([
+            "--json",
+            "queries",
+            "list",
+            "--limit",
+            "5",
+            "--cursor",
+            "queries:v1:2",
+            "--query-kind",
+            "text",
+            "--source",
+            "cli",
+            "--status",
+            "completed",
+        ])
+        .output()
+        .expect("faus queries list should run");
+
+    assert_success(&output);
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["data"]["base_url"], server.base_url);
+    assert_eq!(
+        payload["data"]["history"]["items"][0]["query_id"],
+        "query_1"
+    );
+    assert_eq!(
+        server.requests(),
+        vec!["/queries/history?limit=5&cursor=queries:v1:2&query_kind=text&source=cli&status=completed"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queries_show_delete_and_clear_use_history_paths() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+
+    let show = faus()
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args(["--json", "queries", "show", "query_1"])
+        .output()
+        .expect("faus queries show should run");
+    assert_success(&show);
+    let payload = stdout_json(&show);
+    assert_eq!(payload["data"]["query"]["query_id"], "query_1");
+
+    let delete = faus()
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args(["--json", "queries", "delete", "query_1"])
+        .output()
+        .expect("faus queries delete should run");
+    assert_success(&delete);
+    let payload = stdout_json(&delete);
+    assert_eq!(payload["data"]["delete"]["deleted"], 1);
+
+    let clear = faus()
+        .env("FAUS_BASE_URL", &server.base_url)
+        .args(["--json", "queries", "clear"])
+        .output()
+        .expect("faus queries clear should run");
+    assert_success(&clear);
+    let payload = stdout_json(&clear);
+    assert_eq!(payload["data"]["delete"]["deleted"], 2);
+
+    assert_eq!(
+        server.requests(),
+        vec![
+            "/queries/history/query_1",
+            "/queries/history/query_1",
+            "/queries/history",
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1537,28 +1631,39 @@ fn search_multiple_inputs_returns_not_supported_without_http() {
         .contains("combined search"));
 }
 
-#[test]
-fn search_file_all_libraries_returns_not_supported_without_http() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_file_all_libraries_uses_global_query_asset() {
+    let server = StatusServer::start(RuntimeMode::Ok).await;
+    let folder = temp_test_dir("search-all-libraries-image");
+    let query = folder.join("query.png");
+    fs::write(&query, b"image").expect("query image should be written");
+
     let output = faus()
         .args([
             "--base-url",
-            "http://127.0.0.1:1",
+            &server.base_url,
             "--json",
             "search",
             "--all-libraries",
             "--image",
-            "/tmp/query.png",
+            query.to_str().unwrap(),
         ])
         .output()
         .expect("faus search should run");
 
-    assert!(!output.status.success());
+    assert_success(&output);
     let payload = stdout_json(&output);
-    assert_eq!(payload["error"]["code"], "not_supported");
-    assert!(payload["error"]["hint"]
-        .as_str()
-        .expect("hint should be present")
-        .contains("--library-id"));
+    assert_eq!(
+        payload["data"]["query_asset"]["temp_asset_id"],
+        "asset_image_1"
+    );
+    let records = server.records();
+    assert_eq!(records[0].path, "/query-assets/images");
+    assert_eq!(records[1].path, "/search/image");
+    assert_eq!(
+        records[1].body.as_ref().unwrap()["search_scope"],
+        json!({ "kind": "all_libraries" })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1880,8 +1985,11 @@ async fn find_image_library_scope_uploads_and_searches_without_prepare() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn find_all_libraries_image_returns_not_supported_before_http() {
+async fn find_all_libraries_image_uses_global_query_asset() {
     let server = StatusServer::start(RuntimeMode::Ok).await;
+    let folder = temp_test_dir("find-all-libraries-image");
+    let query = folder.join("query.png");
+    fs::write(&query, b"image").expect("query image should be written");
 
     let output = faus()
         .args([
@@ -1891,19 +1999,25 @@ async fn find_all_libraries_image_returns_not_supported_before_http() {
             "find",
             "--all-libraries",
             "--image",
-            "/tmp/query.png",
+            query.to_str().unwrap(),
         ])
         .output()
         .expect("faus find should run");
 
-    assert!(!output.status.success());
+    assert_success(&output);
     let payload = stdout_json(&output);
-    assert_eq!(payload["error"]["code"], "not_supported");
-    assert!(payload["error"]["message"]
-        .as_str()
-        .expect("message should be present")
-        .contains("--all-libraries --image"));
-    assert!(server.records().is_empty());
+    assert_eq!(payload["data"]["scope"], json!({ "kind": "all_libraries" }));
+    assert_eq!(
+        payload["data"]["query_asset"]["temp_asset_id"],
+        "asset_image_1"
+    );
+    let records = server.records();
+    assert_eq!(records[0].path, "/query-assets/images");
+    assert_eq!(records[1].path, "/search/image");
+    assert_eq!(
+        records[1].body.as_ref().unwrap()["search_scope"],
+        json!({ "kind": "all_libraries" })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2833,6 +2947,12 @@ impl StatusServer {
                 "/libraries/{library_id}/source-roots/{source_root_id}/rescan",
                 post(rescan_source_root),
             )
+            .route("/query-assets/images", post(upload_global_query_image))
+            .route("/query-assets/videos", post(upload_global_query_video))
+            .route(
+                "/query-assets/documents",
+                post(upload_global_query_document),
+            )
             .route(
                 "/libraries/{library_id}/query-assets/images",
                 post(upload_query_image),
@@ -2849,6 +2969,14 @@ impl StatusServer {
             .route("/search/image", post(search_image))
             .route("/search/video", post(search_video))
             .route("/search/document", post(search_document))
+            .route(
+                "/queries/history",
+                get(list_query_history).delete(clear_query_history),
+            )
+            .route(
+                "/queries/history/{query_id}",
+                get(get_query_history).delete(delete_query_history),
+            )
             .with_state(state);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
@@ -3385,11 +3513,19 @@ async fn upload_query_image(
     upload_query_asset(state, &library_id, "images", "image", "image/png")
 }
 
+async fn upload_global_query_image(State(state): State<StatusServerState>) -> Response {
+    upload_global_query_asset(state, "images", "image", "image/png")
+}
+
 async fn upload_query_video(
     Path(library_id): Path<String>,
     State(state): State<StatusServerState>,
 ) -> Response {
     upload_query_asset(state, &library_id, "videos", "video", "video/mp4")
+}
+
+async fn upload_global_query_video(State(state): State<StatusServerState>) -> Response {
+    upload_global_query_asset(state, "videos", "video", "video/mp4")
 }
 
 async fn upload_query_document(
@@ -3403,6 +3539,10 @@ async fn upload_query_document(
         "document",
         "application/pdf",
     )
+}
+
+async fn upload_global_query_document(State(state): State<StatusServerState>) -> Response {
+    upload_global_query_asset(state, "documents", "document", "application/pdf")
 }
 
 fn upload_query_asset(
@@ -3434,6 +3574,114 @@ fn upload_query_asset(
         )
             .into_response(),
     }
+}
+
+fn upload_global_query_asset(
+    state: StatusServerState,
+    route_segment: &str,
+    source_type: &str,
+    content_type: &str,
+) -> Response {
+    let path = format!("/query-assets/{route_segment}");
+    state.record_http("POST", &path, None);
+    match state.runtime_mode {
+        RuntimeMode::ErrorEnvelope => server_error_envelope(),
+        RuntimeMode::MissingData => Json(json!({ "data": {} })).into_response(),
+        RuntimeMode::NotJson => (StatusCode::OK, "not-json").into_response(),
+        _ => (
+            StatusCode::CREATED,
+            Json(json!({
+                "data": {
+                    "temp_asset_id": format!("asset_{source_type}_1"),
+                    "preview": {
+                        "url": format!("/query-assets/{route_segment}/asset_{source_type}_1/preview")
+                    },
+                    "source_type": source_type,
+                    "content_type": content_type,
+                    "original_filename": format!("query.{source_type}")
+                }
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn list_query_history(
+    State(state): State<StatusServerState>,
+    uri: axum::http::Uri,
+) -> Response {
+    let path = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/queries/history")
+        .to_string();
+    state.record_http("GET", &path, None);
+    Json(json!({
+        "data": {
+            "items": [
+                query_history_summary("query_1", "text", "completed")
+            ],
+            "next_cursor": null
+        }
+    }))
+    .into_response()
+}
+
+async fn get_query_history(
+    Path(query_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    let path = format!("/queries/history/{query_id}");
+    state.record_http("GET", &path, None);
+    Json(json!({
+        "data": {
+            "query_id": query_id,
+            "created_at_ms": 1234,
+            "source": "cli",
+            "query_kind": "text",
+            "input_kind": "inline_text",
+            "input_summary": "quarterly revenue",
+            "scope_summary": "all_libraries",
+            "status": "completed",
+            "result_count": 2,
+            "input_available": true,
+            "input": {
+                "kind": "inline_text",
+                "text": "quarterly revenue"
+            },
+            "search_scope": {
+                "kind": "all_libraries"
+            },
+            "duration_ms": 42
+        }
+    }))
+    .into_response()
+}
+
+async fn delete_query_history(
+    Path(query_id): Path<String>,
+    State(state): State<StatusServerState>,
+) -> Response {
+    let path = format!("/queries/history/{query_id}");
+    state.record_http("DELETE", &path, None);
+    Json(json!({
+        "data": {
+            "deleted": 1,
+            "query_assets_deleted": 1
+        }
+    }))
+    .into_response()
+}
+
+async fn clear_query_history(State(state): State<StatusServerState>) -> Response {
+    state.record_http("DELETE", "/queries/history", None);
+    Json(json!({
+        "data": {
+            "deleted": 2,
+            "query_assets_deleted": 1
+        }
+    }))
+    .into_response()
 }
 
 async fn search_text(State(state): State<StatusServerState>, Json(body): Json<Value>) -> Response {
@@ -3545,6 +3793,21 @@ fn source_action_snapshot(source_root_id: &str, action: &str) -> Value {
         "rejected": [],
         "job_handle": "job_1",
         "job": job_snapshot("job_1", "demo", "source_action", "queued", action, None)
+    })
+}
+
+fn query_history_summary(query_id: &str, query_kind: &str, status: &str) -> Value {
+    json!({
+        "query_id": query_id,
+        "created_at_ms": 1234,
+        "source": "cli",
+        "query_kind": query_kind,
+        "input_kind": if query_kind == "text" { "inline_text" } else { "query_asset" },
+        "input_summary": "quarterly revenue",
+        "scope_summary": "all_libraries",
+        "status": status,
+        "result_count": 2,
+        "input_available": true
     })
 }
 
