@@ -79,13 +79,24 @@
   - `vector_spaces`
   - `unit_indexes`
   - `content_e2e_index_states`
+  - `query_history`
+  - `query_assets`
 - 当前结构化存储使用 SQLite 多表记录承载 durable truth，schema version 由 `state_meta` 单行记录
 - 当前写入策略仍采用单事务整表重写结构化表，而不是 row-by-row live sync；这只是写入实现策略，不再把全部 durable truth 放入单个 JSON snapshot
 - 旧的 `durable_state_snapshots.payload_json` 单行 snapshot store 不自动迁移；启动时遇到旧 store 必须拒绝启动并提示 operator 通过 reset / cutover 显式处理
 - 复杂叶子字段可以用 JSON 文本列保存，例如 source-root rules、Asset locator、Unit 生成规格与 neighbor context；高基数实体与实体顺序必须行化
 - 为承接 [002-state-and-data-model](../002-state-and-data-model/spec.md) 中的稳定关系，可以存在必要的关联记录族；但这些记录不得改变上游定义的事实源归属
-- `jobs`、`job_attempts`、`search_history` 与 `favorites` 不属于当前 v1 的 restart-durable subset；它们在重启后清空或缺失，不构成持久恢复失败
+- `query_history` 与 `query_assets` 属于当前 restart-durable subset。`query_assets` 的 metadata 可恢复；其文件载荷仍位于 runtime 临时文件区，过期或丢失后关联 history 必须显示 `input_available=false`
+- `jobs`、`job_attempts` 与 `favorites` 不属于当前 v1 的 restart-durable subset；它们在重启后清空或缺失，不构成持久恢复失败
 - 主结构化存储中的记录可以引用检索后端向量载荷；Unit 物化载荷和检索后端不得反向承担结构化真相职责
+
+## Query History 与 QueryAsset 持久化
+
+- `query_history` 保存已进入执行阶段的搜索摘要，字段至少包括：`query_id`、`created_at_ms`、`source`、`query_kind`、`input_kind`、`input_summary`、`input_json`、`search_scope_json`、`filters_json`、`target_content_types_json`、`top_k`、`status`、`result_count`、`error_code`、`error_message`、`duration_ms`
+- `query_assets` 保存二进制查询输入 metadata，字段至少包括：`query_asset_id`、`owner_scope`、可选 `library_id`、`source_type`、`content_type`、`path`、`original_filename`、`page_count`、`duration_ms`、`size_bytes`、`created_at_ms`、`expires_at_ms`
+- `owner_scope=global` 的 QueryAsset 可用于单库或所有库搜索；`owner_scope=library` 的 QueryAsset 只能用于对应 `library_id`
+- 默认只保留最近 1000 条 `query_history`。裁剪或删除 history 时，若关联 QueryAsset 不再被其他 history 引用，必须删除对应文件并移除 metadata
+- QueryHistory 不保存完整结果、embedding、Qdrant payload 或 Source/Asset/Unit 的副本
 
 ## 检索命名空间与 Unit 物化缓存
 

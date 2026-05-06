@@ -70,9 +70,9 @@
 | 内容端到端索引状态 (ContentE2eIndexState) | `content_id`、`pipe_signature`、`vector_space_id`、`indexed_at_ms` | 表示某个 Source Content 在指定处理链路和 VectorSpace 下已经完成 Asset / Unit / UnitIndex 提交 | 结构化存储 | 只在完成后写入；缺失时不得走复用快路径 |
 | 提供方配置与模型选择状态 (Provider/Model Selection State) | provider 配置、内容类型绑定、模型选择、覆盖层级 | 附着在全局默认与库级覆盖上 | 配置文件事实源 | repo 基线与 runtime 覆盖长期保留；不以 `state.sqlite` 为 durable truth |
 | 任务状态 (Job State) | `job_id`、任务类型、所有者引用、阶段状态、检查点引用 | 可指向库、来源根、来源、资产、单元或索引流程 | 当前切片中属于运行时状态 | 当前 restart 语义下重启清空，不自动恢复执行 |
-| 搜索历史记录 (Search History Record) | `search_history_id`、`library_id`、查询类型、过滤摘要、时间戳 | 属于单个库，可关联搜索输入与调试追踪 | 非当前 restart-durable subset | 当前切片不要求跨 restart 保留 |
+| 查询历史记录 (QueryHistory) | `query_id`、`source`、`query_kind`、`input_kind`、输入摘要、查询范围、过滤摘要、状态、结果计数、错误摘要、时间戳 | 表示一次已进入执行阶段的查询；不保存完整结果、embedding 或检索载荷 | 结构化存储 | 默认保留最近 1000 条；删除历史时同步清理仍关联的查询资产文件 |
 | 收藏记录 (Favorite Record) | `favorite_id`、`library_id`、目标对象引用、创建时间 | 属于单个库，指向被收藏的稳定对象 | 非当前 restart-durable subset | 当前切片不要求跨 restart 保留 |
-| 临时查询资产 (Temporary Query Asset) | `temp_asset_id`、查询类型、来源、可选查询定位摘要、过期窗口 | 服务于图片 / 视频 / 文档查询的临时输入链路 | Rust 主服务管理的临时资产存储区 | 纯临时；丢失后需重新上传或重新选择 |
+| 查询资产 (QueryAsset) | `query_asset_id`、`owner_scope`、可选 `library_id`、`source_type`、`content_type`、文件路径、文件摘要、过期窗口 | 服务于图片 / 视频 / 文档查询的临时输入链路；不进入 Source / Asset / Unit / UnitIndex | 结构化存储 + runtime 临时文件 | metadata 跨 restart 保留；文件按 TTL 清理，过期后关联历史仍保留但输入不可重用 |
 | 运行时驻留状态 (Runtime Resident State) | 运行时 / 提供方配置档引用、健康状态、设备分配、已加载模型或后端摘要、有效能力快照 | 属于 Python sidecar、modeld 或其他运行时进程，不承载长期业务事实 | 运行时进程自身 | 可通过重连、重载或重新探测恢复 |
 
 ## 核心对象与关系
@@ -87,6 +87,8 @@
 - `UnitIndex` 是 `unit_id + vector_space_id` 的索引就绪状态。向量命中来自 `UnitIndex` 指向的检索载荷，搜索结果返回 `Source + Asset`
 - `ContentE2eIndexState` 是粗粒度完成标记。它只表示某个 `content_id + pipe_signature + vector_space_id` 已经完整生成 Asset / Unit、完成 embedding 并提交 UnitIndex
 - `vector_ref` 是 `UnitIndex` 指向检索后端具体向量点或向量载荷位置的不透明引用。它不表达 VectorSpace、active / retired、Source、Asset 或 Unit 关系
+- `QueryHistory` 是查询事件记录，只保存输入、范围、过滤、状态与结果数量摘要。它不是结果缓存，不承载可搜索内容，也不得成为 Source / Asset / Unit 的替代事实源
+- `QueryAsset` 是二进制查询输入载体。全局 QueryAsset 可用于 `all_libraries` 或单库搜索；库级 QueryAsset 只可用于对应库范围。文本查询不创建 QueryAsset
 
 最小关系固定为：
 
@@ -98,6 +100,7 @@ Source -> SourceAssetLocation -> Asset
 Asset -> Unit
 Unit + vector_space_id -> UnitIndex
 UnitIndex.vector_ref -> backend vector point or vector payload
+QueryHistory.input_json -> inline text | QueryAsset | library object reference
 ```
 
 ## 典型对象形态
@@ -194,9 +197,9 @@ ContentE2eIndexState(video file bytes, video_keyframe_pipe:v1, image vector_spac
 
 ## 跨重启 durable 子集
 
-- 当前切片跨 restart 恢复的最小 durable truth 固定为：`libraries`、`library_configs`、`library_source_roots`、`library_source_root_rules`、`contents`、`sources`、`assets`、`source_asset_locations`、`units`、`vector_spaces`、`unit_indexes`、`content_e2e_index_states`
+- 当前切片跨 restart 恢复的最小 durable truth 固定为：`libraries`、`library_configs`、`library_source_roots`、`library_source_root_rules`、`contents`、`sources`、`assets`、`source_asset_locations`、`units`、`vector_spaces`、`unit_indexes`、`content_e2e_index_states`、`query_history`、`query_assets`
 - 未提交为 active 的索引状态只在对应 job 运行期间或可恢复检查点中有意义；job 失败、中断后若不能恢复并验证成功，必须丢弃或隐藏，不得让其长期承担搜索事实
-- `jobs`、`latest_job_id`、`job_order`、临时查询资产、search history、favorites 与 watcher runtime scratch 不属于当前 restart-durable subset
+- `jobs`、`latest_job_id`、`job_order`、favorites 与 watcher runtime scratch 不属于当前 restart-durable subset
 - provider probe cache 与 resolved model 摘要不属于当前 restart-durable subset；应用重启后需要重新探测或重新生成观察快照
 - 来源根的 `watch_state`、debounce 队列、待处理路径集合与最近一次运行时错误属于 runtime scratch；应用启动后需要重新播种，而不是按上次进程内状态直接恢复
 - active UnitIndex 是否真正可搜索，除结构化记录外，还取决于 `vector_ref` 指向的检索后端载荷是否仍存在
@@ -211,8 +214,8 @@ ContentE2eIndexState(video file bytes, video_keyframe_pipe:v1, image vector_spac
 | 检索索引与向量状态 | 检索后端中的 active 向量载荷与 retired 清理候选 | 检索后端 | Rust 主服务 | UnitIndex、统计信息、调试视图 | 可通过重新编码与重建索引恢复 |
 | Unit 物化载荷 | PDF 页图、OCR 文本、视频关键帧、预览图等实际文件载荷 | 临时工作区、可清理缓存或后续专门缓存层 | Rust 主服务 | 内存缓存、临时工作文件 | 可从 Source 原始字节与处理流程重建 |
 | 任务状态与队列 | 任务状态、检查点引用 | 当前切片中属于 Rust 主服务运行态 | Rust 主服务 | 前端进度显示、诊断快照 | 当前 restart 语义下重启清空，不自动恢复 |
-| 辅助操作记录 | 搜索历史记录、收藏记录 | 非当前 restart-durable subset | Rust 主服务 | 最近搜索列表缓存、界面收藏状态 | 当前切片不自动恢复，应通过后续专题显式定义 |
-| 临时查询资产 | 临时查询资产 | Rust 主服务管理的临时资产存储区 | Rust 主服务 | 前端上传状态、sidecar 输入副本 | 不保证持久化，需要重新上传或重新选择 |
+| 辅助操作记录 | QueryHistory、收藏记录 | QueryHistory 属于结构化存储；收藏记录非当前 restart-durable subset | Rust 主服务 | 最近搜索列表缓存、界面收藏状态 | QueryHistory 按保留策略恢复；收藏记录当前切片不自动恢复 |
+| 查询资产 | QueryAsset metadata 与临时文件 | 结构化存储 + runtime 临时文件 | Rust 主服务 | 前端上传状态、sidecar 输入副本 | metadata 可恢复；文件过期或丢失后关联历史显示 `input_available=false` |
 | 运行时驻留状态 | 运行时驻留状态 | Python sidecar、modeld 或所属运行时进程 | Python sidecar、modeld 或所属运行时 | Rust 侧健康快照、配置偏好、诊断视图 | 可通过重连、重载或重新探测恢复 |
 
 - 前端 / 调用方可以持有会话级交互状态，但不承载系统共享事实源

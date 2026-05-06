@@ -96,7 +96,7 @@
 - 首版只允许一个 query input；多个输入返回 `not_supported`，hint 说明组合查询尚未启用
 - `--text` 支持 `--library-id` 与 `--all-libraries`
 - `--image`、`--video`、`--document` 只支持 `--library-id`
-- 非文本输入与 `--all-libraries` 组合时返回 `not_supported`
+- 非文本输入与 `--all-libraries` 组合时使用全局 QueryAsset 上传入口
 - `--top-k` 必须大于 0
 - `--debug` 出现时，search 请求体必须携带 `debug: true`
 - `faus search` 不携带索引可见性切换字段；本专题不为基础 search 命令开启未提交索引载荷可见性
@@ -109,9 +109,10 @@
 ## HTTP 调用
 
 - 文本搜索请求 `POST /search/text`
-- 图片搜索先请求 `POST /libraries/{library_id}/query-assets/images`，再请求 `POST /search/image`
-- 视频搜索先请求 `POST /libraries/{library_id}/query-assets/videos`，再请求 `POST /search/video`
-- 文档搜索先请求 `POST /libraries/{library_id}/query-assets/documents`，再请求 `POST /search/document`
+- 单库图片搜索先请求 `POST /libraries/{library_id}/query-assets/images`，再请求 `POST /search/image`
+- 单库视频搜索先请求 `POST /libraries/{library_id}/query-assets/videos`，再请求 `POST /search/video`
+- 单库文档搜索先请求 `POST /libraries/{library_id}/query-assets/documents`，再请求 `POST /search/document`
+- `--all-libraries` 图片 / 视频 / 文档搜索先请求全局 `POST /query-assets/images|videos|documents`，再请求对应 `/search/*` 并发送 `search_scope.kind=all_libraries`
 - 非文本搜索的 search 请求体使用上传返回的 `temp_asset_id`
 - 上传成功要求响应包含 `data.temp_asset_id`
 - 搜索成功要求响应包含 `data.results` 数组
@@ -159,7 +160,7 @@
 ## 错误输出
 
 - 缺失显式搜索范围、缺失查询输入、`--top-k 0` 或 locator flag 只出现一端是 CLI 层错误，不发起 HTTP 请求
-- 多个 query input 或非文本 `--all-libraries` 返回 CLI 层 `not_supported`
+- 多个 query input 返回 CLI 层 `not_supported`；非文本 `--all-libraries` 使用全局 QueryAsset 上传入口
 - 无效 base URL、本地查询文件无法读取、连接失败、请求超时、非 JSON 响应或响应契约不匹配属于 CLI 层错误
 - 服务端统一错误载荷必须映射到 CLI 错误对象中，不得改写服务端错误语义
 - CLI 层错误可以附带 `hint`，用于提示用户启动 `faus serve`、检查显式 base URL、等待服务 ready、确认目标是否为 FauniSearch server，或说明组合查询尚未启用

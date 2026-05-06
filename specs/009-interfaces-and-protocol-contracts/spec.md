@@ -117,8 +117,7 @@
   - 所有库：`{ "kind": "all_libraries" }`
   - 预留多库子集：`{ "kind": "library_set", "library_ids": ["...", "..."] }`
 - 端点支持范围必须显式记录：
-  - `/search/text` 必须接受 `library` 与 `all_libraries`
-  - `/search/image`、`/search/video` 与 `/search/document` 的最低稳定支持范围是 `library`
+  - `/search/text`、`/search/image`、`/search/video` 与 `/search/document` 必须接受 `library` 与 `all_libraries`
   - 当请求给出端点尚未支持的 `search_scope.kind` 时，服务端必须通过统一错误载荷返回 `not_supported`
 - `/search/text` 的请求载荷必须携带 `text`
 - `/search/image` 的请求载荷必须携带 `image_input`
@@ -133,6 +132,11 @@
 - 视频查询的稳定输入对象至少应支持以下两种显式编码：
   - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "...", "locator": { "start_ms": ..., "end_ms": ... }? }`
   - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "asset_id": "..."?, "locator": { "start_ms": ..., "end_ms": ... }? }`
+- 文档查询的稳定输入对象至少应支持以下两种显式编码：
+  - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "...", "locator": { "start_page": ..., "end_page": ... }? }`
+  - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "asset_id": "..."?, "locator": { "start_page": ..., "end_page": ... }? }`
+- `search_scope.kind=all_libraries` 下，非文本查询的临时资产引用必须指向全局 QueryAsset；库级 QueryAsset 不得静默跨库使用
+- `search_scope.kind=all_libraries` 下，`library_object.asset_id` 可以作为全局对象引用；`source_id` 输入仍必须使用单库范围
 - 文档查询的稳定输入对象至少应支持以下两种显式编码：
   - 临时查询资产引用：`{ "kind": "temp_asset", "temp_asset_id": "...", "locator": { "start_page": ..., "end_page": ... }? }`
   - 库内对象引用：`{ "kind": "library_object", "source_id": "...", "locator": { "start_page": ..., "end_page": ... }? }`
@@ -418,19 +422,29 @@
 - `POST /libraries/{library_id}/maintenance` 至少应支持：
   - `cleanup_retired_indexes`
 - `POST /libraries/{library_id}/imports` 的首个稳定输入变体是本地路径列表；本专题不阻止未来新增上传或其他输入变体
-- 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/images`
-- 若通过 HTTP 暴露，临时查询视频上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/videos`
-- 若通过 HTTP 暴露，临时查询文档上传入口的稳定入口应包括 `POST /libraries/{library_id}/query-assets/documents`
+- 若通过 HTTP 暴露，临时查询图片上传入口的稳定入口应包括 `POST /query-assets/images` 与 `POST /libraries/{library_id}/query-assets/images`
+- 若通过 HTTP 暴露，临时查询视频上传入口的稳定入口应包括 `POST /query-assets/videos` 与 `POST /libraries/{library_id}/query-assets/videos`
+- 若通过 HTTP 暴露，临时查询文档上传入口的稳定入口应包括 `POST /query-assets/documents` 与 `POST /libraries/{library_id}/query-assets/documents`
 - `POST /libraries/{library_id}/query-assets/images` 的首个稳定输入变体是单图片上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
 - `POST /libraries/{library_id}/query-assets/videos` 的首个稳定输入变体是单视频上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
 - `POST /libraries/{library_id}/query-assets/documents` 的首个稳定输入变体是单文档上传；本专题不阻止未来新增批量上传或其他查询资产输入变体
 - 若通过 HTTP 暴露，临时查询资产预览资源的稳定入口应包括：
+  - `GET /query-assets/images/{temp_asset_id}/preview`
+  - `GET /query-assets/videos/{temp_asset_id}/preview`
+  - `GET /query-assets/documents/{temp_asset_id}/preview`
   - `GET /libraries/{library_id}/query-assets/images/{temp_asset_id}/preview`
   - `GET /libraries/{library_id}/query-assets/videos/{temp_asset_id}/preview`
   - `GET /libraries/{library_id}/query-assets/documents/{temp_asset_id}/preview`
 - 临时查询图片上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
 - 临时查询视频上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
 - 临时查询文档上传成功响应至少应返回：`temp_asset_id`、稳定 `preview` 资源引用对象，以及最小输入摘要
+- Query history 入口固定为：
+  - `GET /queries/history`
+  - `GET /queries/history/{query_id}`
+  - `DELETE /queries/history/{query_id}`
+  - `DELETE /queries/history`
+- `GET /queries/history` 必须返回摘要列表，并支持 `limit`、`cursor`、`query_kind`、`source`、`status` 过滤；摘要不得返回完整 text 或完整 filter JSON
+- `GET /queries/history/{query_id}` 必须返回完整 input、scope 与 filter，但仍不得返回完整 search results
 - 动作型成功响应应在 `data` 中返回至少以下信息：
   - `accepted`
   - `rejected`

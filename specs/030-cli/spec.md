@@ -179,7 +179,7 @@
   - `faus search --library-id <library_id> --document <path>`
 - 图片、视频与文档搜索优先支持一键上传搜索：CLI 先通过 query asset upload API 上传本地文件，再用返回的 `temp_asset_id` 调用对应搜索端点
 - 搜索范围必须显式给出；CLI 不隐式猜测当前库或所有库
-- 文本搜索支持单库和所有库；非文本搜索遵守服务端能力边界，最低稳定能力只要求单库搜索
+- 文本、图片、视频与文档搜索支持单库和所有库；`--all-libraries` 的非文本搜索使用全局 QueryAsset 上传入口
 - 当用户请求服务端尚不支持的范围、组合查询或输入形态时，应返回 `not_supported` 或等价服务端错误
 - 搜索命令应支持 `top_k`、`cursor`、`target_content_types`、`debug` 等与公开搜索契约对应的常用参数
 - 视频和文档搜索可以通过命令参数传递 locator 范围；复杂 filters 与库内对象复用属于扩展能力
@@ -193,12 +193,14 @@
   - `faus find <folder> --text <query>`
   - `faus find <folder> --image <path>`
   - `faus find --all-libraries --text <query>`
-  - `faus find --library-id <library_id> --text <query>`
-  - `faus find --library-id <library_id> --image <path>`
+- `faus find --library-id <library_id> --text <query>`
+- `faus find --library-id <library_id> --image <path>`
+- `faus find --all-libraries --image <path>`
 - `faus find` 是 client 型命令，只连接已有 Rust 主服务，不启动本地 runtime、不直接读写 SQLite、Qdrant、runtime 文件或 sidecar
 - 有 `<folder>` 时，`faus find` 会通过公开 API 自动准备 folder：按规范化 folder path 派生 `faus-find-<16 hex>` 托管库，创建或复用来源根，并默认触发 source-root `refresh`
 - 无 `<folder>` 时，调用方必须显式传入 `--all-libraries` 或 `--library-id <library_id>`；该模式只搜索已有 active 索引，不创建库、不创建来源根、不触发 refresh / rescan、不等待 prepare job
-- 文本搜索支持单库和所有库；图片搜索当前只支持单库 scope，因为 query asset upload API 是库级接口
+- 文本与图片搜索支持单库和所有库；`--all-libraries --image` 使用全局 QueryAsset 上传入口
+- `faus queries list/show/delete/clear` 用于查看和清理已执行查询历史；首批不提供 rerun
 - `faus find` 默认等待本次 folder 准备任务完成后搜索；显式 `--wait-mode partial` 使用 active-only 轮询，在已有 Source 级 active 结果时提前返回
 - 结果面向定位任务组织：命中按 Asset 返回，并在 `locations` 中列出具体库、Source URI、文档页、图片或视频时间片段；Unit 只作为匹配证据
 - `faus find --json` 必须返回稳定机器结构，至少表达 scope、folder 或显式搜索范围、prepare 状态、results、locations 与可选 `job_id`

@@ -70,6 +70,8 @@
 - 文档查询长期上允许携带一个可选页范围；缺失时按整份文档解释，存在时按指定文档片段解释
 - 文档查询若启用库内对象引用，长期上通过 Source 表达“整份文档或显式页范围”；能力专题可以额外允许通过 `document_page` Asset 派生出单页查询，但公开请求仍应保持单一文档输入语义
 - 视频查询必须受大小与时长上限约束；超限请求应被明确拒绝，但具体阈值不在本专题中固定
+- 通过验证并进入执行阶段的搜索必须写入 QueryHistory。成功记录 `completed` 与结果数量；执行失败记录 `failed` 与 `error_code / error_message`；参数验证失败不写入 history
+- QueryHistory 不保存完整搜索结果。调用方若要取得当前结果，应重新执行搜索
 
 ## 搜索目标与公共控制项
 
@@ -78,10 +80,8 @@
   - 单库：`library`
   - 所有库：`all_libraries`
   - 预留的多库子集：`library_set`
-- 当前第一阶段公开切片中：
-  - `text` 查询允许 `library` 与 `all_libraries`
-  - `image` / `video` / `document` 查询当前只允许 `library`
-  - 当端点尚不支持当前 `search_scope` 时，系统必须显式返回 `not_supported`
+- 当前公开切片中，`text`、`image`、`video` 与 `document` 查询都允许 `library` 与 `all_libraries`
+- `all_libraries` 非文本查询必须使用全局 QueryAsset，或使用全局可解析的 `library_object.asset_id`；`source_id` 型库内对象查询仍只允许单库范围
 - 当 `search_scope.kind = library` 时，默认情况下搜索会并行查询该库全部已启用内容类型，并按这些内容类型当前解析出的一个或多个 VectorSpace 并行执行后再融合排序
 - 当 `search_scope.kind = all_libraries` 时，系统必须只查询已进入可搜索状态的库，并在成功响应中显式保留每个命中的来源库身份
 - 请求可以通过 `target_content_types` 显式限制本次查询的内容类型子集；当前第一阶段中，这些内容类型约束必须按 `search_scope` 中实际参与的每个库分别验证

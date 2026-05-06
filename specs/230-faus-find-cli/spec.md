@@ -85,7 +85,7 @@
 - `--library-id` 的语义按模式区分：有 folder 时表示承载该 folder 的库覆盖；无 folder 时表示搜索 scope
 - 无 folder 的 scope-only 模式不创建库、不创建来源根、不触发 refresh / rescan、不等待 prepare job
 - scope-only 模式下传入 `--rescan`、显式 `--wait-mode`、显式 `--wait-timeout-ms` 或显式 `--poll-interval-ms` 是 `validation_failed`
-- `faus find --all-libraries --image <path>` 当前必须返回 CLI 层 `not_supported`，因为 query asset upload API 是库级接口；`faus find --library-id <id> --image <path>` 可以上传到该库并搜索
+- `faus find --all-libraries --image <path>` 必须使用全局 QueryAsset 上传入口；`faus find --library-id <id> --image <path>` 使用库级 QueryAsset 上传入口
 - `--wait-mode complete` 是默认模式，表示等待本次准备任务结束后再搜索；若超时，应返回当前可解释状态和统一错误，不得静默降级为无结果
 - `--wait-mode partial` 表示允许在准备任务仍运行时轮询 active 搜索；一旦已有 Source 级 active 结果即可返回
 - 默认 `--wait-timeout-ms` 固定为 `300000`，默认 `--poll-interval-ms` 固定为 `1000`
@@ -123,6 +123,7 @@
 - `faus find --all-libraries --text <query>` 必须调用 `POST /search/text`，并发送 `search_scope.kind=all_libraries`
 - `faus find --library-id <library_id> --text <query>` 必须调用 `POST /search/text`，并发送 `search_scope.kind=library` 与对应 `library_id`
 - `faus find --library-id <library_id> --image <path>` 必须先调用 `/libraries/{library_id}/query-assets/images` 上传 query image，再调用 `POST /search/image`
+- `faus find --all-libraries --image <path>` 必须先调用 `/query-assets/images` 上传全局 query image，再调用 `POST /search/image` 并发送 `search_scope.kind=all_libraries`
 - Scope-only 搜索不得发送 `filters.path_prefix`；它只表达显式 library 或 all-libraries scope
 - Scope-only JSON 输出必须表达 `scope`，并将 `prepare` 标记为 skipped：`status=skipped`、`action=none`、`job_id=null`、`wait_mode=none`
 
@@ -283,7 +284,7 @@ Scope-only 文本搜索的 JSON 输出必须保持同一外层形状，但不包
 - `faus find` 被定义为 client 型命令，不启动 runtime
 - 文本与图片查询入口明确，且当前只允许单一查询输入
 - 无 folder 时必须显式给出 `--all-libraries` 或 `--library-id`
-- Scope-only 模式明确不 prepare folder，且 `--all-libraries --image` 返回 `not_supported`
+- Scope-only 模式明确不 prepare folder，且 `--all-libraries --image` 使用全局 QueryAsset，不得创建库、来源根或 source-root job
 - 默认托管库由规范化 folder path 的 SHA-256 摘要派生为 `faus-find-<16 hex>`
 - folder 自动准备明确通过公开 API 创建或复用库与来源根，并默认触发 source-root `refresh`
 - `--rescan` 明确强制触发 source-root `rescan`
