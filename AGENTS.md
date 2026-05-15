@@ -1,11 +1,17 @@
-- 规格先行，在代码实现前，永远记得先 READ/UPDATE/CREATE `specs/<topic>/spec.md`
-- 实现落地后更新 `CHANGELOG.md`
+- Specs first: before implementing code, always READ/UPDATE/CREATE `specs/<topic>/spec.md`.
+- After implementation lands, update `CHANGELOG.md`.
 
 ## Tests
-- 涉及代码逻辑变更时，优先补充或更新最贴近变更面的测试；若没有有意义的窄测试，再退到更高层验证
-- 窄测试用于证明改动本身，不是忽略明显相关失败的许可；若仍有与改动面 plausibly related 的失败，必须明确说明
-- 不要为了消除失败而直接修改 snapshot、baseline、expected-failure、ignore 列表等“结果文件”，除非用户在当前对话中明确批准
-- 若仓库已存在 snapshot、golden 或其他基线测试，只有在输出变化是有意行为变更时才更新它们，并应把这些更新当作评审材料而不是机械噪音
-- 如果无法运行测试，或仓库当前还没有合适的测试入口，必须在结论中明确说明缺口，而不是假定已验证
-- 对较窄改动，优先报告与改动直接相关的验证；不要为了形式重复运行完全相同的检查
-- 测试应尽量避免泄漏环境与全局状态；若测试会修改 env、计时器、临时目录、全局单例或进程级状态，结束前必须恢复或清理
+- After code changes, run the relevant validation path. When a unified default validation entrypoint exists, prefer it for broad validation.
+- For code logic changes, prefer adding or updating the closest meaningful test. If no narrow test exists, fall back to higher-level validation.
+- Narrow validation is not permission to ignore plausibly related failures; fix them or report them explicitly.
+- If a test file is created or changed, run that test and iterate until it passes.
+- Documentation-only or changelog-only changes do not require code tests unless executable examples, generated artifacts, or validation instructions changed.
+- Default validation must use deterministic local harnesses and fake or test providers.
+- Real provider, API-key, or live-service validation is opt-in only.
+- Keep tests isolated from real user config, credentials, environment, temp state, global mocks, timers, sockets, and persistent host state; restore or clean up any such state touched by a test.
+- Avoid brittle change-detector tests over volatile inventories, generated lists, workflow text, or model and provider catalogs.
+- Prefer behavior and invariant assertions with structured comparisons over field-by-field checks or string-grep checks.
+- Update snapshots, baselines, expected-failure records, ignore lists, or other result files only for intentional behavior changes or with explicit approval; treat those diffs as review material.
+- Do not rerun the exact same validation only for formality; report the validation most relevant to the changed surface.
+- If validation cannot be run, report the attempted validation path and the blocker.
